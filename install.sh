@@ -28,11 +28,11 @@ DESKTOP_FILE="${DESKTOP_DIR}/${ICON_ID}.desktop"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Application Python modules (relative to SRC_DIR)
-PY_MODULES=(app.py backend.py dialogs.py models.py styles.py window.py)
+PY_MODULES=(app.py backend.py dialogs.py models.py styles.py window.py notifier.py)
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 echo -e "
-${BOLD}${CYAN} 
+${BOLD}${CYAN}
   ██████╗  █████╗  ██████╗██╗  ██╗██╗   ██╗██████╗
   ██╔══██╗██╔══██╗██╔════╝██║  ██║██║   ██║██╔══██╗
   ██████╔╝███████║██║     ███████║██║   ██║██████╔╝
@@ -71,7 +71,7 @@ success "All source files present."
 # ─────────────────────────────────────────────────────────────────────────────
 info "Checking dependencies…"
 
-REQUIRED_PKGS=(python gtk4 libadwaita python-gobject)
+REQUIRED_PKGS=(python gtk4 libadwaita python-gobject pacman-contrib libnotify)
 MISSING_PKGS=()
 for pkg in "${REQUIRED_PKGS[@]}"; do
     pacman -Qi "$pkg" &>/dev/null || MISSING_PKGS+=("$pkg")
