@@ -12,6 +12,7 @@ from gi.repository import Gtk, Adw, Gio
 
 from styles import load_css
 from window import pachubWindow
+from i18n import tr
 
 
 class pachubApp(Adw.Application):
@@ -86,7 +87,7 @@ class pachubApp(Adw.Application):
         about.set_license_type(Gtk.License.GPL_2_0)
         about.set_website("https://github.com/mrks1469/PacHub")
         about.set_issue_url("https://github.com/mrks1469/PacHub/issues")
-        about.set_comments("A powerful Pacman/AUR front end.\n")
+        about.set_comments(tr("A powerful Pacman/AUR front end.\n"))
         about.set_developers(["Manpreet Singh https://github.com/mrks1469"])
         about.present(self.win)
 

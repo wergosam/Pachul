@@ -9,6 +9,8 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Gio, GObject, Pango
 
+from i18n import tr
+
 # ─── Repository badge mapping ─────────────────────────────────────────────────
 
 REPO_BADGE_CLASS = {
@@ -163,7 +165,7 @@ class PackageRowContent(Gtk.Box):
             self.status_badge.remove_css_class(cls)
         if pkg.pkg_status in ("installed", "update"):
             is_update = pkg.pkg_status == "update"
-            self.status_badge.set_label("UPDATE" if is_update else "INSTALLED")
+            self.status_badge.set_label(tr("UPDATE") if is_update else tr("INSTALLED"))
             self.status_badge.add_css_class("status-update" if is_update else "status-installed")
             self.status_badge.set_visible(True)
         else:

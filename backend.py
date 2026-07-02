@@ -66,6 +66,7 @@ _DEFAULT_SETTINGS = {
     "show_news_before_upgrade": True,
     "notify_updates":           True,
     "bg_check_interval":        "daily",  # hourly | 6h | daily
+    "language":                 "en",     # en | de
 }
 _settings_cache = None
 
@@ -886,10 +887,14 @@ def send_update_notification(n):
     """Send a desktop notification about n available updates (via notify-send)."""
     if run_command("which notify-send 2>/dev/null")[1] != 0:
         return
-    body = f"{n} package update{'s' if n != 1 else ''} can be installed."
+    from i18n import tr   # local import: avoids a circular import with i18n.py
+    title = tr("Updates Available")
+    body = tr("{n} package update can be installed.") if n == 1 \
+        else tr("{n} package updates can be installed.")
+    body = body.format(n=n)
     run_command(
         "notify-send --app-name=PacHub --icon=io.github.mrks1469.pachub "
-        f"{shlex.quote('PacHub: Updates Available')} {shlex.quote(body)}")
+        f"{shlex.quote('PacHub: ' + title)} {shlex.quote(body)}")
 
 
 def run_update_notification_check():

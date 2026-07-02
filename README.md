@@ -16,7 +16,7 @@
 
 ## Overview
 
-PacHub is a clean, fast GUI frontend for `pacman` and the AUR. It lets you search, install, update and manage packages without touching the terminal — while still giving you full control over repositories, orphans, mirrors and cache.
+PacHub is a clean, fast GTK4 / libadwaita frontend for `pacman` and the AUR. It lets you search, install, update and manage packages without touching the terminal — while still giving you full control over repositories, orphans, mirrors and cache. PacHub follows the GNOME HIG and adapts to your system's light or dark style automatically.
 
 ---
 
@@ -44,22 +44,26 @@ PacHub is a clean, fast GUI frontend for `pacman` and the AUR. It lets you searc
 - **Installed packages** — view, filter and manage what's on your system
 - **AUR / Foreign** packages tracked separately
 - **Update manager** — see available updates at a glance and upgrade in one click
+- **Downgrade** — reinstall an older cached version straight from `/var/cache/pacman/pkg`
 - **Tools**
   - Sync Databases (`F5`)
   - Check for Updates (`Strg+U`)
-  - Rate Mirrors
+  - Rate Mirrors — geo-aware ranking via `rate-mirrors`, with sort order, protocol filter, backup and mirror-count options
   - Find Orphans
   - Clean Cache
   - Manage Repositories
-  - View Config Files (`.pacnew`)
+  - View / Merge Config Files (`.pacnew` / `.pacsave`) with side-by-side diff
   - Package History
   - System Info
   - Export / Import Package Lists
   - View PKGBUILD (AUR)
   - Hold / Unhold Selected Packages
   - Mark as Explicit or Dependency
+  - Arch Linux news check before system upgrades
+- **Background update checks** — an optional `systemd --user` timer checks for updates and sends a desktop notification even while PacHub is closed
+- **Multi-language interface** — English, German, French and Italian, switchable in Preferences
 - **Keyboard shortcuts** for all common actions
-- Light and dark theme support
+- Light and dark theme support (follows the system style)
 
 ---
 
@@ -76,8 +80,7 @@ yay -S pachub
 ```bash
 git clone https://github.com/yourname/pachub.git
 cd pachub
-pip install -r requirements.txt
-python pachub.py
+python app.py
 ```
 
 **Dependencies:**
@@ -85,9 +88,13 @@ python pachub.py
 | Package | Purpose |
 |---------|---------|
 | `python` ≥ 3.10 | Runtime |
-| `python-pyqt6` | GUI framework |
+| `python-gobject` | GTK4 / Adwaita Python bindings |
+| `gtk4` | GUI toolkit |
+| `libadwaita` | GNOME-style widgets and theming |
 | `pacman` | Package backend |
-| `yay` or `paru` | AUR support (optional) |
+| `yay`, `paru` or `pikaur` | AUR support (optional, auto-detected) |
+| `rate-mirrors` | Mirror ranking (optional) |
+| `systemd` | Background update-check timer (optional) |
 
 ---
 
@@ -95,11 +102,21 @@ python pachub.py
 
 | Action | Shortcut |
 |--------|----------|
+| Focus Search | `Strg+F` |
 | Sync Databases | `F5` |
-| Check for Updates | `Strg+U` |
 | Refresh List | `Strg+R` |
+| Check for Updates | `Strg+U` |
 | Preferences | `Strg+,` |
 | Keyboard Shortcuts | `Strg+?` |
+| Quit | `Strg+Q` |
+
+### Background update notifications
+
+Enable **Run background update checks** in Preferences to install a `systemd --user` timer (`pachub-update-check`). It periodically runs headlessly (no GTK dependency in this path) and sends a desktop notification via `notify-send` when updates are available — even if PacHub itself isn't running. The check interval (hourly / every 6 hours / daily) is also configurable in Preferences.
+
+### Language
+
+PacHub currently ships with **English, German, French and Italian** translations. Change the interface language under Preferences → Language; the change is saved immediately and takes full effect after restarting PacHub.
 
 ---
 
@@ -107,10 +124,16 @@ python pachub.py
 
 ```
 pachub/
-├── pachub.py          # Entry point
-├── ui/                # Qt UI components
-├── backend/           # pacman / AUR integration
-├── assets/            # Icons and themes
+├── app.py         # Adw.Application entry point, GActions & accelerators
+├── window.py      # Main window: sidebar, list view, detail panel, search page
+├── dialogs.py      # All secondary dialogs (repos, mirrors, orphans, history,
+│                    #   downgrade, PKGBUILD, pacdiff, preferences, shortcuts, news)
+├── models.py       # GObject package model, virtualized ListView, sidebar rows
+├── backend.py      # pacman / AUR integration, settings, systemd timer helpers
+├── notifier.py     # Headless entry point for the systemd background timer
+├── styles.py       # Application-wide CSS
+├── i18n.py         # Dictionary-based translations (EN / DE / FR / IT)
+├── screenshots/    # README assets
 └── requirements.txt
 ```
 
@@ -125,6 +148,8 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 3. Commit your changes: `git commit -m 'Add my feature'`
 4. Push to the branch: `git push origin feature/my-feature`
 5. Open a Pull Request
+
+New UI strings should be added to all four language tables in `i18n.py` (`STRINGS_DE`, `STRINGS_FR`, `STRINGS_IT`) to keep translations complete.
 
 ---
 
