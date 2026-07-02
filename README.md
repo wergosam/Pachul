@@ -78,7 +78,7 @@ yay -S pachub
 ### Manual (from source)
 
 ```bash
-git clone https://github.com/yourname/pachub.git
+git clone https://github.com/wergosam/pachub.git
 cd pachub
 python app.py
 ```
