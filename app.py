@@ -1,28 +1,67 @@
 """
-PacHub — app.py
+Pachul — app.py
 Adw.Application subclass: registers GActions and wires the About dialog.
 """
 
+import os
 import sys
 
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, Gio
+from gi.repository import Gtk, Adw, Gio, Gdk
 
 from styles import load_css
-from window import pachubWindow
+from window import pachulWindow
 from i18n import tr
 
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+ICON_NAME = "io.github.wergosam.pachul"
 
-class pachubApp(Adw.Application):
+# Master-Icon liegt direkt im Projekt-Root: io.github.wergosam.pachul.svg
+ICON_SOURCE = os.path.join(APP_DIR, f"{ICON_NAME}.svg")
+
+# GTK verlangt zwingend eine hicolor/<size>/apps/-Struktur im Suchpfad,
+# sonst wird der Icon-Name nicht aufgelöst. Die bauen wir versteckt
+# und automatisch per Symlink, damit im Root nur die eine Datei liegt.
+ICON_THEME_DIR = os.path.join(APP_DIR, ".icon-theme")
+ICON_DEST_DIR = os.path.join(ICON_THEME_DIR, "hicolor", "scalable", "apps")
+ICON_DEST = os.path.join(ICON_DEST_DIR, f"{ICON_NAME}.svg")
+
+
+class pachulApp(Adw.Application):
     def __init__(self):
         super().__init__(
-            application_id="io.github.mrks1469.pachub",
+            application_id="io.github.wergosam.pachul",
             flags=Gio.ApplicationFlags.FLAGS_NONE,
         )
         self.connect("activate", self._on_activate)
         self.connect("shutdown", self._on_shutdown)
+
+    def _register_icon_theme(self):
+        """Icon aus dem Projekt-Root in die von GTK geforderte
+        hicolor-Struktur verlinken und den Suchpfad registrieren."""
+        if not os.path.isfile(ICON_SOURCE):
+            print(f"[pachul] Icon nicht gefunden: {ICON_SOURCE}")
+            return
+
+        os.makedirs(ICON_DEST_DIR, exist_ok=True)
+        if not os.path.exists(ICON_DEST):
+            try:
+                os.symlink(ICON_SOURCE, ICON_DEST)
+            except OSError:
+                # Fallback, falls Symlinks nicht unterstützt werden (z.B. manche FAT-Mounts)
+                import shutil
+                shutil.copyfile(ICON_SOURCE, ICON_DEST)
+
+        display = Gdk.Display.get_default()
+        if display is None:
+            return
+        icon_theme = Gtk.IconTheme.get_for_display(display)
+        icon_theme.add_search_path(ICON_THEME_DIR)
+
+        found = icon_theme.has_icon(ICON_NAME)
+        print(f"[pachul] Icon '{ICON_NAME}' gefunden: {found}")
 
     def _on_shutdown(self, app):
         # Signal all background threads to stop and force-exit cleanly
@@ -30,8 +69,9 @@ class pachubApp(Adw.Application):
         os.kill(os.getpid(), signal.SIGTERM)
 
     def _on_activate(self, app):
+        self._register_icon_theme()
         load_css()
-        self.win = pachubWindow(app)
+        self.win = pachulWindow(app)
         self.win.connect("close-request", lambda *_: self.quit())
 
         actions = {
@@ -80,20 +120,20 @@ class pachubApp(Adw.Application):
 
     def _on_about(self, *_):
         about = Adw.AboutDialog()
-        about.set_application_name("PacHub")
-        about.set_application_icon("io.github.mrks1469.pachub")
-        about.set_version("3.0.0")
-        about.set_developer_name("Manpreet Singh")
+        about.set_application_name("Pachul")
+        about.set_application_icon("io.github.wergosam.pachul")
+        about.set_version("2.2.1")
+        about.set_developer_name("Juerg Rechsteiner")
         about.set_license_type(Gtk.License.GPL_2_0)
-        about.set_website("https://github.com/mrks1469/PacHub")
-        about.set_issue_url("https://github.com/mrks1469/PacHub/issues")
-        about.set_comments(tr("A powerful Pacman/AUR front end.\n"))
-        about.set_developers(["Manpreet Singh https://github.com/mrks1469"])
+        about.set_website("https://github.com/wergosam/Pachul")
+        about.set_issue_url("https://github.com/wergosam/Pachul/issues")
+        about.set_comments("A powerful Pacman/AUR front end.\n")
+        about.set_developers(["Juerg Rechsteiner https://github.com/wergosam"])
         about.present(self.win)
 
 
 def main():
-    return pachubApp().run(sys.argv)
+    return pachulApp().run(sys.argv)
 
 
 if __name__ == "__main__":

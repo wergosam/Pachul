@@ -1,5 +1,5 @@
 """
-PacHub — styles.py
+Pachul — styles.py
 Application-wide CSS and style loading.
 """
 

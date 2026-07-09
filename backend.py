@@ -1,11 +1,11 @@
 """
-PacHub — backend.py
+Pachul — backend.py
 All pacman / system data functions: package queries, AUR search,
 update checks, orphan detection, system info, and demo data.
 
 Caching strategy
 ----------------
-~/.cache/pachub/
+~/.cache/pachul/
   installed.json   — pacman -Q + -Qm output, invalidated when pacman -Q changes
   syncdb.json      — pacman -Sl output, TTL 6 h (changes only after pacman -Sy)
   packages.json    — merged full package list (served instantly on next launch)
@@ -27,7 +27,7 @@ from gi.repository import GLib
 
 # ─── Cache paths ──────────────────────────────────────────────────────────────
 
-CACHE_DIR      = Path.home() / ".cache" / "pachub"
+CACHE_DIR      = Path.home() / ".cache" / "pachul"
 PKG_CACHE      = CACHE_DIR / "packages.json"
 SYNCDB_CACHE   = CACHE_DIR / "syncdb.json"
 INSTALLED_CACHE= CACHE_DIR / "installed.json"
@@ -56,7 +56,7 @@ def _write_json(path, data):
 
 # ─── User settings ────────────────────────────────────────────────────────────
 
-CONFIG_DIR    = Path.home() / ".config" / "pachub"
+CONFIG_DIR    = Path.home() / ".config" / "pachul"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 _DEFAULT_SETTINGS = {
     "aur_helper":               "auto",   # auto | yay | paru | pikaur | none
@@ -619,7 +619,7 @@ def get_arch_news(limit=6):
     import xml.etree.ElementTree as ET
     try:
         req = urllib.request.Request("https://archlinux.org/feeds/news/",
-                                     headers={"User-Agent": "PacHub"})
+                                     headers={"User-Agent": "Pachul"})
         with urllib.request.urlopen(req, timeout=12) as r:
             root = ET.fromstring(r.read())
     except Exception:
@@ -755,7 +755,7 @@ def set_package_ignored(pkg_name, ignore):
                 del lines[idx]
 
     import tempfile
-    fd, tmp = tempfile.mkstemp(prefix="pachub-pacman-conf-", suffix=".conf")
+    fd, tmp = tempfile.mkstemp(prefix="pachul-pacman-conf-", suffix=".conf")
     with os.fdopen(fd, "w") as f:
         f.write("\n".join(lines) + "\n")
     return tmp
@@ -834,7 +834,7 @@ def search_packages_cmd(query):
 # ─── Background update-check (systemd --user timer) ───────────────────────────
 
 SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
-TIMER_UNIT       = "pachub-update-check"
+TIMER_UNIT       = "pachul-update-check"
 _TIMER_INTERVALS = {"hourly": "1h", "6h": "6h", "daily": "1d"}
 
 
@@ -854,13 +854,13 @@ def enable_update_timer(interval="daily"):
     notifier = _notifier_path()
     service = (
         "[Unit]\n"
-        "Description=PacHub background update check\n\n"
+        "Description=Pachul background update check\n\n"
         "[Service]\n"
         "Type=oneshot\n"
         f"ExecStart={python} {notifier}\n")
     timer = (
         "[Unit]\n"
-        "Description=PacHub periodic update check\n\n"
+        "Description=Pachul periodic update check\n\n"
         "[Timer]\n"
         "OnBootSec=5min\n"
         f"OnUnitActiveSec={on_active}\n"
@@ -893,8 +893,8 @@ def send_update_notification(n):
         else tr("{n} package updates can be installed.")
     body = body.format(n=n)
     run_command(
-        "notify-send --app-name=PacHub --icon=io.github.mrks1469.pachub "
-        f"{shlex.quote('PacHub: ' + title)} {shlex.quote(body)}")
+        "notify-send --app-name=Pachul --icon=io.github.mrks1469.pachul "
+        f"{shlex.quote('Pachul: ' + title)} {shlex.quote(body)}")
 
 
 def run_update_notification_check():

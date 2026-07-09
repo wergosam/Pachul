@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="screenshots/pachub01.webp" width="72" alt="PacHub Icon"/>
+<img src="screenshots/pachul01.webp" width="72" alt="Pachul Icon"/>
 
-# PacHub
+# Pachul
 
 **A modern, graphical package manager for Arch Linux and Manjaro**
 **Ein moderner, grafischer Paketmanager für Arch Linux und Manjaro**
@@ -41,11 +41,11 @@
 
 ## Overview
 
-PacHub is a clean, fast GTK4 / libadwaita frontend for `pacman` and the AUR. It lets you search, install, update and manage packages without touching the terminal — while still giving you full, transparent control: every privileged action runs through a visible terminal panel, so you always see exactly what command is being executed.
+Pachul is a clean, fast GTK4 / libadwaita frontend for `pacman` and the AUR. It lets you search, install, update and manage packages without touching the terminal — while still giving you full, transparent control: every privileged action runs through a visible terminal panel, so you always see exactly what command is being executed.
 
-PacHub follows the GNOME Human Interface Guidelines and adapts automatically to your system's light or dark style.
+Pachul follows the GNOME Human Interface Guidelines and adapts automatically to your system's light or dark style.
 
-**Repository:** [github.com/wergosam/PacHub](https://github.com/wergosam/PacHub)
+**Repository:** [github.com/wergosam/Pachul](https://github.com/wergosam/Pachul)
 
 ---
 
@@ -54,11 +54,11 @@ PacHub follows the GNOME Human Interface Guidelines and adapts automatically to 
 <table>
 <tr>
 <td align="center">
-<img src="screenshots/pachub01.webp" alt="PacHub – Package Search" width="520"/><br/>
+<img src="screenshots/pachul01.webp" alt="Pachul – Package Search" width="520"/><br/>
 <sub><b>Package Search</b> — Browse official repos and AUR with live package counts</sub>
 </td>
 <td align="center">
-<img src="screenshots/pachub02.webp" alt="PacHub – Tools Menu" width="520"/><br/>
+<img src="screenshots/pachul02.webp" alt="Pachul – Tools Menu" width="520"/><br/>
 <sub><b>Tools Menu</b> — Sync databases, rate mirrors, manage config files and more</sub>
 </td>
 </tr>
@@ -94,7 +94,7 @@ PacHub follows the GNOME Human Interface Guidelines and adapts automatically to 
 - Arch Linux news check before system upgrades, so you never miss a manual-intervention notice
 
 ### Quality of life
-- **Background update checks** — an optional `systemd --user` timer checks for updates and sends a desktop notification even while PacHub is closed
+- **Background update checks** — an optional `systemd --user` timer checks for updates and sends a desktop notification even while Pachul is closed
 - **Multi-language interface** — English, German, French and Italian, switchable in Preferences
 - **Keyboard shortcuts** for all common actions
 - Light and dark theme support, following your system style automatically
@@ -107,14 +107,14 @@ PacHub follows the GNOME Human Interface Guidelines and adapts automatically to 
 ### From the AUR
 
 ```bash
-yay -S pachub
+yay -S pachul
 ```
 
 ### Manual (from source)
 
 ```bash
-git clone https://github.com/wergosam/PacHub.git
-cd PacHub
+git clone https://github.com/wergosam/Pachul.git
+cd Pachul
 python app.py
 ```
 
@@ -149,7 +149,7 @@ python app.py
 
 ## Background Update Notifications
 
-Enable **Run background update checks** in Preferences to install a `systemd --user` timer (`pachub-update-check`). It runs headlessly on a schedule (no GTK dependency in this code path) and sends a desktop notification via `notify-send` when updates are available — even if PacHub itself isn't running.
+Enable **Run background update checks** in Preferences to install a `systemd --user` timer (`pachul-update-check`). It runs headlessly on a schedule (no GTK dependency in this code path) and sends a desktop notification via `notify-send` when updates are available — even if Pachul itself isn't running.
 
 The check interval — **hourly**, **every 6 hours**, or **daily** — is configurable in Preferences alongside the toggle.
 
@@ -157,16 +157,16 @@ The check interval — **hourly**, **every 6 hours**, or **daily** — is config
 
 ## Language
 
-PacHub currently ships with **English, German, French and Italian** translations, covering the entire interface: menus, dialogs, toasts, and terminal-panel messages.
+Pachul currently ships with **English, German, French and Italian** translations, covering the entire interface: menus, dialogs, toasts, and terminal-panel messages.
 
-Change the interface language under **Preferences → Language**. The choice is saved immediately; the change takes full effect after restarting PacHub.
+Change the interface language under **Preferences → Language**. The choice is saved immediately; the change takes full effect after restarting Pachul.
 
 ---
 
 ## Project Structure
 
 ```
-pachub/
+pachul/
 ├── app.py          # Adw.Application entry point, GActions & accelerators
 ├── window.py       # Main window: sidebar, list view, detail panel, search page
 ├── dialogs.py      # Secondary dialogs (repos, mirrors, orphans, history,
@@ -186,16 +186,16 @@ pachub/
 
 - **No AUR results / AUR actions fail** — install `yay`, `paru`, or `pikaur`, or set the helper explicitly in Preferences → AUR Helper.
 - **Background notifications never appear** — check the timer is enabled in Preferences, and that `notify-send` (usually part of `libnotify`) is installed.
-- **Mirror rating tool missing** — install `rate-mirrors` from the AUR; PacHub offers a one-click install button when it's absent.
-- **Language doesn't fully change** — some UI elements are only re-translated after a full restart of PacHub; this is expected.
+- **Mirror rating tool missing** — install `rate-mirrors` from the AUR; Pachul offers a one-click install button when it's absent.
+- **Language doesn't fully change** — some UI elements are only re-translated after a full restart of Pachul; this is expected.
 
-Found a bug that isn't covered here? Please [open an issue](https://github.com/wergosam/PacHub/issues).
+Found a bug that isn't covered here? Please [open an issue](https://github.com/wergosam/Pachul/issues).
 
 ---
 
 ## Contributing
 
-Pull requests are welcome. For major changes, please [open an issue](https://github.com/wergosam/PacHub/issues) first to discuss what you'd like to change.
+Pull requests are welcome. For major changes, please [open an issue](https://github.com/wergosam/Pachul/issues) first to discuss what you'd like to change.
 
 1. Fork the repository
 2. Create your feature branch: `git checkout -b feature/my-feature`
@@ -209,13 +209,13 @@ New UI strings should be added to all four language tables in `i18n.py` (`STRING
 
 ## License
 
-This project is licensed under the **GNU General Public License v3.0** — see the [LICENSE](https://github.com/wergosam/PacHub/blob/main/LICENSE) file for details.
+This project is licensed under the **GNU General Public License v3.0** — see the [LICENSE](https://github.com/wergosam/Pachul/blob/main/LICENSE) file for details.
 
 ---
 
 <div align="center">
 
-[⬆ Back to top](#pachub)
+[⬆ Back to top](#pachul)
 
 </div>
 
@@ -244,11 +244,11 @@ This project is licensed under the **GNU General Public License v3.0** — see t
 
 ## Übersicht
 
-PacHub ist ein schlankes, schnelles GTK4- / libadwaita-Frontend für `pacman` und das AUR. Es ermöglicht das Suchen, Installieren, Aktualisieren und Verwalten von Paketen, ohne das Terminal anzufassen — und behält dabei volle, transparente Kontrolle: Jede privilegierte Aktion läuft über ein sichtbares Terminal-Panel, sodass du immer genau siehst, welcher Befehl ausgeführt wird.
+Pachul ist ein schlankes, schnelles GTK4- / libadwaita-Frontend für `pacman` und das AUR. Es ermöglicht das Suchen, Installieren, Aktualisieren und Verwalten von Paketen, ohne das Terminal anzufassen — und behält dabei volle, transparente Kontrolle: Jede privilegierte Aktion läuft über ein sichtbares Terminal-Panel, sodass du immer genau siehst, welcher Befehl ausgeführt wird.
 
-PacHub folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch an den hellen oder dunklen Stil deines Systems an.
+Pachul folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch an den hellen oder dunklen Stil deines Systems an.
 
-**Repository:** [github.com/wergosam/PacHub](https://github.com/wergosam/PacHub)
+**Repository:** [github.com/wergosam/Pachul](https://github.com/wergosam/Pachul)
 
 ---
 
@@ -257,11 +257,11 @@ PacHub folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch a
 <table>
 <tr>
 <td align="center">
-<img src="screenshots/pachub01.webp" alt="PacHub – Paketsuche" width="520"/><br/>
+<img src="screenshots/pachul01.webp" alt="Pachul – Paketsuche" width="520"/><br/>
 <sub><b>Paketsuche</b> — Offizielle Repos und AUR durchsuchen, mit Live-Paketzahlen</sub>
 </td>
 <td align="center">
-<img src="screenshots/pachub02.webp" alt="PacHub – Werkzeuge-Menü" width="520"/><br/>
+<img src="screenshots/pachul02.webp" alt="Pachul – Werkzeuge-Menü" width="520"/><br/>
 <sub><b>Werkzeuge-Menü</b> — Datenbanken synchronisieren, Spiegelserver bewerten, Konfigurationsdateien verwalten und mehr</sub>
 </td>
 </tr>
@@ -297,7 +297,7 @@ PacHub folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch a
 - Arch-Linux-News-Prüfung vor Systemaktualisierungen, damit manuelle Eingriffe nie übersehen werden
 
 ### Komfortfunktionen
-- **Hintergrund-Update-Prüfung** — ein optionaler `systemd --user`-Timer prüft auf Updates und sendet eine Desktop-Benachrichtigung, auch wenn PacHub geschlossen ist
+- **Hintergrund-Update-Prüfung** — ein optionaler `systemd --user`-Timer prüft auf Updates und sendet eine Desktop-Benachrichtigung, auch wenn Pachul geschlossen ist
 - **Mehrsprachige Oberfläche** — Englisch, Deutsch, Französisch und Italienisch, umschaltbar in den Einstellungen
 - **Tastenkombinationen** für alle gängigen Aktionen
 - Unterstützung für helles und dunkles Design, folgt automatisch dem Systemstil
@@ -310,14 +310,14 @@ PacHub folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch a
 ### Aus dem AUR
 
 ```bash
-yay -S pachub
+yay -S pachul
 ```
 
 ### Manuell (aus dem Quellcode)
 
 ```bash
-git clone https://github.com/wergosam/PacHub.git
-cd PacHub
+git clone https://github.com/wergosam/Pachul.git
+cd Pachul
 python app.py
 ```
 
@@ -352,7 +352,7 @@ python app.py
 
 ## Hintergrund-Update-Benachrichtigungen
 
-Aktiviere **Update-Prüfungen im Hintergrund ausführen** in den Einstellungen, um einen `systemd --user`-Timer (`pachub-update-check`) einzurichten. Dieser läuft nach Zeitplan headless (in diesem Codepfad ohne GTK-Abhängigkeit) und sendet über `notify-send` eine Desktop-Benachrichtigung, sobald Updates verfügbar sind — auch wenn PacHub selbst nicht läuft.
+Aktiviere **Update-Prüfungen im Hintergrund ausführen** in den Einstellungen, um einen `systemd --user`-Timer (`pachul-update-check`) einzurichten. Dieser läuft nach Zeitplan headless (in diesem Codepfad ohne GTK-Abhängigkeit) und sendet über `notify-send` eine Desktop-Benachrichtigung, sobald Updates verfügbar sind — auch wenn Pachul selbst nicht läuft.
 
 Das Prüfintervall — **stündlich**, **alle 6 Stunden** oder **täglich** — lässt sich zusammen mit dem Schalter in den Einstellungen konfigurieren.
 
@@ -360,16 +360,16 @@ Das Prüfintervall — **stündlich**, **alle 6 Stunden** oder **täglich** — 
 
 ## Sprache
 
-PacHub wird aktuell mit Übersetzungen in **Englisch, Deutsch, Französisch und Italienisch** ausgeliefert und deckt die gesamte Oberfläche ab: Menüs, Dialoge, Toasts und Terminal-Panel-Meldungen.
+Pachul wird aktuell mit Übersetzungen in **Englisch, Deutsch, Französisch und Italienisch** ausgeliefert und deckt die gesamte Oberfläche ab: Menüs, Dialoge, Toasts und Terminal-Panel-Meldungen.
 
-Die Sprache lässt sich unter **Einstellungen → Sprache** ändern. Die Auswahl wird sofort gespeichert; die Änderung wirkt sich vollständig nach einem Neustart von PacHub aus.
+Die Sprache lässt sich unter **Einstellungen → Sprache** ändern. Die Auswahl wird sofort gespeichert; die Änderung wirkt sich vollständig nach einem Neustart von Pachul aus.
 
 ---
 
 ## Projektstruktur
 
 ```
-pachub/
+pachul/
 ├── app.py          # Adw.Application-Einstiegspunkt, GActions & Tastenkürzel
 ├── window.py       # Hauptfenster: Seitenleiste, Listenansicht, Detailansicht, Suchseite
 ├── dialogs.py      # Alle weiteren Dialoge (Repos, Spiegelserver, Waisen, Verlauf,
@@ -389,16 +389,16 @@ pachub/
 
 - **Keine AUR-Ergebnisse / AUR-Aktionen schlagen fehl** — installiere `yay`, `paru` oder `pikaur`, oder lege den Helfer explizit unter Einstellungen → AUR-Helfer fest.
 - **Hintergrund-Benachrichtigungen erscheinen nie** — prüfe, ob der Timer in den Einstellungen aktiviert ist und ob `notify-send` (üblicherweise Teil von `libnotify`) installiert ist.
-- **Werkzeug zur Spiegelserver-Bewertung fehlt** — installiere `rate-mirrors` aus dem AUR; PacHub bietet dafür einen Ein-Klick-Installationsbutton an, falls es fehlt.
-- **Sprache wechselt nicht vollständig** — manche UI-Elemente werden erst nach einem vollständigen Neustart von PacHub neu übersetzt; das ist beabsichtigt.
+- **Werkzeug zur Spiegelserver-Bewertung fehlt** — installiere `rate-mirrors` aus dem AUR; Pachul bietet dafür einen Ein-Klick-Installationsbutton an, falls es fehlt.
+- **Sprache wechselt nicht vollständig** — manche UI-Elemente werden erst nach einem vollständigen Neustart von Pachul neu übersetzt; das ist beabsichtigt.
 
-Einen Fehler gefunden, der hier nicht behandelt wird? Bitte [ein Issue eröffnen](https://github.com/wergosam/PacHub/issues).
+Einen Fehler gefunden, der hier nicht behandelt wird? Bitte [ein Issue eröffnen](https://github.com/wergosam/Pachul/issues).
 
 ---
 
 ## Mitwirken
 
-Pull Requests sind willkommen. Bei größeren Änderungen bitte zuerst [ein Issue eröffnen](https://github.com/wergosam/PacHub/issues), um das gewünschte Vorhaben zu besprechen.
+Pull Requests sind willkommen. Bei größeren Änderungen bitte zuerst [ein Issue eröffnen](https://github.com/wergosam/Pachul/issues), um das gewünschte Vorhaben zu besprechen.
 
 1. Repository forken
 2. Feature-Branch erstellen: `git checkout -b feature/my-feature`
@@ -412,13 +412,13 @@ Neue UI-Texte sollten in allen vier Sprachtabellen in `i18n.py` (`STRINGS_DE`, `
 
 ## Lizenz
 
-Dieses Projekt steht unter der **GNU General Public License v3.0** — siehe die [LICENSE](https://github.com/wergosam/PacHub/blob/main/LICENSE)-Datei für Details.
+Dieses Projekt steht unter der **GNU General Public License v3.0** — siehe die [LICENSE](https://github.com/wergosam/Pachul/blob/main/LICENSE)-Datei für Details.
 
 ---
 
 <div align="center">
 
-[⬆ Nach oben](#pachub)
+[⬆ Nach oben](#pachul)
 
 </div>
 

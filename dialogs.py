@@ -1,5 +1,5 @@
 """
-PacHub — dialogs.py
+Pachul — dialogs.py
 All modal tool dialogs:
   - TerminalDialog  : PTY-backed command runner with sudo password input
   - RepoManagerDialog : View/edit /etc/pacman.conf repositories
@@ -1155,7 +1155,7 @@ def show_preferences(parent, on_changed):
     # Language
     lang_group = Adw.PreferencesGroup()
     lang_group.set_title(tr("Language"))
-    lang_group.set_description(tr("Changes apply after restarting PacHub"))
+    lang_group.set_description(tr("Changes apply after restarting Pachul"))
 
     lang_opts = ["en", "de", "fr", "it"]
     lang_row = Adw.ComboRow()
@@ -1171,7 +1171,7 @@ def show_preferences(parent, on_changed):
     # Background service (systemd --user timer)
     svc = Adw.PreferencesGroup()
     svc.set_title(tr("Background Service"))
-    svc.set_description(tr("Check for updates and notify even when PacHub is closed, "
+    svc.set_description(tr("Check for updates and notify even when Pachul is closed, "
                         "via a systemd user timer"))
 
     interval_opts = ["hourly", "6h", "daily"]

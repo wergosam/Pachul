@@ -1,5 +1,5 @@
 """
-PacHub — window.py
+Pachul — window.py
 Main application window: sidebar, search page, package list, detail panel,
 filtering, and all action handlers.
 """
@@ -40,7 +40,7 @@ class DetailPanel:
     """Right-hand package detail view: hero header + Info tab + Files tab.
 
     One instance is built for the main list page and one for the search page.
-    pachubWindow drives both through the same _show_detail / _populate_detail
+    pachulWindow drives both through the same _show_detail / _populate_detail
     methods, so the two views can never drift apart.
 
     Widget references live on the instance (icon, name, status, info_rows, …);
@@ -291,10 +291,10 @@ class DetailPanel:
         self._update_files_count()
 
 
-class pachubWindow(Adw.ApplicationWindow):
+class pachulWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
-        self.set_title("PacHub")
+        self.set_title("Pachul")
         self.set_default_size(1240, 780)
         self.set_size_request(900, 560)
         self._all_packages     = []
@@ -323,14 +323,14 @@ class pachubWindow(Adw.ApplicationWindow):
 
         # Sidebar
         sidebar_page = Adw.NavigationPage()
-        sidebar_page.set_title("PacHub")
+        sidebar_page.set_title("Pachul")
         sidebar_tv  = Adw.ToolbarView()
         sidebar_hdr = Adw.HeaderBar()
         sidebar_hdr.set_show_end_title_buttons(False)
         title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         app_icon  = Gtk.Image.new_from_icon_name("package-x-generic-symbolic")
         app_icon.set_pixel_size(18)
-        title_lbl = Gtk.Label(label="PacHub")
+        title_lbl = Gtk.Label(label="Pachul")
         title_lbl.add_css_class("heading")
         title_box.append(app_icon)
         title_box.append(title_lbl)
@@ -342,7 +342,7 @@ class pachubWindow(Adw.ApplicationWindow):
 
         # Content
         content_page = Adw.NavigationPage()
-        content_page.set_title("PacHub")
+        content_page.set_title("Pachul")
         self.content_tv  = Adw.ToolbarView()
         self.content_hdr = Adw.HeaderBar()
         self.content_hdr.set_show_back_button(False)
@@ -383,7 +383,7 @@ class pachubWindow(Adw.ApplicationWindow):
         menu.append_section(None, Gio.Menu())
         menu.append(tr("Preferences"),          "app.preferences")
         menu.append(tr("Keyboard Shortcuts"),   "app.shortcuts")
-        menu.append(tr("About PacHub"),         "app.about")
+        menu.append(tr("About Pachul"),         "app.about")
         menu_btn.set_menu_model(menu)
         right_box.append(menu_btn)
         self.content_hdr.pack_end(right_box)
@@ -810,7 +810,7 @@ class pachubWindow(Adw.ApplicationWindow):
             tr("{n} package update can be installed.").format(n=n) if n == 1
             else tr("{n} package updates can be installed.").format(n=n))
         notif.set_priority(Gio.NotificationPriority.NORMAL)
-        app.send_notification("pachub-updates", notif)
+        app.send_notification("pachul-updates", notif)
 
     def _on_updates_loaded(self, updates):
         prev_n = len(self._updates) if self._updates else 0
@@ -1492,7 +1492,7 @@ class pachubWindow(Adw.ApplicationWindow):
     def _on_export_pkgs(self, *_):
         dialog = Gtk.FileDialog()
         dialog.set_title(tr("Export Package List"))
-        dialog.set_initial_name(tr("pachub-packages.txt"))
+        dialog.set_initial_name(tr("pachul-packages.txt"))
         dialog.save(self, None, self._export_save_done)
 
     def _export_save_done(self, dialog, result):

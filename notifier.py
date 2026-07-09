@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-PacHub — notifier.py
-Headless entry point run by the systemd --user timer (pachub-update-check).
+Pachul — notifier.py
+Headless entry point run by the systemd --user timer (pachul-update-check).
 Checks for available updates and, if any, sends a desktop notification.
 Imports only `backend` (no GTK), so it stays lightweight in the background.
 """

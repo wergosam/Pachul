@@ -1,5 +1,5 @@
 """
-PacHub — i18n.py
+Pachul — i18n.py
 Sehr einfaches Wörterbuch-basiertes Übersetzungssystem
 (Deutsch / Französisch / Italienisch / Englisch).
 
@@ -17,7 +17,7 @@ mit Platzhaltern einfach `.format(...)` nach `tr(...)` anhängen, z. B.:
 Die Sprache wird über backend.get_setting("language") persistiert und kann
 zur Laufzeit mit set_language() geändert werden. Da GTK4-Widgets nach dem
 Bau ihren Text nicht automatisch neu abfragen, wird ein Sprachwechsel erst
-nach einem Neustart von PacHub vollständig wirksam (siehe Hinweis im
+nach einem Neustart von Pachul vollständig wirksam (siehe Hinweis im
 Einstellungen-Dialog).
 """
 
@@ -95,7 +95,7 @@ STRINGS_DE = {
     "Architecture": "Architektur",
 
     # Sidebar
-    "PacHub": "PacHub",
+    "Pachul": "Pachul",
     "A powerful Pacman/AUR front end.\n": "Ein leistungsstarkes Pacman/AUR-Frontend.\n",
     "TOTAL": "GESAMT",
     "UPDATES": "UPDATES",
@@ -130,7 +130,7 @@ STRINGS_DE = {
     "Mark Selected as Dependency": "Auswahl als Abhängigkeit markieren",
     "Preferences": "Einstellungen",
     "Keyboard Shortcuts": "Tastenkombinationen",
-    "About PacHub": "Über PacHub",
+    "About Pachul": "Über Pachul",
     "Upgrade Now": "Jetzt aktualisieren",
 
     # Search page
@@ -185,7 +185,7 @@ STRINGS_DE = {
     "Mark {name} as explicit": "{name} als explizit markieren",
     "Mark {name} as dependency": "{name} als Abhängigkeit markieren",
     "Export Package List": "Paketliste exportieren",
-    "pachub-packages.txt": "pachub-pakete.txt",
+    "pachul-packages.txt": "pachul-pakete.txt",
     "Exported {n} packages": "{n} Pakete exportiert",
     "Export failed: {err}": "Export fehlgeschlagen: {err}",
     "Import Package List": "Paketliste importieren",
@@ -332,15 +332,15 @@ STRINGS_DE = {
     "Warns about manual interventions before a system upgrade":
         "Warnt vor manuellen Eingriffen, bevor das System aktualisiert wird",
     "Background Service": "Hintergrunddienst",
-    "Check for updates and notify even when PacHub is closed, via a systemd user timer":
-        "Prüft auf Updates und benachrichtigt auch, wenn PacHub geschlossen ist, über einen systemd-Benutzer-Timer",
+    "Check for updates and notify even when Pachul is closed, via a systemd user timer":
+        "Prüft auf Updates und benachrichtigt auch, wenn Pachul geschlossen ist, über einen systemd-Benutzer-Timer",
     "Check interval": "Prüfintervall",
     "Hourly": "Stündlich",
     "Every 6 hours": "Alle 6 Stunden",
     "Daily": "Täglich",
     "Run background update checks": "Update-Prüfungen im Hintergrund ausführen",
     "Language": "Sprache",
-    "Changes apply after restarting PacHub": "Änderungen wirken sich nach einem Neustart von PacHub aus",
+    "Changes apply after restarting Pachul": "Änderungen wirken sich nach einem Neustart von Pachul aus",
     "English": "Englisch",
     "German": "Deutsch",
     "French": "Französisch",
@@ -413,7 +413,7 @@ STRINGS_FR = {
     "Architecture": "Architecture",
 
     # Sidebar
-    "PacHub": "PacHub",
+    "Pachul": "Pachul",
     "A powerful Pacman/AUR front end.\n": "Une interface puissante pour Pacman/AUR.\n",
     "TOTAL": "TOTAL",
     "UPDATES": "MISES À JOUR",
@@ -448,7 +448,7 @@ STRINGS_FR = {
     "Mark Selected as Dependency": "Marquer la sélection comme dépendance",
     "Preferences": "Préférences",
     "Keyboard Shortcuts": "Raccourcis clavier",
-    "About PacHub": "À propos de PacHub",
+    "About Pachul": "À propos de Pachul",
     "Upgrade Now": "Mettre à niveau maintenant",
 
     # Search page
@@ -503,7 +503,7 @@ STRINGS_FR = {
     "Mark {name} as explicit": "Marquer {name} comme explicite",
     "Mark {name} as dependency": "Marquer {name} comme dépendance",
     "Export Package List": "Exporter la liste des paquets",
-    "pachub-packages.txt": "pachub-paquets.txt",
+    "pachul-packages.txt": "pachul-paquets.txt",
     "Exported {n} packages": "{n} paquets exportés",
     "Export failed: {err}": "Échec de l'exportation : {err}",
     "Import Package List": "Importer une liste de paquets",
@@ -650,15 +650,15 @@ STRINGS_FR = {
     "Warns about manual interventions before a system upgrade":
         "Avertit des interventions manuelles avant une mise à niveau système",
     "Background Service": "Service en arrière-plan",
-    "Check for updates and notify even when PacHub is closed, via a systemd user timer":
-        "Vérifie les mises à jour et notifie même lorsque PacHub est fermé, via un timer systemd utilisateur",
+    "Check for updates and notify even when Pachul is closed, via a systemd user timer":
+        "Vérifie les mises à jour et notifie même lorsque Pachul est fermé, via un timer systemd utilisateur",
     "Check interval": "Intervalle de vérification",
     "Hourly": "Toutes les heures",
     "Every 6 hours": "Toutes les 6 heures",
     "Daily": "Quotidien",
     "Run background update checks": "Exécuter les vérifications en arrière-plan",
     "Language": "Langue",
-    "Changes apply after restarting PacHub": "Les changements s'appliquent après le redémarrage de PacHub",
+    "Changes apply after restarting Pachul": "Les changements s'appliquent après le redémarrage de Pachul",
     "English": "Anglais",
     "German": "Allemand",
     "French": "Français",
@@ -731,7 +731,7 @@ STRINGS_IT = {
     "Architecture": "Architettura",
 
     # Sidebar
-    "PacHub": "PacHub",
+    "Pachul": "Pachul",
     "A powerful Pacman/AUR front end.\n": "Un'interfaccia potente per Pacman/AUR.\n",
     "TOTAL": "TOTALE",
     "UPDATES": "AGGIORNAMENTI",
@@ -766,7 +766,7 @@ STRINGS_IT = {
     "Mark Selected as Dependency": "Segna selezione come dipendenza",
     "Preferences": "Preferenze",
     "Keyboard Shortcuts": "Scorciatoie da tastiera",
-    "About PacHub": "Informazioni su PacHub",
+    "About Pachul": "Informazioni su Pachul",
     "Upgrade Now": "Aggiorna ora",
 
     # Search page
@@ -821,7 +821,7 @@ STRINGS_IT = {
     "Mark {name} as explicit": "Segna {name} come esplicito",
     "Mark {name} as dependency": "Segna {name} come dipendenza",
     "Export Package List": "Esporta elenco pacchetti",
-    "pachub-packages.txt": "pachub-pacchetti.txt",
+    "pachul-packages.txt": "pachul-pacchetti.txt",
     "Exported {n} packages": "{n} pacchetti esportati",
     "Export failed: {err}": "Esportazione non riuscita: {err}",
     "Import Package List": "Importa elenco pacchetti",
@@ -968,15 +968,15 @@ STRINGS_IT = {
     "Warns about manual interventions before a system upgrade":
         "Avvisa di interventi manuali prima di un aggiornamento di sistema",
     "Background Service": "Servizio in background",
-    "Check for updates and notify even when PacHub is closed, via a systemd user timer":
-        "Controlla gli aggiornamenti e notifica anche quando PacHub è chiuso, tramite un timer utente systemd",
+    "Check for updates and notify even when Pachul is closed, via a systemd user timer":
+        "Controlla gli aggiornamenti e notifica anche quando Pachul è chiuso, tramite un timer utente systemd",
     "Check interval": "Intervallo di controllo",
     "Hourly": "Ogni ora",
     "Every 6 hours": "Ogni 6 ore",
     "Daily": "Giornaliero",
     "Run background update checks": "Esegui controlli aggiornamenti in background",
     "Language": "Lingua",
-    "Changes apply after restarting PacHub": "Le modifiche si applicano dopo il riavvio di PacHub",
+    "Changes apply after restarting Pachul": "Le modifiche si applicano dopo il riavvio di Pachul",
     "English": "Inglese",
     "German": "Tedesco",
     "French": "Francese",

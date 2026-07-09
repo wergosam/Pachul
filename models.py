@@ -1,5 +1,5 @@
 """
-PacHub — models.py
+Pachul — models.py
 GObject data model (PackageItem), the virtualized package ListView factory
 (make_package_listview / PackageRowContent), and the sidebar NavRow.
 """
@@ -72,7 +72,7 @@ def pkg_icon(name):
 # ─── GObject model ────────────────────────────────────────────────────────────
 
 class PackageItem(GObject.Object):
-    __gtype_name__ = 'PacHubPackageItem'
+    __gtype_name__ = 'PachulPackageItem'
 
     def __init__(self, name, version, repo="local", status="installed",
                  description="", foreign=False):
@@ -98,7 +98,7 @@ class PackageRowContent(Gtk.Box):
     PackageItem scrolls into it via `bind` — so only ~screenful of widgets
     ever exist, regardless of list size.
     """
-    __gtype_name__ = 'PacHubPackageRowContent'
+    __gtype_name__ = 'PachulPackageRowContent'
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
