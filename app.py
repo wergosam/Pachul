@@ -124,7 +124,7 @@ class pachulApp(Adw.Application):
         about.set_application_icon("io.github.wergosam.pachul")
         about.set_version("2.2.1")
         about.set_developer_name("Juerg Rechsteiner")
-        about.set_license_type(Gtk.License.GPL_2_0)
+        about.set_license_type(Gtk.License.GPL_3_0)
         about.set_website("https://github.com/wergosam/Pachul")
         about.set_issue_url("https://github.com/wergosam/Pachul/issues")
         about.set_comments("A powerful Pacman/AUR front end.\n")

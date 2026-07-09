@@ -893,7 +893,7 @@ def send_update_notification(n):
         else tr("{n} package updates can be installed.")
     body = body.format(n=n)
     run_command(
-        "notify-send --app-name=Pachul --icon=io.github.mrks1469.pachul "
+        "notify-send --app-name=Pachul --icon=io.github.wergosam.pachul "
         f"{shlex.quote('Pachul: ' + title)} {shlex.quote(body)}")
 
 

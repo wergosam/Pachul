@@ -517,7 +517,7 @@ def show_mirror_rater(parent, run_terminal_fn):
                 global_flags.append(f"--top-mirrors={top_n}")
             if countries_raw:
                 first = countries_raw.split(",")[0].strip()
-                global_flags.append(f"--entry-country={first!r}")
+                global_flags.append(f"--entry-country={shlex.quote(first)}")
 
             sub_flags = [f"--sort-mirrors-by={sort_key}", f"--max-delay={max_delay}"]
             gf = " ".join(global_flags)
@@ -563,7 +563,7 @@ def show_mirror_rater(parent, run_terminal_fn):
             if top_n > 0:  gflags.append(f"--top-mirrors={top_n}")
             if countries_raw:
                 first = countries_raw.split(",")[0].strip()
-                gflags.append(f"--entry-country={first!r}")
+                gflags.append(f"--entry-country={shlex.quote(first)}")
             sflags = [f"--sort-mirrors-by={sort_key}", f"--max-delay={max_delay}"]
             preview_lbl.set_label(
                 f"rate-mirrors {' '.join(gflags)} arch {' '.join(sflags)} | sudo tee /etc/pacman.d/mirrorlist"

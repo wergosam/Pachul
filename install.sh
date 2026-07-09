@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 #  Pachul Installer
 #  A powerful Pacman/AUR front end using GTK4 and libadwaita
-#  https://github.com/mrks1469/Pachul
+#  https://github.com/wergosam/Pachul
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -23,12 +23,12 @@ INSTALL_DIR="/usr/local/bin"
 DATA_DIR="/usr/local/share/${APP_NAME}"
 DESKTOP_DIR="/usr/share/applications"
 ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
-ICON_ID="io.github.mrks1469.pachul"
+ICON_ID="io.github.wergosam.pachul"
 DESKTOP_FILE="${DESKTOP_DIR}/${ICON_ID}.desktop"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Application Python modules (relative to SRC_DIR)
-PY_MODULES=(app.py backend.py dialogs.py models.py styles.py window.py notifier.py)
+PY_MODULES=(app.py backend.py dialogs.py i18n.py models.py styles.py window.py notifier.py)
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 echo -e "
