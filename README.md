@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="screenshots/pachul01.webp" width="72" alt="Pachul Icon"/>
+<img src="screenshots/pachul01.webp" width="200" alt="Pachul Icon"/>
 
 # Pachul
 
