@@ -11,6 +11,30 @@ from gi.repository import Gtk, Gio, GObject, Pango
 
 from i18n import tr
 
+# ─── Icon helper with fallback chain ──────────────────────────────────────────
+# Some "-symbolic" icon names that exist in Adwaita are missing from other
+# icon themes (e.g. KDE Breeze), which makes GTK fall back to a red/pink
+# "missing icon" placeholder. Gio.ThemedIcon.new_from_names() lets GTK try a
+# whole list of candidate names in order and only fail if none of them exist,
+# so we always end on a name that is virtually guaranteed to be present.
+
+def make_icon(icon_names, pixel_size=16):
+    """Create a Gtk.Image from a single icon name or a list of fallback names."""
+    if isinstance(icon_names, str):
+        icon_names = [icon_names]
+    gicon = Gio.ThemedIcon.new_from_names(list(icon_names))
+    img = Gtk.Image.new_from_gicon(gicon)
+    img.set_pixel_size(pixel_size)
+    return img
+
+
+def set_button_icon(button, icon_names, pixel_size=16):
+    """Set an icon-only button's icon using a fallback chain of icon names."""
+    img = make_icon(icon_names, pixel_size)
+    button.set_child(img)
+    button.add_css_class("image-button")
+
+
 # ─── Repository badge mapping ─────────────────────────────────────────────────
 
 REPO_BADGE_CLASS = {
@@ -83,6 +107,25 @@ class PackageItem(GObject.Object):
         self.pkg_status      = status
         self.pkg_description = description
         self.pkg_foreign     = foreign
+        # Temporärer UI-Backpointer, damit wir beim Klicken das Widget direkt refashen können
+        self._bound_widget   = None
+
+
+# ─── Shared selection-mode state ──────────────────────────────────────────────
+
+class ListSelectionState:
+    """Shared mutable selection-mode state for a package ListView's row factory.
+
+    A single instance is captured by every row's `bind()` closure, so it is
+    read fresh on every (re)bind — meaning recycled/virtualized rows always
+    reflect the current mode and selected set, even for rows that scroll
+    into view only after the mode was toggled.
+    """
+    __slots__ = ("active", "selected")
+
+    def __init__(self):
+        self.active = False      # whether checkbox/batch selection mode is on
+        self.selected = set()    # set of selected pkg_name strings
 
 
 # ─── Package list row (virtualized ListView) ─────────────────────────────────
@@ -102,9 +145,28 @@ class PackageRowContent(Gtk.Box):
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.pkg = None
+        self.sel_state = None
+
         self.set_margin_top(9);    self.set_margin_bottom(9)
         self.set_margin_start(10); self.set_margin_end(10)
         self.add_css_class("pkg-row")
+
+        # Selection-mode checkbox
+        self.checkbox = Gtk.Box()
+        self.checkbox.add_css_class("pkg-checkbox")
+        self.checkbox.set_size_request(20, 20)
+        self.checkbox.set_valign(Gtk.Align.CENTER)
+        self.checkbox.set_halign(Gtk.Align.CENTER)
+        self.checkbox.set_can_target(False)
+
+        self.checkbox_mark = Gtk.Label(label="✓")
+        self.checkbox_mark.add_css_class("pkg-checkbox-mark")
+        self.checkbox_mark.set_halign(Gtk.Align.CENTER)
+        self.checkbox_mark.set_valign(Gtk.Align.CENTER)
+        self.checkbox.append(self.checkbox_mark)
+        self.checkbox.set_visible(False)
+        self.append(self.checkbox)
 
         self.icon = Gtk.Image()
         self.icon.set_pixel_size(20)
@@ -154,11 +216,24 @@ class PackageRowContent(Gtk.Box):
         right.append(self.ver_label)
         self.append(right)
 
-    def bind(self, pkg):
+    def bind(self, pkg, sel_state=None):
+        # Alten Backpointer entfernen, falls dieses Widget recycelt wird
+        if self.pkg and hasattr(self.pkg, "_bound_widget") and self.pkg._bound_widget == self:
+            self.pkg._bound_widget = None
+
+        self.pkg = pkg
+        self.sel_state = sel_state
+
+        if pkg:
+            pkg._bound_widget = self
+
         self.icon.set_from_icon_name(pkg_icon(pkg.pkg_name))
         self.name_label.set_label(pkg.pkg_name)
         self.desc_label.set_label(pkg.pkg_description or "")
         self.desc_label.set_visible(bool(pkg.pkg_description))
+
+        # Visuelle Darstellung updaten
+        self.update_selection_visuals()
 
         # Status pill — only for installed/update; clear stale classes first
         for cls in _STATUS_PILL_CSS:
@@ -180,27 +255,67 @@ class PackageRowContent(Gtk.Box):
 
         self.ver_label.set_label(pkg.pkg_version or "")
 
+    def update_selection_visuals(self):
+        """Aktualisiert rein die Checkbox-Anzeige ohne komplettes Rebinden der Zeile."""
+        if self.pkg and self.sel_state and self.sel_state.active:
+            self.checkbox.set_visible(True)
+            is_selected = self.pkg.pkg_name in self.sel_state.selected
+            self.checkbox_mark.set_visible(is_selected)
+            if is_selected:
+                self.checkbox.add_css_class("pkg-checkbox-checked")
+                self.add_css_class("pkg-row-selected")
+            else:
+                self.checkbox.remove_css_class("pkg-checkbox-checked")
+                self.remove_css_class("pkg-row-selected")
+        else:
+            self.checkbox.set_visible(False)
+            self.remove_css_class("pkg-row-selected")
 
-def make_package_listview(on_activate):
+
+def make_package_listview(on_activate, on_selection_change=None, sel_state=None):
     """Build a virtualized package ListView backed by a Gio.ListStore.
 
-    Returns (listview, store, selection). `on_activate(item)` fires on a single
-    click or Enter, with the activated PackageItem (or None).
+    Returns (listview, store, selection, sel_state).
     """
     store = Gio.ListStore(item_type=PackageItem)
     selection = Gtk.SingleSelection(model=store)
     selection.set_autoselect(False)
     selection.set_can_unselect(True)
 
+    if sel_state is None:
+        sel_state = ListSelectionState()
+
     factory = Gtk.SignalListItemFactory()
     factory.connect("setup", lambda f, li: li.set_child(PackageRowContent()))
-    factory.connect("bind", lambda f, li: li.get_child().bind(li.get_item()))
+    factory.connect("bind", lambda f, li: li.get_child().bind(li.get_item(), sel_state))
 
     listview = Gtk.ListView(model=selection, factory=factory)
     listview.add_css_class("navigation-sidebar")
     listview.set_single_click_activate(True)
-    listview.connect("activate", lambda lv, pos: on_activate(store.get_item(pos)))
-    return listview, store, selection
+
+    def _activate(lv, pos):
+        item = store.get_item(pos)
+        if item is None:
+            return
+        if sel_state.active:
+            name = item.pkg_name
+            if name in sel_state.selected:
+                sel_state.selected.discard(name)
+            else:
+                sel_state.selected.add(name)
+            
+            # Anstatt store.splice aufzurufen (was das Selektionsmodell bricht),
+            # triggern wir das Update direkt auf dem aktuell sichtbaren Widget.
+            if hasattr(item, "_bound_widget") and item._bound_widget:
+                item._bound_widget.update_selection_visuals()
+            
+            if on_selection_change:
+                on_selection_change()
+        else:
+            on_activate(item)
+
+    listview.connect("activate", _activate)
+    return listview, store, selection, sel_state
 
 
 # ─── Sidebar navigation row ───────────────────────────────────────────────────
@@ -215,8 +330,7 @@ class NavRow(Gtk.ListBoxRow):
         box.set_margin_top(7);    box.set_margin_bottom(7)
         box.set_margin_start(10); box.set_margin_end(10)
 
-        icon = Gtk.Image.new_from_icon_name(icon_name)
-        icon.set_pixel_size(16)
+        icon = make_icon(icon_name, 16)
         icon.set_valign(Gtk.Align.CENTER)
         icon.add_css_class("dim-label")
         box.append(icon)

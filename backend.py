@@ -64,6 +64,7 @@ _DEFAULT_SETTINGS = {
     "confirm_remove":           True,
     "check_updates_on_start":   True,
     "show_news_before_upgrade": True,
+    "snapshot_before_upgrade":  False,  # off by default — Timeshift rsync mode can be slow
     "notify_updates":           True,
     "bg_check_interval":        "daily",  # hourly | 6h | daily
     "language":                 "en",     # en | de
@@ -451,6 +452,48 @@ def get_package_files(pkg_name):
     return [f"{pkg_name} /usr/bin/{pkg_name}", f"{pkg_name} /usr/share/man/man1/{pkg_name}.1"]
 
 
+# ─── File → package search (pacman -F) ───────────────────────────────────────
+
+def files_db_available():
+    """Whether a synced pacman files database exists for `pacman -F` to use."""
+    out, code = run_command("ls /var/lib/pacman/sync/*.files 2>/dev/null | head -1")
+    return bool(out.strip()) and code == 0
+
+
+def search_file_owner(query):
+    """Which package(s) own file paths matching `query` (regex, via `pacman -Fx`).
+
+    Returns [{"pkg": "repo/name", "version": "1.0-1", "files": [...]}].
+    Requires the files DB to be synced first (`sudo pacman -Fy`) — callers
+    should check `files_db_available()` and offer that sync if it's missing.
+    """
+    query = query.strip()
+    if not query:
+        return []
+    out, code = run_command(f"pacman -Fx {shlex.quote(query)} 2>/dev/null", timeout=30)
+    results = []
+    if out and code == 0:
+        current = None
+        for line in out.splitlines():
+            if line and not line[0].isspace():
+                parts = line.split()
+                if len(parts) >= 2:
+                    current = {"pkg": parts[0], "version": parts[1], "files": []}
+                    results.append(current)
+            elif current is not None:
+                current["files"].append(line.strip())
+    if not results and _is_demo():
+        needle = query.strip("/").lower()
+        lib_name = needle if needle.startswith("lib") else (f"lib{needle}" if needle else "libssl.so.3")
+        results = [
+            {"pkg": "extra/openssl", "version": "3.3.1-1",
+             "files": [f"usr/lib/{lib_name}"]},
+            {"pkg": "core/systemd", "version": "256.4-1",
+             "files": [f"usr/lib/systemd/{needle or 'systemd'}"]},
+        ]
+    return results
+
+
 # ─── Updates / orphans / sysinfo ─────────────────────────────────────────────
 
 def check_updates():
@@ -634,6 +677,67 @@ def get_arch_news(limit=6):
         if len(items) >= limit:
             break
     return items
+
+
+# ─── AUR package metadata (votes / popularity / maintainer) ───────────────────
+
+def get_aur_info(pkg_name):
+    """Fetch AUR metadata for pkg_name via the official AUR RPC API
+    (https://aur.archlinux.org/rpc/v5/info). Returns a dict with keys like
+    NumVotes, Popularity, Maintainer, LastModified, OutOfDate — or None if
+    the package isn't on AUR, or the request fails (e.g. offline).
+
+    The RPC doesn't expose comments, so callers should instead link out to
+    the package's AUR web page for those.
+    """
+    import urllib.request
+    import urllib.parse
+    url = ("https://aur.archlinux.org/rpc/v5/info?arg[]="
+           + urllib.parse.quote(pkg_name, safe=""))
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Pachul"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+    results = data.get("results") or []
+    return results[0] if results else None
+
+
+# ─── Pre-upgrade snapshot (Timeshift / Snapper) ────────────────────────────────
+
+def detect_snapshot_tool():
+    """Detect an available system-snapshot tool for the pre-upgrade safety net.
+
+    Returns (tool, extra):
+      ("timeshift", None)       — Timeshift is installed
+      ("snapper", "<config>")   — Snapper is installed; extra is the first
+                                    configured snapshot config (e.g. "root")
+      (None, None)              — neither is installed
+    Timeshift is preferred when both are present since it snapshots the
+    whole system by default, without needing a config name.
+    """
+    _, code = run_command("which timeshift 2>/dev/null")
+    if code == 0:
+        return "timeshift", None
+    _, code = run_command("which snapper 2>/dev/null")
+    if code == 0:
+        cfg_out, _ = run_command(
+            "snapper list-configs 2>/dev/null | awk 'NR>2{print $1}' | head -1")
+        cfg = cfg_out.strip() or "root"
+        return "snapper", cfg
+    return None, None
+
+
+def build_snapshot_cmd(comment="Pachul: before system upgrade"):
+    """Shell command that creates a pre-upgrade snapshot, or None if no
+    supported snapshot tool (Timeshift/Snapper) is installed."""
+    tool, info = detect_snapshot_tool()
+    if tool == "timeshift":
+        return f"sudo -S timeshift --create --comments {shlex.quote(comment)} --scripted"
+    if tool == "snapper":
+        return f"sudo -S snapper -c {shlex.quote(info)} create --description {shlex.quote(comment)}"
+    return None
 
 
 # ─── Explicit-package export ──────────────────────────────────────────────────
@@ -893,7 +997,7 @@ def send_update_notification(n):
         else tr("{n} package updates can be installed.")
     body = body.format(n=n)
     run_command(
-        "notify-send --app-name=Pachul --icon=io.github.mrks1469.pachul "
+        "notify-send --app-name=Pachul --icon=io.github.wergosam.pachul "
         f"{shlex.quote('Pachul: ' + title)} {shlex.quote(body)}")
 
 

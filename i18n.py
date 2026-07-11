@@ -204,6 +204,62 @@ STRINGS_DE = {
     "{n} package update can be installed.": "{n} Paketupdate kann installiert werden.",
     "{n} package updates can be installed.": "{n} Paketupdates können installiert werden.",
 
+    # Multi-select / batch actions
+    "Select multiple packages": "Mehrere Pakete auswählen",
+    "Select packages…": "Pakete auswählen …",
+    "{n} selected": "{n} ausgewählt",
+    "Install ({n})": "Installieren ({n})",
+    "Remove ({n})": "Entfernen ({n})",
+    "Remove {n} packages": "{n} Pakete entfernen",
+    "Remove {n} packages?": "{n} Pakete entfernen?",
+    "This will remove the {n} selected packages from your system.":
+        "Dadurch werden die {n} ausgewählten Pakete von deinem System entfernt.",
+    "No AUR helper found — skipped {n} AUR package(s).":
+        "Kein AUR-Helper gefunden — {n} AUR-Paket(e) übersprungen.",
+
+    # File search (pacman -F)
+    "Find Package by File…": "Paket über Datei finden …",
+    "Find Package by File": "Paket über Datei finden",
+    "File database not synced yet — sync it to search":
+        "Dateidatenbank noch nicht synchronisiert — zum Suchen synchronisieren",
+    "Sync Now": "Jetzt synchronisieren",
+    "e.g. libssl.so.3 or usr/bin/htop": "z. B. libssl.so.3 oder usr/bin/htop",
+    "Find out which package installs a given file or command.":
+        "Herausfinden, welches Paket eine bestimmte Datei oder einen Befehl installiert.",
+    "No Package Found": "Kein Paket gefunden",
+    "No package provides a matching file.": "Kein Paket enthält eine passende Datei.",
+    "… and {n} more files": "… und {n} weitere Dateien",
+    "Sync File Database": "Dateidatenbank synchronisieren",
+
+    # GPG / signature error handling
+    "Unknown GPG key {id} detected": "Unbekannter GPG-Schlüssel {id} erkannt",
+    "Import & Retry": "Importieren & erneut versuchen",
+    "Signature check failed — the keyring may be outdated":
+        "Signaturprüfung fehlgeschlagen — Schlüsselring ist möglicherweise veraltet",
+    "Update Keyring & Retry": "Schlüsselring aktualisieren & erneut versuchen",
+
+    # Stale pacman database lock (db.lck) handling
+    "Pacman database is locked (stale db.lck)": "Pacman-Datenbank ist gesperrt (veraltete db.lck)",
+    "Remove Lock & Retry": "Sperre entfernen & erneut versuchen",
+    "Something is still holding the database lock — not removing it.":
+        "Etwas hält die Datenbank-Sperre noch — sie wird nicht entfernt.",
+
+    # Pre-upgrade snapshot (Timeshift/Snapper)
+    "Create snapshot before system upgrades": "Vor System-Upgrades einen Snapshot erstellen",
+    "Safety net via Timeshift — restore point before every upgrade":
+        "Sicherheitsnetz über Timeshift — Wiederherstellungspunkt vor jedem Upgrade",
+    "Safety net via Snapper (config: {config})":
+        "Sicherheitsnetz über Snapper (Konfiguration: {config})",
+    "No Timeshift or Snapper installation found":
+        "Keine Timeshift- oder Snapper-Installation gefunden",
+
+    # AUR metadata (votes / popularity / maintainer)
+    "View on AUR (votes, comments, discussion)": "Auf AUR ansehen (Votes, Kommentare, Diskussion)",
+    "This AUR package is flagged out-of-date by its maintainer":
+        "Dieses AUR-Paket wurde vom Maintainer als veraltet markiert",
+    "AUR info unavailable": "AUR-Infos nicht verfügbar",
+    "Orphaned": "Verwaist",
+
     # Terminal dialog
     "Close": "Schließen",
     "Password or input — press Enter to send": "Passwort oder Eingabe — Enter zum Senden",
@@ -364,6 +420,8 @@ STRINGS_DE = {
     "Refresh package list": "Paketliste aktualisieren",
     "Check for updates": "Auf Updates prüfen",
     "Preferences  ": "Einstellungen",
+    "Select all packages (batch mode)": "Alle Pakete auswählen (Batch-Modus)",
+    "Deselect all packages (batch mode)": "Alle Pakete abwählen (Batch-Modus)",
     "Quit": "Beenden",
 }
 
@@ -521,6 +579,62 @@ STRINGS_FR = {
     "Updates Available": "Mises à jour disponibles",
     "{n} package update can be installed.": "{n} mise à jour de paquet peut être installée.",
     "{n} package updates can be installed.": "{n} mises à jour de paquets peuvent être installées.",
+
+    # Multi-select / batch actions
+    "Select multiple packages": "Sélectionner plusieurs paquets",
+    "Select packages…": "Sélectionner des paquets…",
+    "{n} selected": "{n} sélectionné(s)",
+    "Install ({n})": "Installer ({n})",
+    "Remove ({n})": "Supprimer ({n})",
+    "Remove {n} packages": "Supprimer {n} paquets",
+    "Remove {n} packages?": "Supprimer {n} paquets ?",
+    "This will remove the {n} selected packages from your system.":
+        "Cela supprimera les {n} paquets sélectionnés de votre système.",
+    "No AUR helper found — skipped {n} AUR package(s).":
+        "Aucun assistant AUR trouvé — {n} paquet(s) AUR ignoré(s).",
+
+    # File search (pacman -F)
+    "Find Package by File…": "Trouver un paquet par fichier…",
+    "Find Package by File": "Trouver un paquet par fichier",
+    "File database not synced yet — sync it to search":
+        "Base de données des fichiers non synchronisée — synchronisez-la pour rechercher",
+    "Sync Now": "Synchroniser maintenant",
+    "e.g. libssl.so.3 or usr/bin/htop": "p. ex. libssl.so.3 ou usr/bin/htop",
+    "Find out which package installs a given file or command.":
+        "Découvrez quel paquet installe un fichier ou une commande donnée.",
+    "No Package Found": "Aucun paquet trouvé",
+    "No package provides a matching file.": "Aucun paquet ne fournit de fichier correspondant.",
+    "… and {n} more files": "… et {n} fichiers supplémentaires",
+    "Sync File Database": "Synchroniser la base de données des fichiers",
+
+    # GPG / signature error handling
+    "Unknown GPG key {id} detected": "Clé GPG inconnue {id} détectée",
+    "Import & Retry": "Importer et réessayer",
+    "Signature check failed — the keyring may be outdated":
+        "Échec de la vérification de signature — le trousseau de clés est peut-être obsolète",
+    "Update Keyring & Retry": "Mettre à jour le trousseau et réessayer",
+
+    # Verrou de base de données pacman obsolète (db.lck)
+    "Pacman database is locked (stale db.lck)": "La base de données pacman est verrouillée (db.lck obsolète)",
+    "Remove Lock & Retry": "Supprimer le verrou et réessayer",
+    "Something is still holding the database lock — not removing it.":
+        "Quelque chose détient encore le verrou de la base de données — il n'est pas supprimé.",
+
+    # Pre-upgrade snapshot (Timeshift/Snapper)
+    "Create snapshot before system upgrades": "Créer un instantané avant les mises à jour système",
+    "Safety net via Timeshift — restore point before every upgrade":
+        "Filet de sécurité via Timeshift — point de restauration avant chaque mise à jour",
+    "Safety net via Snapper (config: {config})":
+        "Filet de sécurité via Snapper (config : {config})",
+    "No Timeshift or Snapper installation found":
+        "Aucune installation de Timeshift ou Snapper trouvée",
+
+    # AUR metadata (votes / popularity / maintainer)
+    "View on AUR (votes, comments, discussion)": "Voir sur AUR (votes, commentaires, discussion)",
+    "This AUR package is flagged out-of-date by its maintainer":
+        "Ce paquet AUR est signalé comme obsolète par son mainteneur",
+    "AUR info unavailable": "Infos AUR indisponibles",
+    "Orphaned": "Orphelin",
 
     # Terminal dialog
     "Close": "Fermer",
@@ -682,6 +796,8 @@ STRINGS_FR = {
     "Refresh package list": "Actualiser la liste des paquets",
     "Check for updates": "Vérifier les mises à jour",
     "Preferences  ": "Préférences",
+    "Select all packages (batch mode)": "Sélectionner tous les paquets (mode batch)",
+    "Deselect all packages (batch mode)": "Désélectionner tous les paquets (mode batch)",
     "Quit": "Quitter",
 }
 
@@ -839,6 +955,62 @@ STRINGS_IT = {
     "Updates Available": "Aggiornamenti disponibili",
     "{n} package update can be installed.": "È disponibile {n} aggiornamento di pacchetto da installare.",
     "{n} package updates can be installed.": "Sono disponibili {n} aggiornamenti di pacchetti da installare.",
+
+    # Multi-select / batch actions
+    "Select multiple packages": "Seleziona più pacchetti",
+    "Select packages…": "Seleziona pacchetti…",
+    "{n} selected": "{n} selezionati",
+    "Install ({n})": "Installa ({n})",
+    "Remove ({n})": "Rimuovi ({n})",
+    "Remove {n} packages": "Rimuovi {n} pacchetti",
+    "Remove {n} packages?": "Rimuovere {n} pacchetti?",
+    "This will remove the {n} selected packages from your system.":
+        "Questo rimuoverà i {n} pacchetti selezionati dal sistema.",
+    "No AUR helper found — skipped {n} AUR package(s).":
+        "Nessun helper AUR trovato — {n} pacchetto/i AUR saltato/i.",
+
+    # File search (pacman -F)
+    "Find Package by File…": "Trova pacchetto per file…",
+    "Find Package by File": "Trova pacchetto per file",
+    "File database not synced yet — sync it to search":
+        "Database dei file non ancora sincronizzato — sincronizzalo per cercare",
+    "Sync Now": "Sincronizza ora",
+    "e.g. libssl.so.3 or usr/bin/htop": "es. libssl.so.3 o usr/bin/htop",
+    "Find out which package installs a given file or command.":
+        "Scopri quale pacchetto installa un determinato file o comando.",
+    "No Package Found": "Nessun pacchetto trovato",
+    "No package provides a matching file.": "Nessun pacchetto fornisce un file corrispondente.",
+    "… and {n} more files": "… e altri {n} file",
+    "Sync File Database": "Sincronizza database dei file",
+
+    # GPG / signature error handling
+    "Unknown GPG key {id} detected": "Chiave GPG sconosciuta {id} rilevata",
+    "Import & Retry": "Importa e riprova",
+    "Signature check failed — the keyring may be outdated":
+        "Verifica della firma non riuscita — il portachiavi potrebbe non essere aggiornato",
+    "Update Keyring & Retry": "Aggiorna portachiavi e riprova",
+
+    # Blocco obsoleto del database pacman (db.lck)
+    "Pacman database is locked (stale db.lck)": "Il database di pacman è bloccato (db.lck obsoleto)",
+    "Remove Lock & Retry": "Rimuovi blocco e riprova",
+    "Something is still holding the database lock — not removing it.":
+        "Qualcosa detiene ancora il blocco del database — non viene rimosso.",
+
+    # Pre-upgrade snapshot (Timeshift/Snapper)
+    "Create snapshot before system upgrades": "Crea uno snapshot prima degli aggiornamenti di sistema",
+    "Safety net via Timeshift — restore point before every upgrade":
+        "Rete di sicurezza tramite Timeshift — punto di ripristino prima di ogni aggiornamento",
+    "Safety net via Snapper (config: {config})":
+        "Rete di sicurezza tramite Snapper (configurazione: {config})",
+    "No Timeshift or Snapper installation found":
+        "Nessuna installazione di Timeshift o Snapper trovata",
+
+    # AUR metadata (votes / popularity / maintainer)
+    "View on AUR (votes, comments, discussion)": "Vedi su AUR (voti, commenti, discussione)",
+    "This AUR package is flagged out-of-date by its maintainer":
+        "Questo pacchetto AUR è segnalato come obsoleto dal manutentore",
+    "AUR info unavailable": "Informazioni AUR non disponibili",
+    "Orphaned": "Orfano",
 
     # Terminal dialog
     "Close": "Chiudi",
@@ -1000,6 +1172,8 @@ STRINGS_IT = {
     "Refresh package list": "Aggiorna elenco pacchetti",
     "Check for updates": "Controlla aggiornamenti",
     "Preferences  ": "Preferenze",
+    "Select all packages (batch mode)": "Seleziona tutti i pacchetti (modalità batch)",
+    "Deselect all packages (batch mode)": "Deseleziona tutti i pacchetti (modalità batch)",
     "Quit": "Esci",
 }
 

@@ -1,13 +1,13 @@
 <div align="center">
 
-<img src="screenshots/pachul01.webp" width="500" alt="Pachul Icon"/>
+<img src="screenshots/pachul01.webp" width="72" alt="Pachul Icon"/>
 
 # Pachul
 
 **A modern, graphical package manager for Arch Linux and Manjaro**
 **Ein moderner, grafischer Paketmanager für Arch Linux und Manjaro**
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0)
 [![Platform](https://img.shields.io/badge/Platform-Arch%20%7C%20Manjaro-1793D1)](https://archlinux.org)
 [![AUR](https://img.shields.io/badge/AUR-available-5277C3)](https://aur.archlinux.org)
 [![GTK4](https://img.shields.io/badge/GTK-4-4A90D9)](https://gtk.org)
@@ -26,6 +26,7 @@
 ## Table of Contents
 
 - [Overview](#overview)
+- [What's New](#whats-new)
 - [Screenshots](#screenshots)
 - [Features](#features)
 - [Installation](#installation)
@@ -46,6 +47,18 @@ Pachul is a clean, fast GTK4 / libadwaita frontend for `pacman` and the AUR. It 
 Pachul follows the GNOME Human Interface Guidelines and adapts automatically to your system's light or dark style.
 
 **Repository:** [github.com/wergosam/Pachul](https://github.com/wergosam/Pachul)
+
+---
+
+## What's New
+
+Recent improvements to the terminal/privileged-action panel:
+
+- **Password field auto-focus** — the sudo password field is now focused automatically as soon as the terminal dialog opens, so you can start typing immediately without clicking into it first.
+- **Automatic stale-lock recovery** — if pacman reports a locked database (`db.lck`), Pachul detects this and offers a one-click **"Remove Lock & Retry"** fix. It first checks (via `fuser`) whether anything is *actually* still holding the lock, so it never removes it out from under a genuinely running operation.
+- **Cleaner terminal output** — newer escape sequences some systems emit around `sudo` (systemd/pam_systemd session markers) are now filtered out instead of appearing as raw, unreadable text in the output panel.
+
+See [Troubleshooting](#troubleshooting) below if you keep seeing database-lock errors — it's usually caused by another package-management daemon (PackageKit, Manjaro's `pamac-daemon`) running alongside Pachul.
 
 ---
 
@@ -188,6 +201,11 @@ pachul/
 - **Background notifications never appear** — check the timer is enabled in Preferences, and that `notify-send` (usually part of `libnotify`) is installed.
 - **Mirror rating tool missing** — install `rate-mirrors` from the AUR; Pachul offers a one-click install button when it's absent.
 - **Language doesn't fully change** — some UI elements are only re-translated after a full restart of Pachul; this is expected.
+- **"Failed to lock database" / `db.lck` errors, especially right after every single operation** — usually caused by another package-management daemon running alongside Pachul and briefly re-locking the same database (commonly PackageKit, or on Manjaro, `pamac-daemon` together with its tray icon). Pachul offers an automatic **Remove Lock & Retry** fix for one-off cases, but if it keeps recurring, disable the conflicting service for good, e.g.:
+  ```bash
+  sudo systemctl mask pamac-daemon
+  ```
+  and disable its tray-icon autostart if you use Pachul as your primary package manager. To confirm what's actually holding the lock at the moment it happens, run `sudo fuser -v /var/lib/pacman/db.lck`.
 
 Found a bug that isn't covered here? Please [open an issue](https://github.com/wergosam/Pachul/issues).
 
@@ -209,7 +227,7 @@ New UI strings should be added to all four language tables in `i18n.py` (`STRING
 
 ## License
 
-This project is licensed under the **GNU General Public License v3.0** — see the [LICENSE](https://github.com/wergosam/Pachul/blob/main/LICENSE) file for details.
+This project is licensed under the **GNU General Public License v2.0** — see the [LICENSE](https://github.com/wergosam/Pachul/blob/main/LICENSE) file for details.
 
 ---
 
@@ -229,6 +247,7 @@ This project is licensed under the **GNU General Public License v3.0** — see t
 ## Inhaltsverzeichnis
 
 - [Übersicht](#übersicht)
+- [Neuigkeiten](#neuigkeiten)
 - [Screenshots](#screenshots-1)
 - [Funktionen](#funktionen)
 - [Installation](#installation-1)
@@ -249,6 +268,18 @@ Pachul ist ein schlankes, schnelles GTK4- / libadwaita-Frontend für `pacman` un
 Pachul folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch an den hellen oder dunklen Stil deines Systems an.
 
 **Repository:** [github.com/wergosam/Pachul](https://github.com/wergosam/Pachul)
+
+---
+
+## Neuigkeiten
+
+Aktuelle Verbesserungen am Terminal-/Privilegien-Panel:
+
+- **Automatischer Fokus auf das Passwortfeld** — das Sudo-Passwortfeld wird jetzt automatisch fokussiert, sobald sich der Terminal-Dialog öffnet, sodass du sofort tippen kannst, ohne vorher hineinzuklicken.
+- **Automatische Behebung veralteter Sperren** — meldet Pacman eine gesperrte Datenbank (`db.lck`), erkennt Pachul das und bietet einen Ein-Klick-Fix **„Sperre entfernen & erneut versuchen"** an. Vorher wird per `fuser` geprüft, ob überhaupt noch etwas die Sperre wirklich hält, damit sie nie unter einem tatsächlich laufenden Vorgang entfernt wird.
+- **Saubere Terminal-Ausgabe** — neuere Escape-Sequenzen, die manche Systeme rund um `sudo` ausgeben (systemd-/pam_systemd-Sitzungsmarkierungen), werden jetzt herausgefiltert, statt als roher, unlesbarer Text im Ausgabebereich zu erscheinen.
+
+Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten, falls weiterhin Datenbank-Sperre-Fehler auftreten — meist verursacht durch einen weiteren, parallel laufenden Paketverwaltungs-Dienst (PackageKit, Manjaros `pamac-daemon`).
 
 ---
 
@@ -391,6 +422,11 @@ pachul/
 - **Hintergrund-Benachrichtigungen erscheinen nie** — prüfe, ob der Timer in den Einstellungen aktiviert ist und ob `notify-send` (üblicherweise Teil von `libnotify`) installiert ist.
 - **Werkzeug zur Spiegelserver-Bewertung fehlt** — installiere `rate-mirrors` aus dem AUR; Pachul bietet dafür einen Ein-Klick-Installationsbutton an, falls es fehlt.
 - **Sprache wechselt nicht vollständig** — manche UI-Elemente werden erst nach einem vollständigen Neustart von Pachul neu übersetzt; das ist beabsichtigt.
+- **„Datenbank kann nicht gesperrt werden" / `db.lck`-Fehler, besonders nach jedem einzelnen Vorgang** — meist verursacht durch einen weiteren, parallel laufenden Paketverwaltungs-Dienst, der dieselbe Datenbank kurz danach erneut sperrt (häufig PackageKit, oder unter Manjaro `pamac-daemon` zusammen mit dessen Tray-Icon). Pachul bietet für Einzelfälle einen automatischen Fix **„Sperre entfernen & erneut versuchen"** an — tritt es aber wiederholt auf, den störenden Dienst dauerhaft deaktivieren, z. B.:
+  ```bash
+  sudo systemctl mask pamac-daemon
+  ```
+  und dessen Tray-Icon-Autostart deaktivieren, falls du Pachul als deinen Haupt-Paketmanager nutzt. Um herauszufinden, was die Sperre im konkreten Moment tatsächlich hält, hilft `sudo fuser -v /var/lib/pacman/db.lck`.
 
 Einen Fehler gefunden, der hier nicht behandelt wird? Bitte [ein Issue eröffnen](https://github.com/wergosam/Pachul/issues).
 
@@ -412,7 +448,7 @@ Neue UI-Texte sollten in allen vier Sprachtabellen in `i18n.py` (`STRINGS_DE`, `
 
 ## Lizenz
 
-Dieses Projekt steht unter der **GNU General Public License v3.0** — siehe die [LICENSE](https://github.com/wergosam/Pachul/blob/main/LICENSE)-Datei für Details.
+Dieses Projekt steht unter der **GNU General Public License v2.0** — siehe die [LICENSE](https://github.com/wergosam/Pachul/blob/main/LICENSE)-Datei für Details.
 
 ---
 
