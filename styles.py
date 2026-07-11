@@ -24,9 +24,52 @@ CSS = """
 
 /* ── Package rows ── */
 .pkg-row { border-radius: 6px; margin: 1px 8px; }
-.pkg-row:hover { background: alpha(@card_fg_color, 0.05); }
+.pkg-row:hover,
 .pkg-row:selected,
 .pkg-row:selected:hover { background: alpha(@accent_bg_color, 0.18); }
+
+/* Hover-Effekt entfernen */
+.pkg-row:hover { background: transparent; }
+
+/* Der hellblaue Hintergrund ist weg, das breite Feld bleibt farbneutral */
+.pkg-row-selected,
+.pkg-row-selected:hover {
+    background: transparent;
+}
+
+/* ── Batch-selection checkbox (custom-drawn, theme-independent) ── */
+.pkg-checkbox,
+.pkg-checkbox:hover,
+.pkg-checkbox:focus,
+.pkg-checkbox:active,
+.pkg-checkbox:backdrop {
+    border: 2px solid alpha(@card_fg_color, 0.4);
+    border-radius: 5px;
+    background-color: transparent;
+    background-image: none;
+    box-shadow: none;
+    outline: none;
+}
+.pkg-checkbox-checked,
+.pkg-checkbox-checked:hover,
+.pkg-checkbox-checked:focus,
+.pkg-checkbox-checked:active,
+.pkg-checkbox-checked:backdrop {
+    border-color: #3584e4;
+    background-color: #3584e4;
+    background-image: none;
+}
+.pkg-checkbox-mark,
+.pkg-checkbox-mark:hover,
+.pkg-checkbox-mark:focus,
+.pkg-checkbox-mark:active,
+.pkg-checkbox-mark:backdrop {
+    color: #ffffff;
+    background-color: transparent;
+    background-image: none;
+    font-size: 13px;
+    font-weight: 800;
+}
 
 /* ── Badges ── */
 .badge {
@@ -66,8 +109,7 @@ CSS = """
 
 /* ── Terminal ── */
 .terminal-view {
-    background: #0d1117;
-    color: #c9d1d9;
+    background: #f5f5f5;
     border-radius: 8px;
     font-family: "Cascadia Code","JetBrains Mono","Fira Code",monospace;
     font-size: 0.85rem;
@@ -170,7 +212,6 @@ progressbar trough progress { border-radius: 999px; }
     outline: none;
 }
 """
-
 
 def load_css():
     p = Gtk.CssProvider()

@@ -17,6 +17,8 @@ import fcntl
 import termios
 import struct
 import threading
+import urllib.parse
+from datetime import datetime
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -25,16 +27,59 @@ from gi.repository import Gtk, Adw, GLib, Pango
 
 from backend import (run_command, get_orphans, get_system_info,
                      get_pacman_history, get_cached_versions,
-                     get_pkgbuild, get_pacnew_files, get_file_diff, get_setting, save_settings)
+                     get_pkgbuild, get_pacnew_files, get_file_diff, get_setting, save_settings,
+                     files_db_available, search_file_owner)
 from i18n import tr, get_language, set_language
 
 
 # ─── Terminal dialog ──────────────────────────────────────────────────────────
 
+# Recognized pacman/GPG signature-failure patterns. `_GPG_KEY_ID_RE` catches
+# the (rarer) case where pacman's output names a concrete key ID — e.g.
+# ":: Import PGP key 6D42BDD116E0068F, ..." or "unknown public key <ID>".
+# `_GPG_TRUST_RE` / `_GPG_GENERIC_RE` catch the far more common case seen
+# with --noconfirm (the key gets auto-imported but stays untrusted):
+#   error: <pkg>: signature from "Name <email>" is unknown trust
+#   :: File ... is corrupted (invalid or corrupted package (PGP signature)).
+# That case has no bare key ID to target, so the fix is a keyring refresh
+# (the ArchWiki-recommended remedy: sync + reinstall archlinux-keyring).
+_GPG_KEY_ID_RE = _re.compile(
+    r'(?:unknown public key|Import PGP key|key ")\s*([0-9A-Fa-f]{8,40})',
+    _re.IGNORECASE)
+_GPG_TRUST_RE = _re.compile(r'signature from ".*?" is unknown trust', _re.IGNORECASE)
+_GPG_GENERIC_RE = _re.compile(
+    r'corrupted package \(PGP signature\)|PGP signatures? could not be verified',
+    _re.IGNORECASE)
+
+# Stale pacman database lock ("db.lck"). Pacman refuses to run at all while
+# this file exists — usually a leftover from a crashed/killed previous run,
+# a power loss, or a second package manager instance. Matches both English
+# and German pacman wording, since this app is mostly used with a German
+# system locale.
+_DB_LOCK_RE = _re.compile(
+    r'unable to lock database'
+    r'|Datenbank (?:nicht sperren|konnte nicht gesperrt werden)',
+    _re.IGNORECASE)
+
+
+def _detect_gpg_issue(text):
+    """Return a hex key ID, "" (generic — no ID found), or None (no GPG issue)."""
+    m = _GPG_KEY_ID_RE.search(text)
+    if m:
+        return m.group(1).upper()
+    if _GPG_TRUST_RE.search(text) or _GPG_GENERIC_RE.search(text):
+        return ""
+    return None
+
+
 def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None):
     """
     Open a PTY-backed terminal dialog that runs *cmd*.
     Calls on_success() (on the main thread) if the command exits with code 0.
+
+    If the command fails with a recognizable GPG/signature error, offers an
+    inline one-click fix (import the missing key, or refresh the keyring)
+    followed by an automatic retry of *cmd* in a fresh dialog.
     """
     dialog = Adw.Dialog()
     dialog.set_title(title)
@@ -76,9 +121,30 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     cmd_lbl.set_margin_top(6);    cmd_lbl.set_margin_bottom(4)
     tv.add_top_bar(cmd_lbl)
 
+    gpg_banner = Adw.Banner()
+    gpg_banner.set_revealed(False)
+    tv.add_top_bar(gpg_banner)
+
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
     outer.set_margin_top(8);    outer.set_margin_bottom(12)
     outer.set_margin_start(12); outer.set_margin_end(12)
+
+    # Real progress bar, parsed live from pacman's own "[####----] NN%" lines
+    # (download progress and "(i/n) installing pkg [...] NN%" alike). Hidden
+    # until the first such line arrives; hidden again once the command ends.
+    progress_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    progress_box.set_visible(False)
+    progress_label = Gtk.Label(label="")
+    progress_label.add_css_class("caption")
+    progress_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+    progress_label.set_width_chars(18)
+    progress_label.set_xalign(0.0)
+    progress_box.append(progress_label)
+    progress_bar = Gtk.ProgressBar()
+    progress_bar.set_hexpand(True)
+    progress_bar.set_show_text(True)
+    progress_box.append(progress_bar)
+    outer.append(progress_box)
 
     scroll = Gtk.ScrolledWindow()
     scroll.set_vexpand(True); scroll.set_hexpand(True)
@@ -134,29 +200,109 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     dialog.set_child(tv)
     dialog.present(parent)
 
+    # Fokus direkt ins Passwort-/Eingabefeld setzen, damit man sofort
+    # tippen kann, ohne vorher hineinklicken zu müssen. Direkt nach
+    # present() ist das Fenster meist noch nicht vollständig gemappt,
+    # daher via idle_add einmalig verzögert ausführen.
+    #
+    # WICHTIG: grab_focus() liefert selbst True/False zurück (Erfolg/
+    # Misserfolg). Würde man es direkt als idle-Callback übergeben,
+    # interpretiert GLib ein „True“ als „bitte erneut aufrufen“ — die
+    # Funktion würde dann in einer Endlosschleife bei jedem Idle-Zyklus
+    # erneut den Fokus grabben, auch während der Nutzer tippt (Symptom:
+    # nur das zuletzt getippte Zeichen bleibt markiert, der Rest geht
+    # verloren). Daher hier explizit in einen Wrapper packen, der immer
+    # False zurückgibt, damit der Callback nur genau einmal läuft.
+    def _focus_pw_once():
+        pw_entry.grab_focus()
+        return False
+    GLib.idle_add(_focus_pw_once)
+
     # ── Internal state ────────────────────────────────────────────────────────
     _master_fd = [None]
     _proc      = [None]
     _running   = [True]
 
     _ANSI = _re.compile(
-        r'\x1b\[[0-9;?]*[ -/]*[@-~]'
+        r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)'   # OSC sequences: window title, hyperlinks,
+                                                # and newer systemd/pam_systemd session-
+                                                # boundary markers (e.g. "OSC 3008") that
+                                                # sudo now emits — must come before the
+                                                # generic ESC-fallback below, otherwise only
+                                                # the ESC ']' gets eaten and the payload
+                                                # (e.g. "3008;start=...;type=session") is
+                                                # printed as literal text.
+        r'|\x1b\[[0-9;?]*[ -/]*[@-~]'
         r'|\x1b[()][AB012]'
         r'|\x1b[^[]'
         r'|\x08'
-        r'|\r'
     )
 
-    def strip_ansi(s):
-        s = s.replace('\r\n', '\n').replace('\r', '\n')
-        return _ANSI.sub('', s)
+    # Matches pacman's own progress-bar lines, e.g.:
+    #   firefox-125.0-1-x86_64.pkg.tar.zst  65.2 MiB  15.3 MiB/s 00:03 [###----] 68%
+    #   (3/12) installing firefox                        [######------------] 71%
+    # The bracket contents are left generic ([^\]]*) since the fill character
+    # varies with pacman's Color/ILoveCandy settings.
+    _PROGRESS_RE = _re.compile(r'^\s*(\S.*?)\s+\[[^\]]*\]\s*(\d{1,3})%\s*$')
+
+    def _update_progress(line):
+        m = _PROGRESS_RE.match(line)
+        if not m:
+            return
+        desc, pct = m.group(1).strip(), max(0, min(100, int(m.group(2))))
+        progress_bar.set_fraction(pct / 100.0)
+        progress_bar.set_text(f"{pct}%")
+        item = desc.split()[0] if desc.split() else desc
+        progress_label.set_label(item)
+        progress_label.set_tooltip_text(desc)
+        if not progress_box.get_visible():
+            progress_box.set_visible(True)
 
     def append_output(raw_text):
-        cleaned = strip_ansi(raw_text)
-        if not cleaned:
+        # Normalize real newlines first, but keep lone '\r' (carriage return
+        # without '\n') intact — pacman uses it to redraw the current line
+        # in place (progress bars). Naively turning every '\r' into '\n'
+        # would spam the buffer with hundreds of near-duplicate lines.
+        text = raw_text.replace('\r\n', '\n')
+        segments = text.split('\r')
+        changed = False
+        for i, seg in enumerate(segments):
+            if i > 0:
+                # A lone '\r' occurred here: erase back to the start of the
+                # buffer's current (last, still being written) line so the
+                # next segment overwrites it — same as a real terminal.
+                end_iter = term_buf.get_end_iter()
+                success, line_start = term_buf.get_iter_at_line(end_iter.get_line())
+                if success:
+                    term_buf.delete(line_start, end_iter)
+                    changed = True
+            cleaned = _ANSI.sub('', seg)
+            if not cleaned:
+                continue
+            end_iter = term_buf.get_end_iter()
+            term_buf.insert(end_iter, cleaned)
+            changed = True
+            if '\n' in cleaned:
+                # This insert just terminated a line (e.g. the final 100%
+                # frame of a download, followed by '\n') — check it too,
+                # not just the new (currently empty) trailing line.
+                n = term_buf.get_end_iter().get_line()
+                if n > 0:
+                    success1, completed_start = term_buf.get_iter_at_line(n - 1)
+                    success2, completed_end = term_buf.get_iter_at_line(n)
+                    if success1 and success2:
+                        _update_progress(term_buf.get_text(completed_start, completed_end, False))
+            # Whatever now sits on the buffer's last (possibly still-open)
+            # line is the freshest redraw of it — read it from the buffer
+            # itself (not just this chunk) so a chunk boundary landing
+            # mid-line never breaks the match.
+            last_line_num = term_buf.get_end_iter().get_line()
+            success_last, last_start = term_buf.get_iter_at_line(last_line_num)
+            if success_last:
+                last_line = term_buf.get_text(last_start, term_buf.get_end_iter(), False)
+                _update_progress(last_line)
+        if not changed:
             return False
-        end_iter = term_buf.get_end_iter()
-        term_buf.insert(end_iter, cleaned)
         mark = term_buf.get_insert()
         term_view.scroll_mark_onscreen(mark)
         adj = scroll.get_vadjustment()
@@ -201,6 +347,7 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
         cancel_btn.set_visible(False)
         close_btn.set_sensitive(True)
         close_btn.grab_focus()
+        progress_box.set_visible(False)
         sep = "\n" + "─" * 56 + "\n"
         if code == 0:
             append_output(sep + tr("✓  Completed successfully\n"))
@@ -208,6 +355,77 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
             append_output(sep + tr("✗  Failed  (exit code {code})\n").format(code=code))
         pw_entry.set_sensitive(False)
         send_btn.set_sensitive(False)
+        if code != 0:
+            full_text = term_buf.get_text(term_buf.get_start_iter(), term_buf.get_end_iter(), False)
+            gpg_issue = _detect_gpg_issue(full_text)
+            if gpg_issue is not None:
+                key_id = gpg_issue
+
+                def _do_gpg_fix(*_):
+                    gpg_banner.set_revealed(False)
+                    if key_id:
+                        fix = (f"sudo -S pacman-key --recv-keys {key_id} && "
+                               f"sudo -S pacman-key --lsign-key {key_id}")
+                    else:
+                        fix = "sudo -S pacman -Sy --needed --noconfirm archlinux-keyring"
+                    dialog.close()
+                    run_terminal_dialog(parent, f"{fix} && {cmd}", title,
+                                        on_success=on_success, on_done_extra=on_done_extra)
+
+                if key_id:
+                    gpg_banner.set_title(tr("Unknown GPG key {id} detected").format(id=key_id))
+                    gpg_banner.set_button_label(tr("Import & Retry"))
+                else:
+                    gpg_banner.set_title(tr("Signature check failed — the keyring may be outdated"))
+                    gpg_banner.set_button_label(tr("Update Keyring & Retry"))
+                gpg_banner.connect("button-clicked", _do_gpg_fix)
+                gpg_banner.set_revealed(True)
+            elif _DB_LOCK_RE.search(full_text):
+                def _do_lock_fix(*_):
+                    gpg_banner.set_revealed(False)
+                    # Safety check baked into the fix itself: only remove
+                    # db.lck if something is actually still holding it —
+                    # otherwise we'd risk corrupting a genuinely in-progress
+                    # operation. `fuser` checks the *file itself*, so it also
+                    # catches the most common real-world cause of this
+                    # repeating right after every single transaction:
+                    # PackageKit's packagekitd (used by KDE Discover / some
+                    # Plasma widgets) waking up and briefly re-locking the
+                    # same pacman db right after pacman finishes. A plain
+                    # `pgrep pacman` would miss that entirely, since the
+                    # process holding the lock isn't named "pacman" at all.
+                    # Falls back to a wider process-name check if `fuser`
+                    # (psmisc) isn't installed.
+                    #
+                    # IMPORTANT: build the inner script as one plain string,
+                    # then quote it EXACTLY ONCE with shlex.quote() for
+                    # embedding into the outer command. Manually wrapping it
+                    # in '...' *and* separately shlex.quote()-ing the message
+                    # inside (as an earlier version of this code did) nests
+                    # two independently-generated single-quoted spans — since
+                    # shells can't nest ' inside ', that closes the script
+                    # early and leaves an unterminated `if` behind, causing
+                    # exactly the "unexpected end of file" error seen before.
+                    lock_msg = tr("Something is still holding the database lock — not removing it.")
+                    inner_script = (
+                        "if command -v fuser >/dev/null 2>&1; then "
+                        "  fuser -s /var/lib/pacman/db.lck 2>/dev/null; held=$?; "
+                        "else "
+                        "  (pgrep -x pacman || pgrep -x pacman-key || pgrep -x packagekitd "
+                        "   || pgrep -x pamac-daemon) >/dev/null; held=$?; "
+                        "fi; "
+                        f"if [ \"$held\" = 0 ]; then echo {shlex.quote(lock_msg)} >&2; exit 1; "
+                        "else rm -f /var/lib/pacman/db.lck; fi"
+                    )
+                    fix = "sudo -S bash -c " + shlex.quote(inner_script)
+                    dialog.close()
+                    run_terminal_dialog(parent, f"{fix} && {cmd}", title,
+                                        on_success=on_success, on_done_extra=on_done_extra)
+
+                gpg_banner.set_title(tr("Pacman database is locked (stale db.lck)"))
+                gpg_banner.set_button_label(tr("Remove Lock & Retry"))
+                gpg_banner.connect("button-clicked", _do_lock_fix)
+                gpg_banner.set_revealed(True)
         if code == 0 and on_success:
             on_success()
         if on_done_extra:
@@ -692,7 +910,142 @@ def show_orphan_finder(parent, run_terminal_fn):
     dialog.present(parent)
 
 
-# ─── System info dialog ───────────────────────────────────────────────────────
+# ─── File search dialog (pacman -F) ──────────────────────────────────────────
+
+def show_file_search_dialog(parent, run_terminal_fn):
+    dialog = Adw.Dialog()
+    dialog.set_title(tr("Find Package by File"))
+    dialog.set_content_width(600)
+    dialog.set_content_height(560)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+    sync_banner = Adw.Banner()
+    sync_banner.set_title(tr("File database not synced yet — sync it to search"))
+    sync_banner.set_button_label(tr("Sync Now"))
+    sync_banner.set_revealed(not files_db_available())
+    outer.append(sync_banner)
+
+    search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    search_box.set_margin_start(12); search_box.set_margin_end(12)
+    search_box.set_margin_top(10);   search_box.set_margin_bottom(6)
+    entry = Gtk.SearchEntry()
+    entry.set_placeholder_text(tr("e.g. libssl.so.3 or usr/bin/htop"))
+    entry.set_hexpand(True)
+    search_box.append(entry)
+    search_btn = Gtk.Button(label=tr("Search"))
+    search_btn.add_css_class("suggested-action")
+    search_box.append(search_btn)
+    outer.append(search_box)
+
+    hint = Gtk.Label(label=tr("Find out which package installs a given file or command."))
+    hint.add_css_class("caption"); hint.add_css_class("dim-label")
+    hint.set_margin_start(12); hint.set_margin_bottom(8)
+    hint.set_halign(Gtk.Align.START)
+    outer.append(hint)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_vexpand(True)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_margin_start(12); scroll.set_margin_end(12); scroll.set_margin_bottom(12)
+    listbox = Gtk.ListBox()
+    listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+    listbox.add_css_class("boxed-list")
+    scroll.set_child(listbox)
+    outer.append(scroll)
+
+    tv.set_content(outer)
+    dialog.set_child(tv)
+    dialog.present(parent)
+
+    def render(results):
+        while listbox.get_first_child():
+            listbox.remove(listbox.get_first_child())
+        if not results:
+            empty = Adw.ActionRow()
+            empty.set_title(tr("No Package Found"))
+            empty.set_subtitle(tr("No package provides a matching file."))
+            listbox.append(empty)
+            return
+        for r in results:
+            pkg_full = r["pkg"]
+            pkg_name = pkg_full.split("/")[-1]
+            repo = pkg_full.split("/")[0] if "/" in pkg_full else ""
+
+            row = Adw.ExpanderRow()
+            row.set_title(pkg_name)
+            row.set_subtitle(f"{repo}  ·  {r['version']}" if repo else r["version"])
+            icon = Gtk.Image.new_from_icon_name("package-x-generic-symbolic")
+            icon.add_css_class("dim-label")
+            row.add_prefix(icon)
+
+            _, installed_code = run_command(f"pacman -Qi {shlex.quote(pkg_name)} 2>/dev/null")
+            if installed_code == 0:
+                badge = Gtk.Label(label=tr("INSTALLED"))
+                badge.add_css_class("caption"); badge.add_css_class("status-installed")
+                badge.add_css_class("row-status-pill")
+                badge.set_valign(Gtk.Align.CENTER)
+                row.add_suffix(badge)
+            else:
+                inst_btn = Gtk.Button(label=tr("Install"))
+                inst_btn.add_css_class("suggested-action"); inst_btn.add_css_class("flat")
+                inst_btn.set_valign(Gtk.Align.CENTER)
+                name = pkg_name
+                inst_btn.connect("clicked", lambda *_, n=name: (
+                    dialog.close(),
+                    run_terminal_fn(f"sudo -S pacman -S --noconfirm {shlex.quote(n)}",
+                                    tr("Install {name}").format(name=n))
+                ))
+                row.add_suffix(inst_btn)
+
+            shown_files = r["files"][:20]
+            for f in shown_files:
+                frow = Adw.ActionRow()
+                frow.set_title(f if f.startswith("/") else f"/{f}")
+                row.add_row(frow)
+            extra = len(r["files"]) - len(shown_files)
+            if extra > 0:
+                more = Adw.ActionRow()
+                more.set_title(tr("… and {n} more files").format(n=extra))
+                row.add_row(more)
+
+            listbox.append(row)
+
+    def do_sync(*_):
+        sync_banner.set_revealed(False)
+        run_terminal_fn("sudo -S pacman -Fy --noconfirm", tr("Sync File Database"))
+    sync_banner.connect("button-clicked", do_sync)
+
+    def do_search(*_):
+        query = entry.get_text().strip()
+        if not query:
+            return
+        if not files_db_available():
+            sync_banner.set_revealed(True)
+            return
+        while listbox.get_first_child():
+            listbox.remove(listbox.get_first_child())
+        searching = Adw.ActionRow()
+        searching.set_title(tr("Searching…"))
+        listbox.append(searching)
+
+        def worker():
+            results = search_file_owner(query)
+            GLib.idle_add(render, results)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    search_btn.connect("clicked", do_search)
+    entry.connect("activate", do_search)
 
 def show_sysinfo_dialog(parent):
     dialog = Adw.Dialog()
@@ -941,10 +1294,12 @@ def show_downgrade_dialog(parent, pkg_name, run_terminal_fn):
 # ─── PKGBUILD viewer (AUR) ────────────────────────────────────────────────────
 
 def show_pkgbuild_dialog(parent, pkg_name, on_install):
+    from backend import get_aur_info
+
     dialog = Adw.Dialog()
     dialog.set_title(tr("PKGBUILD — {pkg}").format(pkg=pkg_name))
     dialog.set_content_width(760)
-    dialog.set_content_height(560)
+    dialog.set_content_height(600)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -953,11 +1308,50 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_start(close_btn)
+
+    aur_url = f"https://aur.archlinux.org/packages/{urllib.parse.quote(pkg_name, safe='')}"
+    link_btn = Gtk.LinkButton(uri=aur_url)
+    link_btn.set_child(Gtk.Image.new_from_icon_name("adw-external-link-symbolic"))
+    link_btn.set_tooltip_text(tr("View on AUR (votes, comments, discussion)"))
+    link_btn.add_css_class("flat")
+    hdr.pack_start(link_btn)
+
     install_btn = Gtk.Button(label=tr("Install"))
     install_btn.add_css_class("suggested-action")
     install_btn.connect("clicked", lambda *_: (dialog.close(), on_install()))
     hdr.pack_end(install_btn)
     tv.add_top_bar(hdr)
+
+    ood_banner = Adw.Banner()
+    ood_banner.set_title(tr("This AUR package is flagged out-of-date by its maintainer"))
+    ood_banner.set_revealed(False)
+    tv.add_top_bar(ood_banner)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+    # AUR metadata strip (votes / popularity / maintainer / last updated) —
+    # placeholders until the async RPC call resolves.
+    meta_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20)
+    meta_box.set_margin_start(16); meta_box.set_margin_end(16)
+    meta_box.set_margin_top(10);   meta_box.set_margin_bottom(6)
+
+    def _stat(icon_name):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        icon = Gtk.Image.new_from_icon_name(icon_name)
+        icon.add_css_class("dim-label")
+        box.append(icon)
+        lbl = Gtk.Label(label="—")
+        lbl.add_css_class("caption")
+        box.append(lbl)
+        return box, lbl
+
+    votes_box, votes_lbl = _stat("starred-symbolic")
+    pop_box,   pop_lbl   = _stat("emblem-favorite-symbolic")
+    maint_box, maint_lbl = _stat("avatar-default-symbolic")
+    upd_box,   upd_lbl   = _stat("document-open-recent-symbolic")
+    for b in (votes_box, pop_box, maint_box, upd_box):
+        meta_box.append(b)
+    outer.append(meta_box)
 
     scroll = Gtk.ScrolledWindow()
     scroll.set_vexpand(True)
@@ -969,13 +1363,35 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
     label.set_margin_start(12); label.set_margin_end(12)
     label.set_margin_top(8);    label.set_margin_bottom(8)
     scroll.set_child(label)
-    tv.set_content(scroll)
+    outer.append(scroll)
+
+    tv.set_content(outer)
     dialog.set_child(tv)
     dialog.present(parent)
+
+    def render_meta(info):
+        if info is None:
+            maint_lbl.set_label(tr("AUR info unavailable"))
+            votes_box.set_visible(False)
+            pop_box.set_visible(False)
+            upd_box.set_visible(False)
+            return
+        votes_lbl.set_label(str(info.get("NumVotes", "—")))
+        pop_lbl.set_label(f"{info.get('Popularity', 0):.2f}")
+        maint = info.get("Maintainer") or tr("Orphaned")
+        maint_lbl.set_label(maint)
+        last_mod = info.get("LastModified")
+        if last_mod:
+            upd_lbl.set_label(datetime.fromtimestamp(last_mod).strftime("%Y-%m-%d"))
+        else:
+            upd_lbl.set_label("—")
+        ood_banner.set_revealed(bool(info.get("OutOfDate")))
 
     def worker():
         text = get_pkgbuild(pkg_name)
         GLib.idle_add(label.set_label, text)
+        info = get_aur_info(pkg_name)
+        GLib.idle_add(render_meta, info)
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -1098,7 +1514,7 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
 
 def show_preferences(parent, on_changed):
     from backend import (load_settings, save_settings, is_update_timer_enabled,
-                         enable_update_timer, disable_update_timer)
+                         enable_update_timer, disable_update_timer, detect_snapshot_tool)
     s = load_settings()
 
     dlg = Adw.PreferencesDialog()
@@ -1150,6 +1566,22 @@ def show_preferences(parent, on_changed):
     _switch(tr("Show Arch news before upgrades"),
             tr("Warns about manual interventions before a system upgrade"),
             "show_news_before_upgrade")
+
+    snap_tool, snap_info = detect_snapshot_tool()
+    snap_row = Adw.SwitchRow()
+    snap_row.set_title(tr("Create snapshot before system upgrades"))
+    if snap_tool == "timeshift":
+        snap_row.set_subtitle(tr("Safety net via Timeshift — restore point before every upgrade"))
+    elif snap_tool == "snapper":
+        snap_row.set_subtitle(
+            tr("Safety net via Snapper (config: {config})").format(config=snap_info))
+    else:
+        snap_row.set_subtitle(tr("No Timeshift or Snapper installation found"))
+        snap_row.set_sensitive(False)
+    snap_row.set_active(bool(snap_tool) and s.get("snapshot_before_upgrade", False))
+    snap_row.connect("notify::active", lambda r, _: save_settings(
+        {"snapshot_before_upgrade": r.get_active()}))
+    beh.add(snap_row)
     page.add(beh)
 
     # Language
@@ -1299,6 +1731,8 @@ _SHORTCUTS = [
     ("Ctrl+R",      tr("Refresh package list")),
     ("Ctrl+U",      tr("Check for updates")),
     ("Ctrl+,",      tr("Preferences  ")),
+    ("Ctrl+A",      tr("Select all packages (batch mode)")),
+    ("Ctrl+Shift+A", tr("Deselect all packages (batch mode)")),
     ("Ctrl+Q",      tr("Quit")),
 ]
 

@@ -5,6 +5,7 @@ Adw.Application subclass: registers GActions and wires the About dialog.
 
 import os
 import sys
+import shutil
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -27,6 +28,19 @@ ICON_SOURCE = os.path.join(APP_DIR, f"{ICON_NAME}.svg")
 ICON_THEME_DIR = os.path.join(APP_DIR, ".icon-theme")
 ICON_DEST_DIR = os.path.join(ICON_THEME_DIR, "hicolor", "scalable", "apps")
 ICON_DEST = os.path.join(ICON_DEST_DIR, f"{ICON_NAME}.svg")
+
+# ─── Inline‑Icons (SVG‑Daten für Icons, die im System‑Theme fehlen könnten) ───
+# Hier kann jedes Icon als SVG‑String hinterlegt werden.
+_INLINE_ICONS = {
+    "dialog-password-symbolic": """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+        <rect x="3" y="6" width="10" height="7" rx="1" fill="currentColor"/>
+        <rect x="5" y="3" width="6" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="8" cy="9" r="1.5" fill="currentColor"/>
+        <line x1="8" y1="9" x2="8" y2="11" stroke="currentColor" stroke-width="1.5"/>
+    </svg>""",
+    # Weitere Icons können hier ergänzt werden, z.B.:
+    # "package-x-generic-symbolic": "...",
+}
 
 
 class pachulApp(Adw.Application):
@@ -51,7 +65,6 @@ class pachulApp(Adw.Application):
                 os.symlink(ICON_SOURCE, ICON_DEST)
             except OSError:
                 # Fallback, falls Symlinks nicht unterstützt werden (z.B. manche FAT-Mounts)
-                import shutil
                 shutil.copyfile(ICON_SOURCE, ICON_DEST)
 
         display = Gdk.Display.get_default()
@@ -60,8 +73,25 @@ class pachulApp(Adw.Application):
         icon_theme = Gtk.IconTheme.get_for_display(display)
         icon_theme.add_search_path(ICON_THEME_DIR)
 
-        found = icon_theme.has_icon(ICON_NAME)
-        print(f"[pachul] Icon '{ICON_NAME}' gefunden: {found}")
+        # Inline‑Icons generieren (falls nicht vorhanden)
+        self._create_inline_icons(icon_theme)
+
+        # Prüfung (optional)
+        # found = icon_theme.has_icon(ICON_NAME)
+
+    def _create_inline_icons(self, icon_theme):
+        """Erstellt fehlende Icons aus _INLINE_ICONS als SVG‑Dateien im Suchpfad."""
+        for name, svg_data in _INLINE_ICONS.items():
+            dest_path = os.path.join(ICON_DEST_DIR, f"{name}.svg")
+            if os.path.exists(dest_path):
+                continue
+            try:
+                with open(dest_path, "w", encoding="utf-8") as f:
+                    f.write(svg_data)
+                # Die Icon‑Theme‑Cache muss nicht neu geladen werden, da der Suchpfad bereits registriert ist.
+                # GTK erkennt neue Dateien beim nächsten Zugriff.
+            except OSError as e:
+                print(f"[pachul] Konnte Inline‑Icon {name} nicht schreiben: {e}")
 
     def _on_shutdown(self, app):
         # Signal all background threads to stop and force-exit cleanly
@@ -84,6 +114,7 @@ class pachulApp(Adw.Application):
             "manage_repos":  self.win._on_manage_repos,
             "rate_mirrors":  self.win._on_rate_mirrors,
             "orphans":       self.win._on_show_orphans,
+            "file_search":   self.win._on_show_file_search,
             "sysinfo":       self.win._on_show_sysinfo,
             "history":       self.win._on_show_history,
             "pacdiff":       self.win._on_show_pacdiff,
@@ -122,9 +153,9 @@ class pachulApp(Adw.Application):
         about = Adw.AboutDialog()
         about.set_application_name("Pachul")
         about.set_application_icon("io.github.wergosam.pachul")
-        about.set_version("2.2.1")
+        about.set_version("2.3.1")
         about.set_developer_name("Juerg Rechsteiner")
-        about.set_license_type(Gtk.License.GPL_3_0)
+        about.set_license_type(Gtk.License.GPL_2_0)
         about.set_website("https://github.com/wergosam/Pachul")
         about.set_issue_url("https://github.com/wergosam/Pachul/issues")
         about.set_comments("A powerful Pacman/AUR front end.\n")
