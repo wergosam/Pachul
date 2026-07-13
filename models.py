@@ -36,39 +36,18 @@ def set_button_icon(button, icon_names, pixel_size=18):
     button.add_css_class("image-button")
 
 
-# ─── Icon helper with fallback chain ──────────────────────────────────────────
-# Some "-symbolic" icon names that exist in Adwaita are missing from other
-# icon themes (e.g. KDE Breeze), which makes GTK fall back to a red/pink
-# "missing icon" placeholder. Gio.ThemedIcon.new_from_names() lets GTK try a
-# whole list of candidate names in order and only fail if none of them exist,
-# so we always end on a name that is virtually guaranteed to be present.
-
-def make_icon(icon_names, pixel_size=16):
-    """Create a Gtk.Image from a single icon name or a list of fallback names."""
-    if isinstance(icon_names, str):
-        icon_names = [icon_names]
-    gicon = Gio.ThemedIcon.new_from_names(list(icon_names))
-    img = Gtk.Image.new_from_gicon(gicon)
-    img.set_pixel_size(pixel_size)
-    return img
-
-
-def set_button_icon(button, icon_names, pixel_size=16):
-    """Set an icon-only button's icon using a fallback chain of icon names."""
-    img = make_icon(icon_names, pixel_size)
-    button.set_child(img)
-    button.add_css_class("image-button")
-
-
 # ─── Repository badge mapping ─────────────────────────────────────────────────
 
 REPO_BADGE_CLASS = {
-    "core":     "badge-core",
-    "extra":    "badge-extra",
-    "aur":      "badge-aur",
-    "multilib": "badge-multilib",
-    "local":    "badge-local",
-    "foreign":  "badge-foreign",
+    "core":         "badge-core",
+    "extra":        "badge-extra",
+    "aur":          "badge-aur",
+    "multilib":     "badge-multilib",
+    "local":        "badge-local",
+    "foreign":      "badge-foreign",
+    "flatpak":      "badge-flatpak",
+    "snap":         "badge-snap",
+    "chaotic-aur":  "badge-chaotic-aur",
 }
 
 # ─── Symbolic icon fallbacks per package name ─────────────────────────────────
@@ -124,7 +103,7 @@ class PackageItem(GObject.Object):
     __gtype_name__ = 'PachulPackageItem'
 
     def __init__(self, name, version, repo="local", status="installed",
-                 description="", foreign=False):
+                 description="", foreign=False, source_id=None):
         super().__init__()
         self.pkg_name        = name
         self.pkg_version     = version
@@ -132,6 +111,11 @@ class PackageItem(GObject.Object):
         self.pkg_status      = status
         self.pkg_description = description
         self.pkg_foreign     = foreign
+        # Set for Flatpak (application ID, e.g. "org.gimp.GIMP") and Snap
+        # (plain package name) entries — that's what the actual install/
+        # remove commands need, kept separate from pkg_name so the display
+        # name can stay human-friendly. None for ordinary pacman packages.
+        self.pkg_source_id   = source_id
         # Temporärer UI-Backpointer, damit wir beim Klicken das Widget direkt refashen können
         self._bound_widget   = None
 
@@ -252,15 +236,11 @@ class PackageRowContent(Gtk.Box):
         if pkg:
             pkg._bound_widget = self
 
-<<<<<<< HEAD
         tex = get_icon_texture(pkg_icon(pkg.pkg_name), 22)
         if tex is not None:
             self.icon.set_from_paintable(tex)
         else:
             self.icon.set_from_icon_name(pkg_icon(pkg.pkg_name))
-=======
-        self.icon.set_from_icon_name(pkg_icon(pkg.pkg_name))
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
         self.name_label.set_label(pkg.pkg_name)
         self.desc_label.set_label(pkg.pkg_description or "")
         self.desc_label.set_visible(bool(pkg.pkg_description))
@@ -363,11 +343,7 @@ class NavRow(Gtk.ListBoxRow):
         box.set_margin_top(7);    box.set_margin_bottom(7)
         box.set_margin_start(10); box.set_margin_end(10)
 
-<<<<<<< HEAD
         icon = make_icon(icon_name, 18)
-=======
-        icon = make_icon(icon_name, 16)
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
         icon.set_valign(Gtk.Align.CENTER)
         icon.add_css_class("dim-label")
         box.append(icon)

@@ -16,7 +16,6 @@ mit Platzhaltern einfach `.format(...)` nach `tr(...)` anhängen, z. B.:
 
 Die Sprache wird über backend.get_setting("language") persistiert und kann
 zur Laufzeit mit set_language() geändert werden. Da GTK4-Widgets nach dem
-<<<<<<< HEAD
 Bau ihren Text nicht automatisch neu abfragen, baut pachulWindow bei einem
 Sprachwechsel im Einstellungen-Dialog seine komplette Oberfläche einmal
 neu auf (siehe pachulWindow._rebuild_for_language_change() in window.py),
@@ -24,11 +23,6 @@ damit auch länger lebende Widgets (Seitenleiste, Menü, Kopfzeile, leere
 Zustände) den neuen Text sofort zeigen. Dialoge und Paketzeilen sind davon
 ohnehin nicht betroffen, da sie bei jedem Öffnen/Neuladen frisch mit tr()
 aufgebaut werden.
-=======
-Bau ihren Text nicht automatisch neu abfragen, wird ein Sprachwechsel erst
-nach einem Neustart von Pachul vollständig wirksam (siehe Hinweis im
-Einstellungen-Dialog).
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
 """
 
 import backend
@@ -185,6 +179,8 @@ STRINGS_DE = {
 
     # Toasts / actions
     "Select a package first": "Bitte zuerst ein Paket auswählen",
+    "Hold isn't available for Flatpak/Snap packages": "Sperren ist für Flatpak-/Snap-Pakete nicht verfügbar",
+    "Not applicable to Flatpak/Snap packages": "Nicht anwendbar auf Flatpak-/Snap-Pakete",
     "PKGBUILD is only available for AUR packages": "PKGBUILD ist nur für AUR-Pakete verfügbar",
     "Could not read /etc/pacman.conf": "/etc/pacman.conf konnte nicht gelesen werden",
     "Unhold": "Entsperren",
@@ -290,11 +286,8 @@ STRINGS_DE = {
 
     # AUR metadata (votes / popularity / maintainer)
     "View on AUR (votes, comments, discussion)": "Auf AUR ansehen (Votes, Kommentare, Diskussion)",
-<<<<<<< HEAD
     "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing.":
         "Ein PKGBUILD ist das Build-Skript, mit dem ein AUR-Paket sich selbst kompiliert und installiert. AUR-Pakete werden nicht von Arch geprüft — es lohnt sich daher, kurz drüberzuschauen, bevor du installierst.",
-=======
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "This AUR package is flagged out-of-date by its maintainer":
         "Dieses AUR-Paket wurde vom Maintainer als veraltet markiert",
     "AUR info unavailable": "AUR-Infos nicht verfügbar",
@@ -450,6 +443,13 @@ STRINGS_DE = {
     "Auto-detect": "Automatisch erkennen",
     "None (pacman only)": "Keiner (nur pacman)",
     "Include AUR in update checks": "AUR bei Update-Prüfungen einbeziehen",
+    "Additional Package Sources": "Zusätzliche Paketquellen",
+    "Show installed Flatpak/Snap apps alongside pacman packages, and include them when searching. Flatpak installs use --user (no password needed); Snap always needs one, since snapd requires root.":
+        "Zeigt installierte Flatpak-/Snap-Apps zusammen mit Pacman-Paketen an und bezieht sie in die Suche mit ein. Flatpak-Installationen laufen über --user (kein Passwort nötig); bei Snap wird immer eines benötigt, da snapd Root-Rechte braucht.",
+    "flatpak isn't installed": "flatpak ist nicht installiert",
+    "snap isn't installed": "snap ist nicht installiert",
+    "Flatpak (user installation)": "Flatpak (Benutzer-Installation)",
+    "Snap package": "Snap-Paket",
     "Behaviour": "Verhalten",
     "Confirm before removing packages": "Vor dem Entfernen von Paketen bestätigen",
     "Check for updates on startup": "Beim Start auf Updates prüfen",
@@ -466,11 +466,7 @@ STRINGS_DE = {
     "Daily": "Täglich",
     "Run background update checks": "Update-Prüfungen im Hintergrund ausführen",
     "Language": "Sprache",
-<<<<<<< HEAD
     "Changes apply immediately": "Änderungen wirken sich sofort aus",
-=======
-    "Changes apply after restarting Pachul": "Änderungen wirken sich nach einem Neustart von Pachul aus",
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "English": "Englisch",
     "German": "Deutsch",
     "French": "Französisch",
@@ -625,6 +621,8 @@ STRINGS_FR = {
 
     # Toasts / actions
     "Select a package first": "Sélectionnez d'abord un paquet",
+    "Hold isn't available for Flatpak/Snap packages": "Le verrouillage n'est pas disponible pour les paquets Flatpak/Snap",
+    "Not applicable to Flatpak/Snap packages": "Non applicable aux paquets Flatpak/Snap",
     "PKGBUILD is only available for AUR packages": "Le PKGBUILD n'est disponible que pour les paquets AUR",
     "Could not read /etc/pacman.conf": "Impossible de lire /etc/pacman.conf",
     "Unhold": "Déverrouiller",
@@ -730,11 +728,8 @@ STRINGS_FR = {
 
     # AUR metadata (votes / popularity / maintainer)
     "View on AUR (votes, comments, discussion)": "Voir sur AUR (votes, commentaires, discussion)",
-<<<<<<< HEAD
     "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing.":
         "Un PKGBUILD est le script de compilation qu'utilise un paquet AUR pour se compiler et s'installer lui-même. Les paquets AUR ne sont pas vérifiés par Arch, il vaut donc la peine d'y jeter un œil avant d'installer.",
-=======
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "This AUR package is flagged out-of-date by its maintainer":
         "Ce paquet AUR est signalé comme obsolète par son mainteneur",
     "AUR info unavailable": "Infos AUR indisponibles",
@@ -890,6 +885,13 @@ STRINGS_FR = {
     "Auto-detect": "Détection automatique",
     "None (pacman only)": "Aucun (pacman uniquement)",
     "Include AUR in update checks": "Inclure l'AUR dans la vérification des mises à jour",
+    "Additional Package Sources": "Sources de paquets supplémentaires",
+    "Show installed Flatpak/Snap apps alongside pacman packages, and include them when searching. Flatpak installs use --user (no password needed); Snap always needs one, since snapd requires root.":
+        "Affiche les applications Flatpak/Snap installées à côté des paquets pacman, et les inclut dans la recherche. Les installations Flatpak utilisent --user (aucun mot de passe requis) ; Snap en demande toujours un, car snapd nécessite les droits root.",
+    "flatpak isn't installed": "flatpak n'est pas installé",
+    "snap isn't installed": "snap n'est pas installé",
+    "Flatpak (user installation)": "Flatpak (installation utilisateur)",
+    "Snap package": "Paquet Snap",
     "Behaviour": "Comportement",
     "Confirm before removing packages": "Confirmer avant de supprimer des paquets",
     "Check for updates on startup": "Vérifier les mises à jour au démarrage",
@@ -906,11 +908,7 @@ STRINGS_FR = {
     "Daily": "Quotidien",
     "Run background update checks": "Exécuter les vérifications en arrière-plan",
     "Language": "Langue",
-<<<<<<< HEAD
     "Changes apply immediately": "Les changements s'appliquent immédiatement",
-=======
-    "Changes apply after restarting Pachul": "Les changements s'appliquent après le redémarrage de Pachul",
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "English": "Anglais",
     "German": "Allemand",
     "French": "Français",
@@ -1065,6 +1063,8 @@ STRINGS_IT = {
 
     # Toasts / actions
     "Select a package first": "Seleziona prima un pacchetto",
+    "Hold isn't available for Flatpak/Snap packages": "Il blocco non è disponibile per i pacchetti Flatpak/Snap",
+    "Not applicable to Flatpak/Snap packages": "Non applicabile ai pacchetti Flatpak/Snap",
     "PKGBUILD is only available for AUR packages": "Il PKGBUILD è disponibile solo per i pacchetti AUR",
     "Could not read /etc/pacman.conf": "Impossibile leggere /etc/pacman.conf",
     "Unhold": "Sblocca",
@@ -1170,11 +1170,8 @@ STRINGS_IT = {
 
     # AUR metadata (votes / popularity / maintainer)
     "View on AUR (votes, comments, discussion)": "Vedi su AUR (voti, commenti, discussione)",
-<<<<<<< HEAD
     "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing.":
         "Un PKGBUILD è lo script di compilazione che un pacchetto AUR usa per compilarsi e installarsi da solo. I pacchetti AUR non vengono controllati da Arch, quindi vale la pena darci un'occhiata prima di installare.",
-=======
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "This AUR package is flagged out-of-date by its maintainer":
         "Questo pacchetto AUR è segnalato come obsoleto dal manutentore",
     "AUR info unavailable": "Informazioni AUR non disponibili",
@@ -1330,6 +1327,13 @@ STRINGS_IT = {
     "Auto-detect": "Rilevamento automatico",
     "None (pacman only)": "Nessuno (solo pacman)",
     "Include AUR in update checks": "Includi l'AUR nel controllo aggiornamenti",
+    "Additional Package Sources": "Fonti di pacchetti aggiuntive",
+    "Show installed Flatpak/Snap apps alongside pacman packages, and include them when searching. Flatpak installs use --user (no password needed); Snap always needs one, since snapd requires root.":
+        "Mostra le app Flatpak/Snap installate insieme ai pacchetti pacman e le include nelle ricerche. Le installazioni Flatpak usano --user (nessuna password richiesta); Snap ne richiede sempre una, poiché snapd necessita di privilegi di root.",
+    "flatpak isn't installed": "flatpak non è installato",
+    "snap isn't installed": "snap non è installato",
+    "Flatpak (user installation)": "Flatpak (installazione utente)",
+    "Snap package": "Pacchetto Snap",
     "Behaviour": "Comportamento",
     "Confirm before removing packages": "Conferma prima di rimuovere i pacchetti",
     "Check for updates on startup": "Controlla aggiornamenti all'avvio",
@@ -1346,11 +1350,7 @@ STRINGS_IT = {
     "Daily": "Giornaliero",
     "Run background update checks": "Esegui controlli aggiornamenti in background",
     "Language": "Lingua",
-<<<<<<< HEAD
     "Changes apply immediately": "Le modifiche si applicano immediatamente",
-=======
-    "Changes apply after restarting Pachul": "Le modifiche si applicano dopo il riavvio di Pachul",
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "English": "Inglese",
     "German": "Tedesco",
     "French": "Francese",

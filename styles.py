@@ -85,6 +85,9 @@ CSS = """
 .badge-local    { background: alpha(@card_fg_color, 0.10); color: alpha(@card_fg_color, 0.55); }
 .badge-multilib { background: alpha(#e5a50a, 0.18); color: #c38600; }
 .badge-foreign  { background: alpha(#e66100, 0.18); color: #e66100; }
+.badge-flatpak  { background: alpha(#4a90d9, 0.18); color: #3d80c9; }
+.badge-snap     { background: alpha(#e95420, 0.18); color: #e95420; }
+.badge-chaotic-aur { background: alpha(#17b6a7, 0.18); color: #12968a; }
 
 /* ── Row inline status pill (next to repo badge in list rows) ── */
 .row-status-pill {

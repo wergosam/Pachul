@@ -68,6 +68,8 @@ _DEFAULT_SETTINGS = {
     "notify_updates":           True,
     "bg_check_interval":        "daily",  # hourly | 6h | daily
     "language":                 "en",     # en | de
+    "flatpak_enabled":          False,    # off by default — opt-in extra package source
+    "snap_enabled":             False,    # off by default — opt-in extra package source
 }
 _settings_cache = None
 
@@ -168,6 +170,137 @@ def _find_aur_helper():
                 _aur_helper_cache = h
                 break
     return _aur_helper_cache
+
+
+# ─── Flatpak / Snap: optional extra package sources ───────────────────────────
+# Both are entirely opt-in (see flatpak_enabled / snap_enabled settings) — if
+# disabled, or if the binary simply isn't installed, every function below is
+# a fast no-op that returns nothing, so people who don't use either just never
+# pay for it (no extra subprocess calls at all).
+#
+# Privilege note: flatpak installs/removes are done with `--user` and need no
+# sudo — Flatpak's per-user mode is the common, recommended setup on Arch/
+# Manjaro (unlike distros that pre-configure a writable system-wide
+# installation). Snap fundamentally requires snapd, which always needs root
+# for install/remove/refresh, so those go through the same `sudo -S` terminal
+# flow as pacman actions.
+
+_flatpak_available_cache = None
+_snap_available_cache = None
+
+
+def flatpak_available():
+    global _flatpak_available_cache
+    if _flatpak_available_cache is None:
+        _, code = run_command("which flatpak 2>/dev/null")
+        _flatpak_available_cache = (code == 0)
+    return _flatpak_available_cache
+
+
+def snap_available():
+    global _snap_available_cache
+    if _snap_available_cache is None:
+        _, code = run_command("which snap 2>/dev/null")
+        _snap_available_cache = (code == 0)
+    return _snap_available_cache
+
+
+def get_flatpak_packages():
+    """Installed Flatpak apps, in the same dict shape get_packages() uses.
+    `source_id` carries the Flatpak application ID (e.g. "org.gimp.GIMP"),
+    which is what the actual install/uninstall commands need — pkg_name
+    stays the friendly display name."""
+    if not (get_setting("flatpak_enabled") and flatpak_available()):
+        return []
+    out, code = run_command(
+        "flatpak list --app --columns=application,name,version 2>/dev/null", timeout=15)
+    if not out or code != 0:
+        return []
+    items = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        app_id = parts[0].strip() if parts else ""
+        if not app_id:
+            continue
+        name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else app_id
+        version = parts[2].strip() if len(parts) > 2 else ""
+        items.append({
+            "name": name, "version": version, "repo": "flatpak",
+            "status": "installed", "description": "", "foreign": False,
+            "source_id": app_id,
+        })
+    return items
+
+
+def get_snap_packages():
+    """Installed Snap packages, in the same dict shape get_packages() uses."""
+    if not (get_setting("snap_enabled") and snap_available()):
+        return []
+    out, code = run_command("snap list 2>/dev/null", timeout=15)
+    if not out or code != 0:
+        return []
+    lines = out.splitlines()
+    items = []
+    for line in lines[1:]:  # first line is the "Name Version Rev ..." header
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name, version = parts[0], parts[1]
+        items.append({
+            "name": name, "version": version, "repo": "snap",
+            "status": "installed", "description": "", "foreign": False,
+            "source_id": name,
+        })
+    return items
+
+
+def search_flatpak(query):
+    """Search flathub (or whatever remotes are configured) for `query`."""
+    if not (get_setting("flatpak_enabled") and flatpak_available()):
+        return []
+    out, code = run_command(
+        f"flatpak search {shlex.quote(query)} "
+        "--columns=application,name,version,description 2>/dev/null", timeout=20)
+    if not out or code != 0:
+        return []
+    items = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        app_id = parts[0].strip() if parts else ""
+        if not app_id or "no matches found" in line.lower():
+            continue
+        name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else app_id
+        version = parts[2].strip() if len(parts) > 2 else ""
+        desc = parts[3].strip() if len(parts) > 3 else ""
+        items.append({
+            "name": name, "version": version, "repo": "flatpak",
+            "description": desc, "status": "available", "foreign": False,
+            "source_id": app_id,
+        })
+    return items
+
+
+def search_snap(query):
+    """Search the Snap Store for `query`."""
+    if not (get_setting("snap_enabled") and snap_available()):
+        return []
+    out, code = run_command(f"snap find {shlex.quote(query)} 2>/dev/null", timeout=20)
+    if not out or code != 0:
+        return []
+    lines = out.splitlines()
+    items = []
+    for line in lines[1:]:  # first line is the "Name Version Publisher ..." header
+        parts = line.split(None, 4)
+        if len(parts) < 2:
+            continue
+        name, version = parts[0], parts[1]
+        desc = parts[4].strip() if len(parts) > 4 else ""
+        items.append({
+            "name": name, "version": version, "repo": "snap",
+            "description": desc, "status": "available", "foreign": False,
+            "source_id": name,
+        })
+    return items
 
 
 # ─── Popular AUR packages to always show in the list ─────────────────────────
@@ -357,41 +490,46 @@ def get_packages():
     cached = _read_json(PKG_CACHE)
     if (cached and cached.get("version") == CACHE_VERSION
             and cached.get("fingerprint") == fingerprint):
-        return cached["packages"]
+        packages = cached["packages"]
+    else:
+        # ── Slow path: rebuild ────────────────────────────────────────────────
+        # Step 1 — installed packages
+        installed_pkgs = {}
+        for line in raw_Q.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2:
+                installed_pkgs[parts[0]] = {
+                    "name": parts[0], "version": parts[1],
+                    "repo": "local", "status": "installed",
+                    "description": "", "foreign": False,
+                }
 
-    # ── Slow path: rebuild ────────────────────────────────────────────────────
-    # Step 1 — installed packages
-    installed_pkgs = {}
-    for line in raw_Q.splitlines():
-        parts = line.strip().split(None, 1)
-        if len(parts) == 2:
-            installed_pkgs[parts[0]] = {
-                "name": parts[0], "version": parts[1],
-                "repo": "local", "status": "installed",
-                "description": "", "foreign": False,
-            }
+        # Step 2 — mark AUR/foreign
+        foreign_out, _ = run_command("pacman -Qm 2>/dev/null")
+        for line in (foreign_out or "").splitlines():
+            parts = line.strip().split(None, 1)
+            if parts and parts[0] in installed_pkgs:
+                installed_pkgs[parts[0]]["foreign"] = True
+                installed_pkgs[parts[0]]["repo"] = "aur"
 
-    # Step 2 — mark AUR/foreign
-    foreign_out, _ = run_command("pacman -Qm 2>/dev/null")
-    for line in (foreign_out or "").splitlines():
-        parts = line.strip().split(None, 1)
-        if parts and parts[0] in installed_pkgs:
-            installed_pkgs[parts[0]]["foreign"] = True
-            installed_pkgs[parts[0]]["repo"] = "aur"
+        # Step 3 — sync DB (use cache if fresh, else rebuild)
+        syncdb = _load_syncdb_cache()
+        if syncdb is None:
+            syncdb = _build_syncdb(set(installed_pkgs))
 
-    # Step 3 — sync DB (use cache if fresh, else rebuild)
-    syncdb = _load_syncdb_cache()
-    if syncdb is None:
-        syncdb = _build_syncdb(set(installed_pkgs))
+        # Step 4 — merge
+        packages = _merge_into_list(installed_pkgs, syncdb, set())
 
-    # Step 4 — merge
-    packages = _merge_into_list(installed_pkgs, syncdb, set())
+        # Step 5 — save cache (pacman packages only — Flatpak/Snap are merged
+        # in fresh below every time, so they're never stale in this cache)
+        _write_json(PKG_CACHE, {"version": CACHE_VERSION, "fingerprint": fingerprint,
+                                "packages": packages})
 
-    # Step 5 — save cache
-    _write_json(PKG_CACHE, {"version": CACHE_VERSION, "fingerprint": fingerprint,
-                            "packages": packages})
-
-    return packages
+    # Flatpak/Snap are independent, opt-in sources — queried fresh each call
+    # (cheap: usually a handful to a few dozen packages) rather than folded
+    # into the pacman fingerprint cache above, and are no-ops entirely when
+    # disabled or not installed.
+    return packages + get_flatpak_packages() + get_snap_packages()
 
 
 def invalidate_cache():
@@ -1081,6 +1219,16 @@ def search_packages_cmd(query):
                         p["repo"] = "aur"
                     seen.add(p["name"])
                     packages.append(p)
+
+    for p in search_flatpak(query):
+        if p["name"] not in seen:
+            seen.add(p["name"])
+            packages.append(p)
+
+    for p in search_snap(query):
+        if p["name"] not in seen:
+            seen.add(p["name"])
+            packages.append(p)
 
     return packages
 

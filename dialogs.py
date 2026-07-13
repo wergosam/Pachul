@@ -29,11 +29,7 @@ from gi.repository import Gtk, Adw, GLib, Pango
 from backend import (run_command, get_orphans, get_system_info,
                      get_pacman_history, get_cached_versions,
                      get_pkgbuild, get_pacnew_files, get_file_diff, get_setting, save_settings,
-<<<<<<< HEAD
                      files_db_available, search_file_owner, get_package_cache_size)
-=======
-                     files_db_available, search_file_owner)
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
 from i18n import tr, get_language, set_language
 from icons import themed_image, themed_paintable
 
@@ -89,8 +85,8 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     """
     dialog = Adw.Dialog()
     dialog.set_title(title)
-    dialog.set_content_width(720)
-    dialog.set_content_height(520)
+    dialog.set_content_width(780)
+    dialog.set_content_height(780)
     dialog.set_follows_content_size(False)
 
     tv  = Adw.ToolbarView()
@@ -1095,7 +1091,6 @@ def show_orphan_finder(parent, run_terminal_fn):
     dialog.present(parent)
 
 
-<<<<<<< HEAD
 # ─── Clean cache dialog ────────────────────────────────────────────────────────
 
 def show_clean_cache_dialog(parent, run_terminal_fn):
@@ -1359,8 +1354,6 @@ def show_export_pkgs_intro(parent, on_choose_location):
     dialog.present(parent)
 
 
-=======
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
 # ─── File search dialog (pacman -F) ──────────────────────────────────────────
 
 def show_file_search_dialog(parent, run_terminal_fn):
@@ -1435,11 +1428,7 @@ def show_file_search_dialog(parent, run_terminal_fn):
             row = Adw.ExpanderRow()
             row.set_title(pkg_name)
             row.set_subtitle(f"{repo}  ·  {r['version']}" if repo else r["version"])
-<<<<<<< HEAD
             icon = themed_image("package-x-generic-symbolic", 18)
-=======
-            icon = Gtk.Image.new_from_icon_name("package-x-generic-symbolic")
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
             icon.add_css_class("dim-label")
             row.add_prefix(icon)
 
@@ -1912,11 +1901,7 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
 
     aur_url = f"https://aur.archlinux.org/packages/{urllib.parse.quote(pkg_name, safe='')}"
     link_btn = Gtk.LinkButton(uri=aur_url)
-<<<<<<< HEAD
     link_btn.set_child(themed_image("adw-external-link-symbolic", 18))
-=======
-    link_btn.set_child(Gtk.Image.new_from_icon_name("adw-external-link-symbolic"))
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     link_btn.set_tooltip_text(tr("View on AUR (votes, comments, discussion)"))
     link_btn.add_css_class("flat")
     hdr.pack_start(link_btn)
@@ -1934,7 +1919,6 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
-<<<<<<< HEAD
     desc_lbl = Gtk.Label(label=tr(
         "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing."))
     desc_lbl.set_wrap(True)
@@ -1945,8 +1929,6 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
     desc_lbl.set_margin_top(10)
     outer.append(desc_lbl)
 
-=======
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     # AUR metadata strip (votes / popularity / maintainer / last updated) —
     # placeholders until the async RPC call resolves.
     meta_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20)
@@ -1955,11 +1937,7 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
 
     def _stat(icon_name):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-<<<<<<< HEAD
         icon = themed_image(icon_name, 18)
-=======
-        icon = Gtk.Image.new_from_icon_name(icon_name)
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
         icon.add_css_class("dim-label")
         box.append(icon)
         lbl = Gtk.Label(label="—")
@@ -2141,6 +2119,12 @@ def show_preferences(parent, on_changed):
 
     dlg = Adw.PreferencesDialog()
     dlg.set_title(tr("Preferences "))
+    # Adw.PreferencesDialog doesn't support free resizing by dragging an
+    # edge (a deliberate libadwaita design choice, see show_repo_manager
+    # above for the same note) — so just open it a bit more generously
+    # sized by default instead. Was implicitly ~640×576 (built-in default).
+    dlg.set_content_width(780)
+    dlg.set_content_height(780)
     page = Adw.PreferencesPage()
     page.set_title(tr("General"))
     page.set_icon_name("preferences-system-symbolic")
@@ -2168,6 +2152,35 @@ def show_preferences(parent, on_changed):
         save_settings({"include_aur_updates": r.get_active()}), on_changed()))
     aur_group.add(inc_row)
     page.add(aur_group)
+
+    # Additional package sources
+    from backend import flatpak_available, snap_available
+    extra_group = Adw.PreferencesGroup()
+    extra_group.set_title(tr("Additional Package Sources"))
+    extra_group.set_description(tr(
+        "Show installed Flatpak/Snap apps alongside pacman packages, and include them when searching. "
+        "Flatpak installs use --user (no password needed); Snap always needs one, since snapd requires root."))
+
+    fp_row = Adw.SwitchRow()
+    fp_row.set_title("Flatpak")
+    fp_row.set_active(s.get("flatpak_enabled", False))
+    if not flatpak_available():
+        fp_row.set_subtitle(tr("flatpak isn't installed"))
+        fp_row.set_sensitive(False)
+    fp_row.connect("notify::active", lambda r, _: (
+        save_settings({"flatpak_enabled": r.get_active()}), on_changed()))
+    extra_group.add(fp_row)
+
+    sn_row = Adw.SwitchRow()
+    sn_row.set_title("Snap")
+    sn_row.set_active(s.get("snap_enabled", False))
+    if not snap_available():
+        sn_row.set_subtitle(tr("snap isn't installed"))
+        sn_row.set_sensitive(False)
+    sn_row.connect("notify::active", lambda r, _: (
+        save_settings({"snap_enabled": r.get_active()}), on_changed()))
+    extra_group.add(sn_row)
+    page.add(extra_group)
 
     # Behaviour
     beh = Adw.PreferencesGroup()
@@ -2209,11 +2222,7 @@ def show_preferences(parent, on_changed):
     # Language
     lang_group = Adw.PreferencesGroup()
     lang_group.set_title(tr("Language"))
-<<<<<<< HEAD
     lang_group.set_description(tr("Changes apply immediately"))
-=======
-    lang_group.set_description(tr("Changes apply after restarting Pachul"))
->>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
 
     lang_opts = ["en", "de", "fr", "it"]
     lang_row = Adw.ComboRow()
