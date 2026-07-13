@@ -68,11 +68,21 @@ See [Troubleshooting](#troubleshooting) below if you keep seeing database-lock e
 <tr>
 <td align="center">
 <img src="screenshots/pachul01.webp" alt="Pachul – Package Search" width="520"/><br/>
-<sub><b>Package Search</b> — Browse official repos and AUR with live package counts</sub>
+<sub>Deutsch</sub>
 </td>
 <td align="center">
 <img src="screenshots/pachul02.webp" alt="Pachul – Tools Menu" width="520"/><br/>
-<sub><b>Tools Menu</b> — Sync databases, rate mirrors, manage config files and more</sub>
+<sub>Englisch</sub>
+</td>
+</tr>
+<tr>
+<td align="center">
+<img src="screenshots/pachul03.webp" alt="Pachul – Package Search" width="520"/><br/>
+<sub>Francais</sub>
+</td>
+<td align="center">
+<img src="screenshots/pachul04.webp" alt="Pachul – Tools Menu" width="520"/><br/>
+<sub>Italian</sub>
 </td>
 </tr>
 </table>
