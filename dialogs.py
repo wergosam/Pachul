@@ -29,7 +29,11 @@ from gi.repository import Gtk, Adw, GLib, Pango
 from backend import (run_command, get_orphans, get_system_info,
                      get_pacman_history, get_cached_versions,
                      get_pkgbuild, get_pacnew_files, get_file_diff, get_setting, save_settings,
+<<<<<<< HEAD
                      files_db_available, search_file_owner, get_package_cache_size)
+=======
+                     files_db_available, search_file_owner)
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
 from i18n import tr, get_language, set_language
 from icons import themed_image, themed_paintable
 
@@ -1091,6 +1095,7 @@ def show_orphan_finder(parent, run_terminal_fn):
     dialog.present(parent)
 
 
+<<<<<<< HEAD
 # ─── Clean cache dialog ────────────────────────────────────────────────────────
 
 def show_clean_cache_dialog(parent, run_terminal_fn):
@@ -1354,6 +1359,8 @@ def show_export_pkgs_intro(parent, on_choose_location):
     dialog.present(parent)
 
 
+=======
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
 # ─── File search dialog (pacman -F) ──────────────────────────────────────────
 
 def show_file_search_dialog(parent, run_terminal_fn):
@@ -1428,7 +1435,11 @@ def show_file_search_dialog(parent, run_terminal_fn):
             row = Adw.ExpanderRow()
             row.set_title(pkg_name)
             row.set_subtitle(f"{repo}  ·  {r['version']}" if repo else r["version"])
+<<<<<<< HEAD
             icon = themed_image("package-x-generic-symbolic", 18)
+=======
+            icon = Gtk.Image.new_from_icon_name("package-x-generic-symbolic")
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
             icon.add_css_class("dim-label")
             row.add_prefix(icon)
 
@@ -1901,7 +1912,11 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
 
     aur_url = f"https://aur.archlinux.org/packages/{urllib.parse.quote(pkg_name, safe='')}"
     link_btn = Gtk.LinkButton(uri=aur_url)
+<<<<<<< HEAD
     link_btn.set_child(themed_image("adw-external-link-symbolic", 18))
+=======
+    link_btn.set_child(Gtk.Image.new_from_icon_name("adw-external-link-symbolic"))
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     link_btn.set_tooltip_text(tr("View on AUR (votes, comments, discussion)"))
     link_btn.add_css_class("flat")
     hdr.pack_start(link_btn)
@@ -1919,6 +1934,7 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
+<<<<<<< HEAD
     desc_lbl = Gtk.Label(label=tr(
         "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing."))
     desc_lbl.set_wrap(True)
@@ -1929,6 +1945,8 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
     desc_lbl.set_margin_top(10)
     outer.append(desc_lbl)
 
+=======
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     # AUR metadata strip (votes / popularity / maintainer / last updated) —
     # placeholders until the async RPC call resolves.
     meta_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20)
@@ -1937,7 +1955,11 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
 
     def _stat(icon_name):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+<<<<<<< HEAD
         icon = themed_image(icon_name, 18)
+=======
+        icon = Gtk.Image.new_from_icon_name(icon_name)
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
         icon.add_css_class("dim-label")
         box.append(icon)
         lbl = Gtk.Label(label="—")
@@ -2187,7 +2209,11 @@ def show_preferences(parent, on_changed):
     # Language
     lang_group = Adw.PreferencesGroup()
     lang_group.set_title(tr("Language"))
+<<<<<<< HEAD
     lang_group.set_description(tr("Changes apply immediately"))
+=======
+    lang_group.set_description(tr("Changes apply after restarting Pachul"))
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
 
     lang_opts = ["en", "de", "fr", "it"]
     lang_row = Adw.ComboRow()

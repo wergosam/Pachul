@@ -16,6 +16,7 @@ mit Platzhaltern einfach `.format(...)` nach `tr(...)` anhängen, z. B.:
 
 Die Sprache wird über backend.get_setting("language") persistiert und kann
 zur Laufzeit mit set_language() geändert werden. Da GTK4-Widgets nach dem
+<<<<<<< HEAD
 Bau ihren Text nicht automatisch neu abfragen, baut pachulWindow bei einem
 Sprachwechsel im Einstellungen-Dialog seine komplette Oberfläche einmal
 neu auf (siehe pachulWindow._rebuild_for_language_change() in window.py),
@@ -23,6 +24,11 @@ damit auch länger lebende Widgets (Seitenleiste, Menü, Kopfzeile, leere
 Zustände) den neuen Text sofort zeigen. Dialoge und Paketzeilen sind davon
 ohnehin nicht betroffen, da sie bei jedem Öffnen/Neuladen frisch mit tr()
 aufgebaut werden.
+=======
+Bau ihren Text nicht automatisch neu abfragen, wird ein Sprachwechsel erst
+nach einem Neustart von Pachul vollständig wirksam (siehe Hinweis im
+Einstellungen-Dialog).
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
 """
 
 import backend
@@ -284,8 +290,11 @@ STRINGS_DE = {
 
     # AUR metadata (votes / popularity / maintainer)
     "View on AUR (votes, comments, discussion)": "Auf AUR ansehen (Votes, Kommentare, Diskussion)",
+<<<<<<< HEAD
     "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing.":
         "Ein PKGBUILD ist das Build-Skript, mit dem ein AUR-Paket sich selbst kompiliert und installiert. AUR-Pakete werden nicht von Arch geprüft — es lohnt sich daher, kurz drüberzuschauen, bevor du installierst.",
+=======
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "This AUR package is flagged out-of-date by its maintainer":
         "Dieses AUR-Paket wurde vom Maintainer als veraltet markiert",
     "AUR info unavailable": "AUR-Infos nicht verfügbar",
@@ -457,7 +466,11 @@ STRINGS_DE = {
     "Daily": "Täglich",
     "Run background update checks": "Update-Prüfungen im Hintergrund ausführen",
     "Language": "Sprache",
+<<<<<<< HEAD
     "Changes apply immediately": "Änderungen wirken sich sofort aus",
+=======
+    "Changes apply after restarting Pachul": "Änderungen wirken sich nach einem Neustart von Pachul aus",
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "English": "Englisch",
     "German": "Deutsch",
     "French": "Französisch",
@@ -717,8 +730,11 @@ STRINGS_FR = {
 
     # AUR metadata (votes / popularity / maintainer)
     "View on AUR (votes, comments, discussion)": "Voir sur AUR (votes, commentaires, discussion)",
+<<<<<<< HEAD
     "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing.":
         "Un PKGBUILD est le script de compilation qu'utilise un paquet AUR pour se compiler et s'installer lui-même. Les paquets AUR ne sont pas vérifiés par Arch, il vaut donc la peine d'y jeter un œil avant d'installer.",
+=======
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "This AUR package is flagged out-of-date by its maintainer":
         "Ce paquet AUR est signalé comme obsolète par son mainteneur",
     "AUR info unavailable": "Infos AUR indisponibles",
@@ -890,7 +906,11 @@ STRINGS_FR = {
     "Daily": "Quotidien",
     "Run background update checks": "Exécuter les vérifications en arrière-plan",
     "Language": "Langue",
+<<<<<<< HEAD
     "Changes apply immediately": "Les changements s'appliquent immédiatement",
+=======
+    "Changes apply after restarting Pachul": "Les changements s'appliquent après le redémarrage de Pachul",
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "English": "Anglais",
     "German": "Allemand",
     "French": "Français",
@@ -1150,8 +1170,11 @@ STRINGS_IT = {
 
     # AUR metadata (votes / popularity / maintainer)
     "View on AUR (votes, comments, discussion)": "Vedi su AUR (voti, commenti, discussione)",
+<<<<<<< HEAD
     "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing.":
         "Un PKGBUILD è lo script di compilazione che un pacchetto AUR usa per compilarsi e installarsi da solo. I pacchetti AUR non vengono controllati da Arch, quindi vale la pena darci un'occhiata prima di installare.",
+=======
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "This AUR package is flagged out-of-date by its maintainer":
         "Questo pacchetto AUR è segnalato come obsoleto dal manutentore",
     "AUR info unavailable": "Informazioni AUR non disponibili",
@@ -1323,7 +1346,11 @@ STRINGS_IT = {
     "Daily": "Giornaliero",
     "Run background update checks": "Esegui controlli aggiornamenti in background",
     "Language": "Lingua",
+<<<<<<< HEAD
     "Changes apply immediately": "Le modifiche si applicano immediatamente",
+=======
+    "Changes apply after restarting Pachul": "Le modifiche si applicano dopo il riavvio di Pachul",
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
     "English": "Inglese",
     "German": "Tedesco",
     "French": "Francese",

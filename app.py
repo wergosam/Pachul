@@ -29,6 +29,7 @@ ICON_THEME_DIR = os.path.join(APP_DIR, ".icon-theme")
 ICON_DEST_DIR = os.path.join(ICON_THEME_DIR, "hicolor", "scalable", "apps")
 ICON_DEST = os.path.join(ICON_DEST_DIR, f"{ICON_NAME}.svg")
 
+<<<<<<< HEAD
 # ─── Inline SVG icons — full theme independence ──────────────────────────────
 # The full icon set lives in icons.py (single source of truth, shared with
 # the rest of the app for direct rendering). Here we additionally register
@@ -39,6 +40,20 @@ ICON_DEST = os.path.join(ICON_DEST_DIR, f"{ICON_NAME}.svg")
 # app actually uses.
 from icons import ICON_SVGS as _INLINE_ICONS
 
+=======
+# ─── Inline‑Icons (SVG‑Daten für Icons, die im System‑Theme fehlen könnten) ───
+# Hier kann jedes Icon als SVG‑String hinterlegt werden.
+_INLINE_ICONS = {
+    "dialog-password-symbolic": """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+        <rect x="3" y="6" width="10" height="7" rx="1" fill="currentColor"/>
+        <rect x="5" y="3" width="6" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="8" cy="9" r="1.5" fill="currentColor"/>
+        <line x1="8" y1="9" x2="8" y2="11" stroke="currentColor" stroke-width="1.5"/>
+    </svg>""",
+    # Weitere Icons können hier ergänzt werden, z.B.:
+    # "package-x-generic-symbolic": "...",
+}
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
 
 
 class pachulApp(Adw.Application):
@@ -151,7 +166,11 @@ class pachulApp(Adw.Application):
         about = Adw.AboutDialog()
         about.set_application_name("Pachul")
         about.set_application_icon("io.github.wergosam.pachul")
+<<<<<<< HEAD
         about.set_version("2.2.1")
+=======
+        about.set_version("2.3.1")
+>>>>>>> 1af8fd980502cc18efb82da98c97ee2b5797db1e
         about.set_developer_name("Juerg Rechsteiner")
         about.set_license_type(Gtk.License.GPL_2_0)
         about.set_website("https://github.com/wergosam/Pachul")
