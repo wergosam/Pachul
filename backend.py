@@ -567,6 +567,129 @@ def _dir_size(path):
     return total
 
 
+PKG_CACHE_DIR = "/var/cache/pacman/pkg"
+
+
+def get_package_cache_size():
+    """Human-readable current size of the pacman package cache."""
+    return _human_size(_dir_size(PKG_CACHE_DIR)) if os.path.isdir(PKG_CACHE_DIR) else "N/A"
+
+
+def _get_desktop_info():
+    """Desktop environment name + version, where detectable. Best-effort:
+    covers the common desktops shipped on Arch/Manjaro; falls back to just
+    the XDG-reported name (no version) for anything else."""
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP") or os.environ.get("DESKTOP_SESSION") or ""
+    desktop = desktop.split(":")[0].strip() if desktop else ""
+    if not desktop:
+        return "Unknown"
+
+    dl = desktop.lower()
+    version_cmd = None
+    if "kde" in dl or "plasma" in dl:
+        version_cmd = "plasmashell --version 2>/dev/null"
+    elif "gnome" in dl:
+        version_cmd = "gnome-shell --version 2>/dev/null"
+    elif "xfce" in dl:
+        version_cmd = "xfce4-session --version 2>/dev/null"
+    elif "cinnamon" in dl:
+        version_cmd = "cinnamon --version 2>/dev/null"
+    elif "mate" in dl:
+        version_cmd = "mate-session --version 2>/dev/null"
+    elif "budgie" in dl:
+        version_cmd = "budgie-desktop --version 2>/dev/null"
+    elif "lxqt" in dl:
+        version_cmd = "lxqt-session --version 2>/dev/null"
+
+    version = ""
+    if version_cmd:
+        out, code = run_command(version_cmd)
+        if out and code == 0:
+            m = re.search(r"(\d+[\w.\-]*)", out)
+            if m:
+                version = m.group(1)
+
+    return f"{desktop} {version}".strip() if version else desktop
+
+
+def _get_cpu_info():
+    """CPU model name (and thread count), read straight from /proc/cpuinfo —
+    works the same on x86_64 and (with the Hardware/model fallback) on ARM.
+
+    IMPORTANT: on x86, the bare "model" field (just a numeric model ID,
+    e.g. "85") appears *before* the actual "model name" line in the file.
+    A naive first-match-wins check over ("model name", "hardware", "model")
+    would therefore latch onto that numeric ID and stop, since "model"
+    matches before the real name is even reached. So: always scan for
+    "model name" first; only fall back to "Hardware" (common on ARM boards)
+    or the bare "model" field if no "model name" line exists at all.
+    """
+    model_name = ""
+    hardware = ""
+    bare_model = ""
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                low = line.lower()
+                if low.startswith("model name") and not model_name:
+                    model_name = line.split(":", 1)[1].strip()
+                elif low.startswith("hardware") and not hardware:
+                    hardware = line.split(":", 1)[1].strip()
+                elif low.startswith("model") and not low.startswith("model name") and not bare_model:
+                    bare_model = line.split(":", 1)[1].strip()
+                if model_name:
+                    break
+    except Exception:
+        pass
+    model = model_name or hardware or bare_model
+    if not model:
+        return "Unknown"
+    threads = os.cpu_count()
+    return f"{model} ({threads} threads)" if threads else model
+
+
+def _get_disk_type():
+    """Storage type (NVMe SSD / SSD / HDD) for whatever the root filesystem
+    actually lives on. Resolves through partitions, LUKS and LVM down to the
+    underlying physical block device before checking rotational vs. NVMe."""
+    try:
+        out, code = run_command("findmnt -n -o SOURCE / 2>/dev/null")
+        src = out.strip() if (out and code == 0) else ""
+        if not src:
+            return "Unknown"
+
+        out2, code2 = run_command(f"lsblk -ndo pkname {shlex.quote(src)} 2>/dev/null")
+        parent = out2.strip() if (out2 and code2 == 0) else ""
+        if not parent:
+            parent = os.path.basename(src)  # already a whole-disk device
+
+        if parent.startswith("nvme"):
+            return f"NVMe SSD ({parent})"
+
+        rota_path = f"/sys/block/{parent}/queue/rotational"
+        try:
+            with open(rota_path) as f:
+                rota = f.read().strip()
+            kind = "HDD" if rota == "1" else "SSD"
+        except Exception:
+            kind = "Unknown"
+        return f"{kind} ({parent})"
+    except Exception:
+        return "Unknown"
+
+
+def _get_installed_aur_helpers():
+    """Which AUR helper binaries are actually present on the system —
+    independent of which one Pachul is currently configured to use, since
+    that's a separate question from what's simply installed."""
+    found = []
+    for helper in ("yay", "paru", "pikaur", "trizen"):
+        _, code = run_command(f"which {helper} 2>/dev/null")
+        if code == 0:
+            found.append(helper)
+    return found
+
+
 def get_system_info():
     """System overview, derived in-process where possible (no shell pipelines)."""
     info = {}
@@ -584,10 +707,16 @@ def get_system_info():
     except Exception:
         pass
     info["OS"] = os_name
+    info["Desktop"] = _get_desktop_info()
 
     out, code = run_command("pacman -V 2>/dev/null")
     m = re.search(r"Pacman v?([\w.\-]+)", out) if (out and code == 0) else None
     info["Pacman"] = m.group(1) if m else "Unknown"
+
+    aur_helpers = _get_installed_aur_helpers()
+    info["AUR Helper"] = ", ".join(aur_helpers) if aur_helpers else "None installed"
+
+    info["Processor"] = _get_cpu_info()
 
     try:
         du = shutil.disk_usage("/")
@@ -595,6 +724,7 @@ def get_system_info():
         info["Disk (/)"] = f"{_human_size(du.used)} / {_human_size(du.total)} ({pct}% used)"
     except Exception:
         info["Disk (/)"] = "N/A"
+    info["Disk Type"] = _get_disk_type()
 
     try:
         meminfo = {}
@@ -621,7 +751,27 @@ def get_system_info():
         info["Installed Packages"] = str(len(out.splitlines())) if (out and code == 0) else "N/A"
 
     out, code = run_command("pacman -Qm 2>/dev/null")
-    info["Foreign (AUR) Packages"] = str(len(out.splitlines())) if (out and code == 0) else "0"
+    foreign_count = len(out.splitlines()) if (out and code == 0) else 0
+    info["Foreign (AUR) Packages"] = str(foreign_count)
+
+    # Per-repository breakdown of installed packages. `pacman -Sl` lists
+    # every package in every enabled sync repo and marks the ones that are
+    # currently installed with "[installed" (pacman appends the installed
+    # version too if it differs) — one pass gives an installed-count per
+    # repo without needing a separate cross-reference query.
+    repo_counts = {}
+    out, code = run_command("pacman -Sl 2>/dev/null")
+    if out and code == 0:
+        for line in out.splitlines():
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            repo, rest = parts[0], parts[2]
+            if "[installed" in rest:
+                repo_counts[repo] = repo_counts.get(repo, 0) + 1
+    if foreign_count:
+        repo_counts["aur / foreign"] = foreign_count
+    info["Repo Counts"] = repo_counts
 
     cache_dir = "/var/cache/pacman/pkg"
     info["Package Cache Size"] = _human_size(_dir_size(cache_dir)) if os.path.isdir(cache_dir) else "N/A"

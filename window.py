@@ -23,6 +23,7 @@ from models import (
     PackageItem, NavRow, REPO_BADGE_CLASS, pkg_icon, make_package_listview,
     make_icon, set_button_icon, ListSelectionState,
 )
+from icons import themed_image, themed_paintable, get_icon_texture
 
 # Fallback chains for icon names that are missing in some icon themes
 # (notably KDE Breeze), which otherwise show up as a red/pink broken icon.
@@ -43,12 +44,19 @@ ICON_CLEAN_CACHE = [
     "folder-download-symbolic", "edit-clear-all-symbolic",
     "user-trash-symbolic", "folder-symbolic",
 ]
-from i18n import tr
+from i18n import tr, get_language
 from dialogs import (
     run_terminal_dialog,
+    show_sync_db_dialog,
     show_repo_manager,
     show_mirror_rater,
     show_orphan_finder,
+    show_clean_cache_dialog,
+    show_import_pkgs_dialog,
+    show_import_pkgs_intro,
+    show_export_pkgs_intro,
+    show_hold_dialog,
+    show_mark_asdeps_dialog,
     show_file_search_dialog,
     show_sysinfo_dialog,
     show_history_dialog,
@@ -96,7 +104,7 @@ class DetailPanel:
         self.stack.set_transition_duration(120)
 
         empty = Adw.StatusPage()
-        empty.set_icon_name("package-x-generic-symbolic")
+        empty.set_paintable(themed_paintable("package-x-generic-symbolic", 72))
         empty.set_title(tr("Select a Package"))
         empty.set_description(tr("Choose a package to view its details, files, and dependencies."))
         self.stack.add_named(empty, "empty")
@@ -134,8 +142,12 @@ class DetailPanel:
         hero.add_css_class("pkg-hero")
         top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
         self.icon = Gtk.Image()
-        self.icon.set_pixel_size(52); self.icon.set_valign(Gtk.Align.CENTER)
-        self.icon.set_from_icon_name("package-x-generic-symbolic")
+        self.icon.set_pixel_size(58); self.icon.set_valign(Gtk.Align.CENTER)
+        _tex = get_icon_texture("package-x-generic-symbolic", 58)
+        if _tex is not None:
+            self.icon.set_from_paintable(_tex)
+        else:
+            self.icon.set_from_icon_name("package-x-generic-symbolic")
         top_row.append(self.icon)
         title_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         title_col.set_hexpand(True); title_col.set_valign(Gtk.Align.CENTER)
@@ -352,7 +364,7 @@ class DetailPanel:
         for name in sorted(pkg_names):
             row = Adw.ActionRow()
             row.set_title(name)
-            icon = Gtk.Image.new_from_icon_name("package-x-generic-symbolic")
+            icon = themed_image("package-x-generic-symbolic", 18)
             icon.add_css_class("dim-label")
             row.add_prefix(icon)
             self.batch_listbox.append(row)
@@ -373,6 +385,7 @@ class pachulWindow(Adw.ApplicationWindow):
         self._aur_helper_cache = None
         self._search_timer     = None   # GLib source id for debounced search
         self._alive            = True   # set False on close to stop background workers
+        self._current_lang     = get_language()
         self.connect("close-request", self._on_close_request)
         self._build_ui()
         self._load_packages()
@@ -409,8 +422,7 @@ class pachulWindow(Adw.ApplicationWindow):
         sidebar_hdr = Adw.HeaderBar()
         sidebar_hdr.set_show_end_title_buttons(False)
         title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        app_icon  = Gtk.Image.new_from_icon_name("package-x-generic-symbolic")
-        app_icon.set_pixel_size(18)
+        app_icon  = themed_image("package-x-generic-symbolic", 20)
         title_lbl = Gtk.Label(label="Pachul")
         title_lbl.add_css_class("heading")
         title_box.append(app_icon)
@@ -445,7 +457,8 @@ class pachulWindow(Adw.ApplicationWindow):
         right_box.append(self.btn_selection_mode)
 
         menu_btn = Gtk.MenuButton()
-        menu_btn.set_icon_name("open-menu-symbolic")
+        menu_btn.set_child(themed_image("open-menu-symbolic", 18))
+        menu_btn.add_css_class("image-button")
         menu_btn.add_css_class("flat")
         menu = Gio.Menu()
         menu.append(tr("Sync Databases"),       "app.sync")
@@ -540,7 +553,8 @@ class pachulWindow(Adw.ApplicationWindow):
         search_row.append(self.search_entry)
 
         search_btn = Gtk.Button()
-        search_btn.set_icon_name("system-search-symbolic")
+        search_btn.set_child(themed_image("system-search-symbolic", 18))
+        search_btn.add_css_class("image-button")
         search_btn.add_css_class("suggested-action")
         search_btn.connect("clicked", lambda *_: self._on_search_activate())
         search_row.append(search_btn)
@@ -556,7 +570,7 @@ class pachulWindow(Adw.ApplicationWindow):
         self._search_results_stack.set_transition_duration(0)
 
         idle_page = Adw.StatusPage()
-        idle_page.set_icon_name("system-search-symbolic")
+        idle_page.set_paintable(themed_paintable("system-search-symbolic", 72))
         idle_page.set_title(tr("Find Packages"))
         idle_page.set_description(tr("Type above to search the official repositories and AUR."))
         self._search_results_stack.add_named(idle_page, "idle")
@@ -572,7 +586,7 @@ class pachulWindow(Adw.ApplicationWindow):
         self._search_results_stack.add_named(spin_box, "searching")
 
         no_results = Adw.StatusPage()
-        no_results.set_icon_name("system-search-symbolic")
+        no_results.set_paintable(themed_paintable("system-search-symbolic", 72))
         no_results.set_title(tr("No Results"))
         no_results.set_description(tr("Try different keywords or check your spelling."))
         self._search_results_stack.add_named(no_results, "empty")
@@ -743,7 +757,7 @@ class pachulWindow(Adw.ApplicationWindow):
             btn.add_css_class("flat"); btn.add_css_class("nav-row")
             row_inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
             row_inner.set_margin_top(5); row_inner.set_margin_bottom(5); row_inner.set_margin_start(10)
-            ic = make_icon(icon_name, 16)
+            ic = make_icon(icon_name, 18)
             ic.set_valign(Gtk.Align.CENTER); ic.add_css_class("dim-label")
             lbl_w = Gtk.Label(label=btn_label)
             lbl_w.set_halign(Gtk.Align.START); lbl_w.set_valign(Gtk.Align.CENTER)
@@ -801,12 +815,12 @@ class pachulWindow(Adw.ApplicationWindow):
         spinner_box.append(self.spinner); spinner_box.append(sp_lbl)
 
         self.empty_updates_page = Adw.StatusPage()
-        self.empty_updates_page.set_icon_name("emblem-ok-symbolic")
+        self.empty_updates_page.set_paintable(themed_paintable("emblem-ok-symbolic", 72))
         self.empty_updates_page.set_title(tr("System is up to date"))
         self.empty_updates_page.set_description(tr("No pending updates found."))
 
         self.empty_generic_page = Adw.StatusPage()
-        self.empty_generic_page.set_icon_name("system-search-symbolic")
+        self.empty_generic_page.set_paintable(themed_paintable("system-search-symbolic", 72))
         self.empty_generic_page.set_title(tr("No Packages Found"))
         self.empty_generic_page.set_description(tr("Try a different filter or search term."))
 
@@ -886,7 +900,7 @@ class pachulWindow(Adw.ApplicationWindow):
             btn.add_css_class(cls)
         inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         inner.set_margin_start(4); inner.set_margin_end(4)
-        ic = Gtk.Image.new_from_icon_name(icon); ic.set_pixel_size(16)
+        ic = themed_image(icon, 18)
         inner.append(ic); inner.append(Gtk.Label(label=label))
         btn.set_child(inner)
         if callback:
@@ -1274,7 +1288,11 @@ class pachulWindow(Adw.ApplicationWindow):
         """Fill `panel`'s hero with `pkg`, then load its info/files in a thread."""
         panel.name.set_label(pkg.pkg_name)
         panel.desc.set_label(pkg.pkg_description or tr("No description available."))
-        panel.icon.set_from_icon_name(pkg_icon(pkg.pkg_name))
+        _tex = get_icon_texture(pkg_icon(pkg.pkg_name), 58)
+        if _tex is not None:
+            panel.icon.set_from_paintable(_tex)
+        else:
+            panel.icon.set_from_icon_name(pkg_icon(pkg.pkg_name))
 
         repo_str = "aur" if pkg.pkg_foreign else (pkg.pkg_repo or "local").lower()
         panel.repo_badge.set_label(repo_str.upper())
@@ -1523,8 +1541,10 @@ class pachulWindow(Adw.ApplicationWindow):
         self._load_packages()
 
     def _on_sync_db(self, *_):
-        invalidate_syncdb_cache()
-        self._run_terminal("sudo -S pacman -Sy --noconfirm", tr("Sync Databases"))
+        def _do_sync():
+            invalidate_syncdb_cache()
+            self._run_terminal("sudo -S pacman -Sy --noconfirm", tr("Sync Databases"))
+        show_sync_db_dialog(self, _do_sync)
 
     def _on_upgrade(self, *_):
         if get_setting("show_news_before_upgrade"):
@@ -1548,9 +1568,7 @@ class pachulWindow(Adw.ApplicationWindow):
         self._run_terminal(cmd, tr("System Upgrade"), on_success=_after)
 
     def _on_clean_cache(self, *_):
-        self._run_terminal(
-            "sudo -S -v && { paccache -rk2 2>/dev/null || sudo pacman -Sc --noconfirm; }",
-            tr("Clean Cache"))
+        show_clean_cache_dialog(self, self._run_terminal)
 
     def _on_check_updates(self, *_):
         helper = self._get_aur_helper()
@@ -1597,22 +1615,78 @@ class pachulWindow(Adw.ApplicationWindow):
             self._toast(tr("Select a package first"))
             return
         currently = pkg.pkg_name in get_ignored_packages()
-        tmp = set_package_ignored(pkg.pkg_name, not currently)
-        if tmp is None:
-            self._toast(tr("Could not read /etc/pacman.conf"))
-            return
-        verb = tr("Unhold") if currently else tr("Hold")
-        self._run_terminal(
-            f"sudo -S install -m644 {shlex.quote(tmp)} /etc/pacman.conf",
-            f"{verb} {pkg.pkg_name}")
+
+        def _do_toggle():
+            tmp = set_package_ignored(pkg.pkg_name, not currently)
+            if tmp is None:
+                self._toast(tr("Could not read /etc/pacman.conf"))
+                return
+            verb = tr("Unhold") if currently else tr("Hold")
+            self._run_terminal(
+                f"sudo -S install -m644 {shlex.quote(tmp)} /etc/pacman.conf",
+                f"{verb} {pkg.pkg_name}")
+
+        show_hold_dialog(self, pkg.pkg_name, currently, _do_toggle)
 
     def _on_preferences(self, *_):
         show_preferences(self, self._on_settings_changed)
 
     def _on_settings_changed(self):
+        new_lang = get_language()
+        if new_lang != self._current_lang:
+            self._current_lang = new_lang
+            self._rebuild_for_language_change()
+            return
         # AUR-helper / include-AUR changes can affect the update set — re-check.
         if self._alive:
             threading.Thread(target=self._bg_check_updates, daemon=True).start()
+
+    def _rebuild_for_language_change(self):
+        """Rebuild the whole window so already-built chrome (sidebar, menu,
+        headerbar, tooltips, empty-state pages, ...) picks up the new
+        language immediately. Dialogs and the package-row/detail content
+        already do this on their own next open/refresh, since they call
+        tr() fresh every time they're built — it's specifically the
+        long-lived widgets built once in _build_ui() that otherwise
+        wouldn't update without restarting the app.
+
+        Best-effort: restores which sidebar view (installed/updates/repo/
+        search) was active, and the search text if you were searching.
+        The exact selected package and open detail view are not restored
+        (the list reloads asynchronously and re-matching a selection into
+        that isn't worth the added complexity) — a minor, deliberate
+        tradeoff for not needing a full restart.
+        """
+        filt = self._current_filter
+        search_text = self.search_entry.get_text() if filt == "search" else ""
+
+        self._build_ui()
+        self._load_packages()
+
+        if filt == "search":
+            self.repo_listbox.unselect_all()
+            self.nav_listbox.select_row(self._nav_rows.get("search"))
+            self.main_stack.set_visible_child_name("search")
+            if search_text:
+                self.search_entry.set_text(search_text)  # fires _on_search_changed
+        else:
+            row = self._nav_rows.get(filt)
+            if row is not None:
+                self.repo_listbox.unselect_all()
+                self.nav_listbox.select_row(row)
+            else:
+                row = self._repo_nav_rows.get(filt)
+                if row is not None:
+                    self.nav_listbox.unselect_all()
+                    self.repo_listbox.select_row(row)
+            self._current_filter = filt
+            self.main_stack.set_visible_child_name("list")
+            self._update_action_bar_mode()
+            # No explicit _apply_filter() call here: _load_packages() (just
+            # above) finishes asynchronously and its own completion handler
+            # (_on_packages_loaded) already calls _apply_filter() once
+            # loading is done, as long as we're not showing "search" — which
+            # is exactly what the state we just restored ensures.
 
     def _on_show_shortcuts(self, *_):
         show_shortcuts_dialog(self)
@@ -1644,11 +1718,18 @@ class pachulWindow(Adw.ApplicationWindow):
         if not pkg:
             self._toast(tr("Select a package first"))
             return
-        self._run_terminal(
-            f"sudo -S pacman -D --asdeps {shlex.quote(pkg.pkg_name)}",
-            tr("Mark {name} as dependency").format(name=pkg.pkg_name), on_success=self._refresh_selected_pkg)
+
+        def _do_mark():
+            self._run_terminal(
+                f"sudo -S pacman -D --asdeps {shlex.quote(pkg.pkg_name)}",
+                tr("Mark {name} as dependency").format(name=pkg.pkg_name), on_success=self._refresh_selected_pkg)
+
+        show_mark_asdeps_dialog(self, pkg.pkg_name, _do_mark)
 
     def _on_export_pkgs(self, *_):
+        show_export_pkgs_intro(self, self._open_export_file_picker)
+
+    def _open_export_file_picker(self):
         dialog = Gtk.FileDialog()
         dialog.set_title(tr("Export Package List"))
         dialog.set_initial_name(tr("pachul-packages.txt"))
@@ -1669,6 +1750,10 @@ class pachulWindow(Adw.ApplicationWindow):
             self._toast(tr("Export failed: {err}").format(err=e))
 
     def _on_import_pkgs(self, *_):
+        helper = self._get_aur_helper()
+        show_import_pkgs_intro(self, helper, self._open_import_file_picker)
+
+    def _open_import_file_picker(self):
         dialog = Gtk.FileDialog()
         dialog.set_title(tr("Import Package List"))
         dialog.open(self, None, self._import_open_done)
@@ -1687,13 +1772,8 @@ class pachulWindow(Adw.ApplicationWindow):
         if not names:
             self._toast(tr("No packages found in file"))
             return
-        quoted = " ".join(shlex.quote(n) for n in names)
         helper = self._get_aur_helper()
-        if helper:
-            cmd = f"{helper} -S --needed --noconfirm {quoted}"
-        else:
-            cmd = f"sudo -S pacman -S --needed --noconfirm {quoted}"
-        self._run_terminal(cmd, tr("Install {n} packages").format(n=len(names)))
+        show_import_pkgs_dialog(self, names, helper, self._run_terminal)
 
     # ── Multi-select / batch actions ─────────────────────────────────────────
 

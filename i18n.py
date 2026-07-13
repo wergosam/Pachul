@@ -16,9 +16,13 @@ mit Platzhaltern einfach `.format(...)` nach `tr(...)` anhängen, z. B.:
 
 Die Sprache wird über backend.get_setting("language") persistiert und kann
 zur Laufzeit mit set_language() geändert werden. Da GTK4-Widgets nach dem
-Bau ihren Text nicht automatisch neu abfragen, wird ein Sprachwechsel erst
-nach einem Neustart von Pachul vollständig wirksam (siehe Hinweis im
-Einstellungen-Dialog).
+Bau ihren Text nicht automatisch neu abfragen, baut pachulWindow bei einem
+Sprachwechsel im Einstellungen-Dialog seine komplette Oberfläche einmal
+neu auf (siehe pachulWindow._rebuild_for_language_change() in window.py),
+damit auch länger lebende Widgets (Seitenleiste, Menü, Kopfzeile, leere
+Zustände) den neuen Text sofort zeigen. Dialoge und Paketzeilen sind davon
+ohnehin nicht betroffen, da sie bei jedem Öffnen/Neuladen frisch mit tr()
+aufgebaut werden.
 """
 
 import backend
@@ -114,6 +118,9 @@ STRINGS_DE = {
     # Header menu
     "System upgrade (pacman -Syu)": "Systemaktualisierung (pacman -Syu)",
     "Sync Databases": "Datenbanken synchronisieren",
+    "Refresh Package Lists": "Paketlisten aktualisieren",
+    "Downloads the latest package lists from your enabled repositories (pacman -Sy), so Pachul knows about new versions and new packages. This only refreshes metadata — nothing on your system is installed, removed, or upgraded.":
+        "Lädt die aktuellen Paketlisten deiner aktivierten Repositories herunter (pacman -Sy), damit Pachul neue Versionen und neue Pakete kennt. Dabei werden nur Metadaten aktualisiert — an deinem System wird nichts installiert, entfernt oder aktualisiert.",
     "Check for Updates": "Auf Updates prüfen",
     "Refresh List": "Liste aktualisieren",
     "Manage Repositories…": "Repositorien verwalten…",
@@ -176,6 +183,14 @@ STRINGS_DE = {
     "Could not read /etc/pacman.conf": "/etc/pacman.conf konnte nicht gelesen werden",
     "Unhold": "Entsperren",
     "Hold": "Sperren",
+    "Hold {pkg}": "{pkg} sperren",
+    "Unhold {pkg}": "{pkg} entsperren",
+    "Allow {pkg} to Update Again": "{pkg} wieder aktualisierbar machen",
+    "Removes {pkg} from IgnorePkg in /etc/pacman.conf. It will be included in system upgrades again from now on.":
+        "Entfernt {pkg} aus IgnorePkg in /etc/pacman.conf. Es wird ab sofort wieder bei System-Updates berücksichtigt.",
+    "Pin {pkg} to Its Current Version": "{pkg} auf der aktuellen Version festhalten",
+    "Adds {pkg} to IgnorePkg in /etc/pacman.conf. Held packages are skipped by system upgrades — useful if a specific version needs to stay put for compatibility — and won't update again until you unhold them.":
+        "Fügt {pkg} zu IgnorePkg in /etc/pacman.conf hinzu. Gesperrte Pakete werden bei System-Updates übersprungen — nützlich, wenn eine bestimmte Version aus Kompatibilitätsgründen bleiben muss — und werden erst wieder aktualisiert, wenn du sie entsperrst.",
     "{verb} {name}": "{name} {verb}",
     "✓ {title} completed": "✓ {title} abgeschlossen",
     "✗ {title} failed (exit {code})": "✗ {title} fehlgeschlagen (Exit {code})",
@@ -184,14 +199,28 @@ STRINGS_DE = {
     "Clean Cache ": "Cache leeren",
     "Mark {name} as explicit": "{name} als explizit markieren",
     "Mark {name} as dependency": "{name} als Abhängigkeit markieren",
+    "Mark as Dependency": "Als Abhängigkeit markieren",
+    "Only changes {pkg}'s install-reason metadata to \"installed as a dependency\" — the package itself is not touched or removed right now. The effect: once nothing else on your system depends on {pkg} anymore, it will show up as an orphan and can be cleaned up later via \"Find Orphans\".":
+        "Ändert nur den Installationsgrund von {pkg} auf „als Abhängigkeit installiert\" — das Paket selbst wird jetzt nicht angefasst oder entfernt. Der Effekt: Sobald nichts mehr auf deinem System von {pkg} abhängt, taucht es als Waise auf und kann später über „Waisen finden\" bereinigt werden.",
     "Export Package List": "Paketliste exportieren",
     "pachul-packages.txt": "pachul-pakete.txt",
     "Exported {n} packages": "{n} Pakete exportiert",
     "Export failed: {err}": "Export fehlgeschlagen: {err}",
+    "Save Installed Programs to a List": "Installierte Programme in einer Liste speichern",
+    "Writes the names of every package you explicitly installed yourself (one per line) to a plain text file — this deliberately excludes dependencies that were only pulled in automatically. Use \"Import Package List\" later, on this or another machine, to reinstall the same set of programs.":
+        "Schreibt die Namen aller von dir selbst explizit installierten Pakete (eines pro Zeile) in eine einfache Textdatei — Abhängigkeiten, die nur automatisch mitinstalliert wurden, werden dabei bewusst ausgeschlossen. Mit „Paketliste importieren\" kannst du später, auf diesem oder einem anderen Rechner, dieselben Programme wieder installieren.",
+    "Choose Location…": "Speicherort auswählen…",
     "Import Package List": "Paketliste importieren",
+    "Install Programs From a Saved List": "Programme aus einer gespeicherten Liste installieren",
+    "Choose File…": "Datei auswählen…",
     "Could not read file: {err}": "Datei konnte nicht gelesen werden: {err}",
     "No packages found in file": "Keine Pakete in der Datei gefunden",
     "Install {n} packages": "{n} Pakete installieren",
+    "{n} packages found in file": "{n} Pakete in der Datei gefunden",
+    "Reads one package name per line from the file (lines starting with # are ignored), then installs every listed package via {helper}, using --needed so anything already installed is skipped automatically. Nothing else on your system is changed.":
+        "Liest aus der Datei einen Paketnamen pro Zeile (Zeilen, die mit # beginnen, werden ignoriert), und installiert dann jedes gelistete Paket über {helper} — mit --needed, sodass bereits installierte Pakete automatisch übersprungen werden. Sonst wird an deinem System nichts verändert.",
+    "Reads one package name per line from the file (lines starting with # are ignored), then installs every listed package via pacman -S --needed, so anything already installed is skipped automatically. AUR packages in the list can't be installed this way since no AUR helper is configured — only official-repo packages will succeed. Nothing else on your system is changed.":
+        "Liest aus der Datei einen Paketnamen pro Zeile (Zeilen, die mit # beginnen, werden ignoriert), und installiert dann jedes gelistete Paket über pacman -S --needed, sodass bereits installierte Pakete automatisch übersprungen werden. AUR-Pakete in der Liste können so nicht installiert werden, da kein AUR-Helfer konfiguriert ist — nur Pakete aus offiziellen Repositories werden erfolgreich installiert. Sonst wird an deinem System nichts verändert.",
     "Install {name}": "{name} installieren",
     "Remove {name}": "{name} entfernen",
     "Reinstall {name}": "{name} neu installieren",
@@ -255,6 +284,8 @@ STRINGS_DE = {
 
     # AUR metadata (votes / popularity / maintainer)
     "View on AUR (votes, comments, discussion)": "Auf AUR ansehen (Votes, Kommentare, Diskussion)",
+    "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing.":
+        "Ein PKGBUILD ist das Build-Skript, mit dem ein AUR-Paket sich selbst kompiliert und installiert. AUR-Pakete werden nicht von Arch geprüft — es lohnt sich daher, kurz drüberzuschauen, bevor du installierst.",
     "This AUR package is flagged out-of-date by its maintainer":
         "Dieses AUR-Paket wurde vom Maintainer als veraltet markiert",
     "AUR info unavailable": "AUR-Infos nicht verfügbar",
@@ -283,11 +314,15 @@ STRINGS_DE = {
     "/etc/pacman.conf — read-only view": "/etc/pacman.conf — schreibgeschützte Ansicht",
     "# /etc/pacman.conf not found or not readable":
         "# /etc/pacman.conf nicht gefunden oder nicht lesbar",
+    "Save": "Speichern",
+    "Save pacman.conf": "pacman.conf speichern",
+    "Edit directly below, then click Save. Make sure the syntax stays valid — pacman will refuse to run on a broken config.":
+        "Direkt unten bearbeiten und dann auf Speichern klicken. Achte auf gültige Syntax — bei einer fehlerhaften Konfiguration verweigert pacman den Dienst.",
 
     # Mirror rater
     "Mirror Options": "Spiegelserver-Optionen",
-    "rate-mirrors tests all Arch mirrors and saves the fastest to /etc/pacman.d/mirrorlist":
-        "rate-mirrors testet alle Arch-Spiegelserver und speichert die schnellsten in /etc/pacman.d/mirrorlist",
+    "rate-mirrors tests all Arch mirrors and shows you the result — nothing is written to /etc/pacman.d/mirrorlist until you review it and choose to save":
+        "rate-mirrors testet alle Arch-Spiegelserver und zeigt dir das Ergebnis — in /etc/pacman.d/mirrorlist wird erst geschrieben, wenn du es geprüft und zum Speichern entschieden hast",
     "Countries": "Länder",
     "Sort by": "Sortieren nach",
     "How mirrors are ranked": "Wie Spiegelserver bewertet werden",
@@ -310,6 +345,16 @@ STRINGS_DE = {
     "Number of mirrors to keep": "Anzahl der zu behaltenden Spiegelserver",
     "0 = keep all ranked mirrors": "0 = alle bewerteten Spiegelserver behalten",
     "Find Fastest Mirrors": "Schnellste Spiegelserver finden",
+    "Done — review the result below": "Fertig — Ergebnis unten prüfen",
+    "Mirror Ranking Result": "Ergebnis der Spiegelserver-Bewertung",
+    "{n} mirrors found — review below, then choose whether to save.":
+        "{n} Spiegelserver gefunden — unten prüfen und dann entscheiden, ob gespeichert werden soll.",
+    "# No output captured": "# Keine Ausgabe erfasst",
+    "Save as New Mirrorlist": "Als neue Spiegelserverliste speichern",
+    "Save Mirrorlist": "Spiegelserverliste speichern",
+    "Done — backup saved to /etc/pacman.d/mirrorlist-backup":
+        "Fertig — Sicherung gespeichert unter /etc/pacman.d/mirrorlist-backup",
+    "Done — /etc/pacman.d/mirrorlist updated": "Fertig — /etc/pacman.d/mirrorlist aktualisiert",
     "rate-mirrors not installed": "rate-mirrors ist nicht installiert",
     "rate-mirrors uses geo-aware routing to benchmark\nall Arch mirrors and pick the fastest ones.":
         "rate-mirrors nutzt standortbasiertes Routing, um alle Arch-Spiegelserver\nzu testen und die schnellsten auszuwählen.",
@@ -320,28 +365,44 @@ STRINGS_DE = {
     "Orphaned Packages": "Verwaiste Pakete",
     "No Orphans Found": "Keine Waisen gefunden",
     "Your system has no orphaned packages.": "Dein System hat keine verwaisten Pakete.",
-    "{n} orphaned package(s) — installed as dependencies but no longer required":
-        "{n} verwaiste(s) Paket(e) — als Abhängigkeit installiert, aber nicht mehr benötigt",
+    "{n} orphaned package(s) — pulled in automatically as a dependency at some point, but nothing on your system requires them anymore. Safe to remove, or leave them if you might need them again.":
+        "{n} verwaiste(s) Paket(e) — irgendwann automatisch als Abhängigkeit mitinstalliert, aber nichts auf deinem System benötigt sie noch. Bedenkenlos entfernbar, oder einfach lassen, falls du sie doch nochmal brauchst.",
     "Remove All {n} Orphans": "Alle {n} Waisen entfernen",
     "Remove All Orphans": "Alle Waisen entfernen",
+
+    # Clean cache dialog
+    "What this does": "Was das macht",
+    "Removes old cached package versions from /var/cache/pacman/pkg using paccache, keeping the 2 most recent versions of each package so you can still downgrade later if needed. Currently installed packages are never touched.":
+        "Entfernt alte, zwischengespeicherte Paketversionen aus /var/cache/pacman/pkg mithilfe von paccache und behält dabei die jeweils 2 neuesten Versionen jedes Pakets, damit du bei Bedarf noch downgraden kannst. Installierte Pakete werden nie angetastet.",
+    "paccache isn't installed, so this falls back to pacman's built-in cleanup (pacman -Sc), which removes cached versions of packages that are no longer installed, plus superseded old versions of packages you still have. Currently installed packages are never touched.":
+        "paccache ist nicht installiert, daher wird auf die eingebaute Bereinigung von pacman (pacman -Sc) zurückgegriffen. Diese entfernt zwischengespeicherte Versionen nicht mehr installierter Pakete sowie überholte alte Versionen noch installierter Pakete. Installierte Pakete werden nie angetastet.",
+    "Current Cache Size": "Aktuelle Cache-Größe",
 
     # System info
     "System Information": "Systeminformationen",
     "Gathering system info…": "Sammle Systeminformationen…",
     "System": "System",
     "OS": "Betriebssystem",
+    "Desktop": "Desktop-Umgebung",
     "Kernel": "Kernel",
     "Hardware": "Hardware",
+    "Processor": "Prozessor",
     "RAM": "RAM",
     "Disk (/)": "Festplatte (/)",
+    "Disk Type": "Speichertyp",
     "Packages": "Pakete",
     "Pacman": "Pacman",
     "Installed Packages": "Installierte Pakete",
     "Foreign (AUR) Packages": "Fremde (AUR) Pakete",
     "Package Cache Size": "Größe des Paket-Caches",
+    "Installed by Repository": "Installiert nach Repository",
+    "How many installed packages come from each source":
+        "Wie viele installierte Pakete aus welcher Quelle stammen",
 
     # History
     "Package History": "Paketverlauf",
+    "Install, upgrade and removal events read from /var/log/pacman.log, newest first — for reference only, nothing here changes your system.":
+        "Installations-, Aktualisierungs- und Entfernungs-Ereignisse aus /var/log/pacman.log, neueste zuerst — nur zur Information, hier wird nichts an deinem System verändert.",
     "Filter by package name…": "Nach Paketname filtern…",
     "No matching entries": "Keine passenden Einträge",
 
@@ -396,7 +457,7 @@ STRINGS_DE = {
     "Daily": "Täglich",
     "Run background update checks": "Update-Prüfungen im Hintergrund ausführen",
     "Language": "Sprache",
-    "Changes apply after restarting Pachul": "Änderungen wirken sich nach einem Neustart von Pachul aus",
+    "Changes apply immediately": "Änderungen wirken sich sofort aus",
     "English": "Englisch",
     "German": "Deutsch",
     "French": "Französisch",
@@ -490,6 +551,9 @@ STRINGS_FR = {
     # Header menu
     "System upgrade (pacman -Syu)": "Mise à niveau du système (pacman -Syu)",
     "Sync Databases": "Synchroniser les bases de données",
+    "Refresh Package Lists": "Actualiser les listes de paquets",
+    "Downloads the latest package lists from your enabled repositories (pacman -Sy), so Pachul knows about new versions and new packages. This only refreshes metadata — nothing on your system is installed, removed, or upgraded.":
+        "Télécharge les dernières listes de paquets de vos dépôts activés (pacman -Sy), afin que Pachul connaisse les nouvelles versions et les nouveaux paquets. Cela ne fait qu'actualiser les métadonnées — rien n'est installé, supprimé ou mis à niveau sur votre système.",
     "Check for Updates": "Vérifier les mises à jour",
     "Refresh List": "Actualiser la liste",
     "Manage Repositories…": "Gérer les dépôts…",
@@ -552,6 +616,14 @@ STRINGS_FR = {
     "Could not read /etc/pacman.conf": "Impossible de lire /etc/pacman.conf",
     "Unhold": "Déverrouiller",
     "Hold": "Verrouiller",
+    "Hold {pkg}": "Verrouiller {pkg}",
+    "Unhold {pkg}": "Déverrouiller {pkg}",
+    "Allow {pkg} to Update Again": "Permettre à nouveau les mises à jour de {pkg}",
+    "Removes {pkg} from IgnorePkg in /etc/pacman.conf. It will be included in system upgrades again from now on.":
+        "Retire {pkg} de IgnorePkg dans /etc/pacman.conf. Il sera de nouveau inclus dans les mises à niveau du système à partir de maintenant.",
+    "Pin {pkg} to Its Current Version": "Épingler {pkg} à sa version actuelle",
+    "Adds {pkg} to IgnorePkg in /etc/pacman.conf. Held packages are skipped by system upgrades — useful if a specific version needs to stay put for compatibility — and won't update again until you unhold them.":
+        "Ajoute {pkg} à IgnorePkg dans /etc/pacman.conf. Les paquets verrouillés sont ignorés lors des mises à niveau du système — utile si une version précise doit rester en place pour des raisons de compatibilité — et ne seront plus mis à jour tant que vous ne les déverrouillez pas.",
     "{verb} {name}": "{name} {verb}",
     "✓ {title} completed": "✓ {title} terminé",
     "✗ {title} failed (exit {code})": "✗ {title} a échoué (code {code})",
@@ -560,14 +632,28 @@ STRINGS_FR = {
     "Clean Cache ": "Vider le cache",
     "Mark {name} as explicit": "Marquer {name} comme explicite",
     "Mark {name} as dependency": "Marquer {name} comme dépendance",
+    "Mark as Dependency": "Marquer comme dépendance",
+    "Only changes {pkg}'s install-reason metadata to \"installed as a dependency\" — the package itself is not touched or removed right now. The effect: once nothing else on your system depends on {pkg} anymore, it will show up as an orphan and can be cleaned up later via \"Find Orphans\".":
+        "Ne modifie que les métadonnées de raison d'installation de {pkg} en « installé comme dépendance » — le paquet lui-même n'est ni touché ni supprimé maintenant. Effet : dès que plus rien sur votre système ne dépend de {pkg}, il apparaîtra comme orphelin et pourra être nettoyé plus tard via « Trouver les orphelins ».",
     "Export Package List": "Exporter la liste des paquets",
     "pachul-packages.txt": "pachul-paquets.txt",
     "Exported {n} packages": "{n} paquets exportés",
     "Export failed: {err}": "Échec de l'exportation : {err}",
+    "Save Installed Programs to a List": "Enregistrer les programmes installés dans une liste",
+    "Writes the names of every package you explicitly installed yourself (one per line) to a plain text file — this deliberately excludes dependencies that were only pulled in automatically. Use \"Import Package List\" later, on this or another machine, to reinstall the same set of programs.":
+        "Écrit les noms de tous les paquets que vous avez explicitement installés vous-même (un par ligne) dans un fichier texte brut — les dépendances installées uniquement automatiquement sont volontairement exclues. Utilisez ensuite « Importer une liste de paquets », sur cette machine ou une autre, pour réinstaller le même ensemble de programmes.",
+    "Choose Location…": "Choisir un emplacement…",
     "Import Package List": "Importer une liste de paquets",
+    "Install Programs From a Saved List": "Installer des programmes depuis une liste enregistrée",
+    "Choose File…": "Choisir un fichier…",
     "Could not read file: {err}": "Impossible de lire le fichier : {err}",
     "No packages found in file": "Aucun paquet trouvé dans le fichier",
     "Install {n} packages": "Installer {n} paquets",
+    "{n} packages found in file": "{n} paquets trouvés dans le fichier",
+    "Reads one package name per line from the file (lines starting with # are ignored), then installs every listed package via {helper}, using --needed so anything already installed is skipped automatically. Nothing else on your system is changed.":
+        "Lit un nom de paquet par ligne dans le fichier (les lignes commençant par # sont ignorées), puis installe chaque paquet listé via {helper}, avec --needed afin que tout ce qui est déjà installé soit automatiquement ignoré. Rien d'autre sur votre système n'est modifié.",
+    "Reads one package name per line from the file (lines starting with # are ignored), then installs every listed package via pacman -S --needed, so anything already installed is skipped automatically. AUR packages in the list can't be installed this way since no AUR helper is configured — only official-repo packages will succeed. Nothing else on your system is changed.":
+        "Lit un nom de paquet par ligne dans le fichier (les lignes commençant par # sont ignorées), puis installe chaque paquet listé via pacman -S --needed, afin que tout ce qui est déjà installé soit automatiquement ignoré. Les paquets AUR de la liste ne peuvent pas être installés ainsi puisqu'aucun assistant AUR n'est configuré — seuls les paquets des dépôts officiels réussiront. Rien d'autre sur votre système n'est modifié.",
     "Install {name}": "Installer {name}",
     "Remove {name}": "Supprimer {name}",
     "Reinstall {name}": "Réinstaller {name}",
@@ -631,6 +717,8 @@ STRINGS_FR = {
 
     # AUR metadata (votes / popularity / maintainer)
     "View on AUR (votes, comments, discussion)": "Voir sur AUR (votes, commentaires, discussion)",
+    "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing.":
+        "Un PKGBUILD est le script de compilation qu'utilise un paquet AUR pour se compiler et s'installer lui-même. Les paquets AUR ne sont pas vérifiés par Arch, il vaut donc la peine d'y jeter un œil avant d'installer.",
     "This AUR package is flagged out-of-date by its maintainer":
         "Ce paquet AUR est signalé comme obsolète par son mainteneur",
     "AUR info unavailable": "Infos AUR indisponibles",
@@ -659,11 +747,15 @@ STRINGS_FR = {
     "/etc/pacman.conf — read-only view": "/etc/pacman.conf — vue en lecture seule",
     "# /etc/pacman.conf not found or not readable":
         "# /etc/pacman.conf introuvable ou illisible",
+    "Save": "Enregistrer",
+    "Save pacman.conf": "Enregistrer pacman.conf",
+    "Edit directly below, then click Save. Make sure the syntax stays valid — pacman will refuse to run on a broken config.":
+        "Modifiez directement ci-dessous, puis cliquez sur Enregistrer. Veillez à garder une syntaxe valide — pacman refusera de fonctionner avec une configuration incorrecte.",
 
     # Mirror rater
     "Mirror Options": "Options des miroirs",
-    "rate-mirrors tests all Arch mirrors and saves the fastest to /etc/pacman.d/mirrorlist":
-        "rate-mirrors teste tous les miroirs Arch et enregistre les plus rapides dans /etc/pacman.d/mirrorlist",
+    "rate-mirrors tests all Arch mirrors and shows you the result — nothing is written to /etc/pacman.d/mirrorlist until you review it and choose to save":
+        "rate-mirrors teste tous les miroirs Arch et vous montre le résultat — rien n'est écrit dans /etc/pacman.d/mirrorlist tant que vous ne l'avez pas vérifié et choisi de l'enregistrer",
     "Countries": "Pays",
     "Sort by": "Trier par",
     "How mirrors are ranked": "Comment les miroirs sont classés",
@@ -686,6 +778,16 @@ STRINGS_FR = {
     "Number of mirrors to keep": "Nombre de miroirs à conserver",
     "0 = keep all ranked mirrors": "0 = conserver tous les miroirs classés",
     "Find Fastest Mirrors": "Trouver les miroirs les plus rapides",
+    "Done — review the result below": "Terminé — vérifiez le résultat ci-dessous",
+    "Mirror Ranking Result": "Résultat du classement des miroirs",
+    "{n} mirrors found — review below, then choose whether to save.":
+        "{n} miroirs trouvés — vérifiez ci-dessous, puis choisissez d'enregistrer ou non.",
+    "# No output captured": "# Aucune sortie capturée",
+    "Save as New Mirrorlist": "Enregistrer comme nouvelle liste de miroirs",
+    "Save Mirrorlist": "Enregistrer la liste de miroirs",
+    "Done — backup saved to /etc/pacman.d/mirrorlist-backup":
+        "Terminé — sauvegarde enregistrée dans /etc/pacman.d/mirrorlist-backup",
+    "Done — /etc/pacman.d/mirrorlist updated": "Terminé — /etc/pacman.d/mirrorlist mis à jour",
     "rate-mirrors not installed": "rate-mirrors n'est pas installé",
     "rate-mirrors uses geo-aware routing to benchmark\nall Arch mirrors and pick the fastest ones.":
         "rate-mirrors utilise un routage géolocalisé pour évaluer\ntous les miroirs Arch et choisir les plus rapides.",
@@ -696,28 +798,44 @@ STRINGS_FR = {
     "Orphaned Packages": "Paquets orphelins",
     "No Orphans Found": "Aucun orphelin trouvé",
     "Your system has no orphaned packages.": "Votre système n'a aucun paquet orphelin.",
-    "{n} orphaned package(s) — installed as dependencies but no longer required":
-        "{n} paquet(s) orphelin(s) — installé(s) comme dépendance(s) mais plus nécessaire(s)",
+    "{n} orphaned package(s) — pulled in automatically as a dependency at some point, but nothing on your system requires them anymore. Safe to remove, or leave them if you might need them again.":
+        "{n} paquet(s) orphelin(s) — installé(s) automatiquement comme dépendance à un moment donné, mais plus rien sur votre système n'en a besoin. Peuvent être supprimés sans risque, ou laissés si vous pourriez en avoir de nouveau besoin.",
     "Remove All {n} Orphans": "Supprimer les {n} orphelins",
     "Remove All Orphans": "Supprimer tous les orphelins",
+
+    # Clean cache dialog
+    "What this does": "Ce que ça fait",
+    "Removes old cached package versions from /var/cache/pacman/pkg using paccache, keeping the 2 most recent versions of each package so you can still downgrade later if needed. Currently installed packages are never touched.":
+        "Supprime les anciennes versions de paquets mises en cache dans /var/cache/pacman/pkg via paccache, en conservant les 2 versions les plus récentes de chaque paquet afin de pouvoir revenir en arrière si besoin. Les paquets actuellement installés ne sont jamais touchés.",
+    "paccache isn't installed, so this falls back to pacman's built-in cleanup (pacman -Sc), which removes cached versions of packages that are no longer installed, plus superseded old versions of packages you still have. Currently installed packages are never touched.":
+        "paccache n'est pas installé, donc ceci utilise le nettoyage intégré de pacman (pacman -Sc), qui supprime les versions mises en cache des paquets qui ne sont plus installés, ainsi que les anciennes versions dépassées des paquets encore présents. Les paquets actuellement installés ne sont jamais touchés.",
+    "Current Cache Size": "Taille actuelle du cache",
 
     # System info
     "System Information": "Informations système",
     "Gathering system info…": "Collecte des informations système…",
     "System": "Système",
     "OS": "Système d'exploitation",
+    "Desktop": "Environnement de bureau",
     "Kernel": "Noyau",
     "Hardware": "Matériel",
+    "Processor": "Processeur",
     "RAM": "RAM",
     "Disk (/)": "Disque (/)",
+    "Disk Type": "Type de stockage",
     "Packages": "Paquets",
     "Pacman": "Pacman",
     "Installed Packages": "Paquets installés",
     "Foreign (AUR) Packages": "Paquets externes (AUR)",
     "Package Cache Size": "Taille du cache des paquets",
+    "Installed by Repository": "Installés par dépôt",
+    "How many installed packages come from each source":
+        "Combien de paquets installés proviennent de chaque source",
 
     # History
     "Package History": "Historique des paquets",
+    "Install, upgrade and removal events read from /var/log/pacman.log, newest first — for reference only, nothing here changes your system.":
+        "Événements d'installation, de mise à niveau et de suppression lus dans /var/log/pacman.log, du plus récent au plus ancien — à titre informatif uniquement, rien ici ne modifie votre système.",
     "Filter by package name…": "Filtrer par nom de paquet…",
     "No matching entries": "Aucune entrée correspondante",
 
@@ -772,7 +890,7 @@ STRINGS_FR = {
     "Daily": "Quotidien",
     "Run background update checks": "Exécuter les vérifications en arrière-plan",
     "Language": "Langue",
-    "Changes apply after restarting Pachul": "Les changements s'appliquent après le redémarrage de Pachul",
+    "Changes apply immediately": "Les changements s'appliquent immédiatement",
     "English": "Anglais",
     "German": "Allemand",
     "French": "Français",
@@ -866,6 +984,9 @@ STRINGS_IT = {
     # Header menu
     "System upgrade (pacman -Syu)": "Aggiornamento del sistema (pacman -Syu)",
     "Sync Databases": "Sincronizza database",
+    "Refresh Package Lists": "Aggiorna elenchi pacchetti",
+    "Downloads the latest package lists from your enabled repositories (pacman -Sy), so Pachul knows about new versions and new packages. This only refreshes metadata — nothing on your system is installed, removed, or upgraded.":
+        "Scarica gli elenchi aggiornati dei pacchetti dai repository abilitati (pacman -Sy), così Pachul conosce le nuove versioni e i nuovi pacchetti disponibili. Vengono aggiornati solo i metadati — nulla viene installato, rimosso o aggiornato sul sistema.",
     "Check for Updates": "Controlla aggiornamenti",
     "Refresh List": "Aggiorna elenco",
     "Manage Repositories…": "Gestisci repository…",
@@ -928,6 +1049,14 @@ STRINGS_IT = {
     "Could not read /etc/pacman.conf": "Impossibile leggere /etc/pacman.conf",
     "Unhold": "Sblocca",
     "Hold": "Blocca",
+    "Hold {pkg}": "Blocca {pkg}",
+    "Unhold {pkg}": "Sblocca {pkg}",
+    "Allow {pkg} to Update Again": "Permetti di nuovo l'aggiornamento di {pkg}",
+    "Removes {pkg} from IgnorePkg in /etc/pacman.conf. It will be included in system upgrades again from now on.":
+        "Rimuove {pkg} da IgnorePkg in /etc/pacman.conf. D'ora in poi sarà di nuovo incluso negli aggiornamenti di sistema.",
+    "Pin {pkg} to Its Current Version": "Blocca {pkg} alla versione attuale",
+    "Adds {pkg} to IgnorePkg in /etc/pacman.conf. Held packages are skipped by system upgrades — useful if a specific version needs to stay put for compatibility — and won't update again until you unhold them.":
+        "Aggiunge {pkg} a IgnorePkg in /etc/pacman.conf. I pacchetti bloccati vengono saltati durante gli aggiornamenti di sistema — utile se una versione specifica deve restare invariata per motivi di compatibilità — e non verranno aggiornati finché non li sblocchi.",
     "{verb} {name}": "{name} {verb}",
     "✓ {title} completed": "✓ {title} completato",
     "✗ {title} failed (exit {code})": "✗ {title} non riuscito (uscita {code})",
@@ -936,14 +1065,28 @@ STRINGS_IT = {
     "Clean Cache ": "Pulisci cache",
     "Mark {name} as explicit": "Segna {name} come esplicito",
     "Mark {name} as dependency": "Segna {name} come dipendenza",
+    "Mark as Dependency": "Segna come dipendenza",
+    "Only changes {pkg}'s install-reason metadata to \"installed as a dependency\" — the package itself is not touched or removed right now. The effect: once nothing else on your system depends on {pkg} anymore, it will show up as an orphan and can be cleaned up later via \"Find Orphans\".":
+        "Cambia solo i metadati del motivo di installazione di {pkg} in \"installato come dipendenza\" — il pacchetto stesso non viene toccato o rimosso ora. L'effetto: quando nient'altro sul sistema dipenderà più da {pkg}, comparirà come orfano e potrà essere rimosso in seguito tramite \"Trova orfani\".",
     "Export Package List": "Esporta elenco pacchetti",
     "pachul-packages.txt": "pachul-pacchetti.txt",
     "Exported {n} packages": "{n} pacchetti esportati",
     "Export failed: {err}": "Esportazione non riuscita: {err}",
+    "Save Installed Programs to a List": "Salva i programmi installati in un elenco",
+    "Writes the names of every package you explicitly installed yourself (one per line) to a plain text file — this deliberately excludes dependencies that were only pulled in automatically. Use \"Import Package List\" later, on this or another machine, to reinstall the same set of programs.":
+        "Scrive i nomi di tutti i pacchetti che hai installato esplicitamente tu stesso (uno per riga) in un file di testo semplice — le dipendenze installate solo automaticamente vengono deliberatamente escluse. Usa poi \"Importa elenco pacchetti\", su questo o un altro computer, per reinstallare lo stesso insieme di programmi.",
+    "Choose Location…": "Scegli posizione…",
     "Import Package List": "Importa elenco pacchetti",
+    "Install Programs From a Saved List": "Installa programmi da un elenco salvato",
+    "Choose File…": "Scegli file…",
     "Could not read file: {err}": "Impossibile leggere il file: {err}",
     "No packages found in file": "Nessun pacchetto trovato nel file",
     "Install {n} packages": "Installa {n} pacchetti",
+    "{n} packages found in file": "{n} pacchetti trovati nel file",
+    "Reads one package name per line from the file (lines starting with # are ignored), then installs every listed package via {helper}, using --needed so anything already installed is skipped automatically. Nothing else on your system is changed.":
+        "Legge un nome di pacchetto per riga dal file (le righe che iniziano con # vengono ignorate), quindi installa ogni pacchetto elencato tramite {helper}, usando --needed in modo che ciò che è già installato venga saltato automaticamente. Nient'altro sul sistema viene modificato.",
+    "Reads one package name per line from the file (lines starting with # are ignored), then installs every listed package via pacman -S --needed, so anything already installed is skipped automatically. AUR packages in the list can't be installed this way since no AUR helper is configured — only official-repo packages will succeed. Nothing else on your system is changed.":
+        "Legge un nome di pacchetto per riga dal file (le righe che iniziano con # vengono ignorate), quindi installa ogni pacchetto elencato tramite pacman -S --needed, in modo che ciò che è già installato venga saltato automaticamente. I pacchetti AUR nell'elenco non possono essere installati in questo modo poiché non è configurato alcun helper AUR — riusciranno solo i pacchetti dei repository ufficiali. Nient'altro sul sistema viene modificato.",
     "Install {name}": "Installa {name}",
     "Remove {name}": "Rimuovi {name}",
     "Reinstall {name}": "Reinstalla {name}",
@@ -1007,6 +1150,8 @@ STRINGS_IT = {
 
     # AUR metadata (votes / popularity / maintainer)
     "View on AUR (votes, comments, discussion)": "Vedi su AUR (voti, commenti, discussione)",
+    "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing.":
+        "Un PKGBUILD è lo script di compilazione che un pacchetto AUR usa per compilarsi e installarsi da solo. I pacchetti AUR non vengono controllati da Arch, quindi vale la pena darci un'occhiata prima di installare.",
     "This AUR package is flagged out-of-date by its maintainer":
         "Questo pacchetto AUR è segnalato come obsoleto dal manutentore",
     "AUR info unavailable": "Informazioni AUR non disponibili",
@@ -1035,11 +1180,15 @@ STRINGS_IT = {
     "/etc/pacman.conf — read-only view": "/etc/pacman.conf — vista di sola lettura",
     "# /etc/pacman.conf not found or not readable":
         "# /etc/pacman.conf non trovato o non leggibile",
+    "Save": "Salva",
+    "Save pacman.conf": "Salva pacman.conf",
+    "Edit directly below, then click Save. Make sure the syntax stays valid — pacman will refuse to run on a broken config.":
+        "Modifica direttamente qui sotto, poi fai clic su Salva. Assicurati che la sintassi resti valida — pacman si rifiuterà di funzionare con una configurazione non corretta.",
 
     # Mirror rater
     "Mirror Options": "Opzioni mirror",
-    "rate-mirrors tests all Arch mirrors and saves the fastest to /etc/pacman.d/mirrorlist":
-        "rate-mirrors testa tutti i mirror Arch e salva i più veloci in /etc/pacman.d/mirrorlist",
+    "rate-mirrors tests all Arch mirrors and shows you the result — nothing is written to /etc/pacman.d/mirrorlist until you review it and choose to save":
+        "rate-mirrors testa tutti i mirror Arch e mostra il risultato — non viene scritto nulla in /etc/pacman.d/mirrorlist finché non lo controlli e scegli di salvare",
     "Countries": "Paesi",
     "Sort by": "Ordina per",
     "How mirrors are ranked": "Come vengono classificati i mirror",
@@ -1062,6 +1211,16 @@ STRINGS_IT = {
     "Number of mirrors to keep": "Numero di mirror da mantenere",
     "0 = keep all ranked mirrors": "0 = mantieni tutti i mirror classificati",
     "Find Fastest Mirrors": "Trova i mirror più veloci",
+    "Done — review the result below": "Fatto — controlla il risultato qui sotto",
+    "Mirror Ranking Result": "Risultato della classifica dei mirror",
+    "{n} mirrors found — review below, then choose whether to save.":
+        "{n} mirror trovati — controlla qui sotto, poi scegli se salvare.",
+    "# No output captured": "# Nessun output acquisito",
+    "Save as New Mirrorlist": "Salva come nuova lista mirror",
+    "Save Mirrorlist": "Salva lista mirror",
+    "Done — backup saved to /etc/pacman.d/mirrorlist-backup":
+        "Fatto — backup salvato in /etc/pacman.d/mirrorlist-backup",
+    "Done — /etc/pacman.d/mirrorlist updated": "Fatto — /etc/pacman.d/mirrorlist aggiornato",
     "rate-mirrors not installed": "rate-mirrors non installato",
     "rate-mirrors uses geo-aware routing to benchmark\nall Arch mirrors and pick the fastest ones.":
         "rate-mirrors utilizza un instradamento geolocalizzato per testare\ntutti i mirror Arch e scegliere i più veloci.",
@@ -1072,28 +1231,44 @@ STRINGS_IT = {
     "Orphaned Packages": "Pacchetti orfani",
     "No Orphans Found": "Nessun orfano trovato",
     "Your system has no orphaned packages.": "Il sistema non ha pacchetti orfani.",
-    "{n} orphaned package(s) — installed as dependencies but no longer required":
-        "{n} pacchetto/i orfano/i — installato/i come dipendenza ma non più necessario/i",
+    "{n} orphaned package(s) — pulled in automatically as a dependency at some point, but nothing on your system requires them anymore. Safe to remove, or leave them if you might need them again.":
+        "{n} pacchetto/i orfano/i — installato/i automaticamente come dipendenza in un certo momento, ma nulla sul sistema ne ha più bisogno. Puoi rimuoverli senza problemi, oppure lasciarli se pensi di poterne aver bisogno di nuovo.",
     "Remove All {n} Orphans": "Rimuovi tutti i {n} orfani",
     "Remove All Orphans": "Rimuovi tutti gli orfani",
+
+    # Clean cache dialog
+    "What this does": "Cosa fa questa funzione",
+    "Removes old cached package versions from /var/cache/pacman/pkg using paccache, keeping the 2 most recent versions of each package so you can still downgrade later if needed. Currently installed packages are never touched.":
+        "Rimuove le vecchie versioni dei pacchetti in cache da /var/cache/pacman/pkg usando paccache, mantenendo le 2 versioni più recenti di ciascun pacchetto in modo da poter fare comunque un downgrade in seguito, se necessario. I pacchetti attualmente installati non vengono mai toccati.",
+    "paccache isn't installed, so this falls back to pacman's built-in cleanup (pacman -Sc), which removes cached versions of packages that are no longer installed, plus superseded old versions of packages you still have. Currently installed packages are never touched.":
+        "paccache non è installato, quindi viene usata la pulizia integrata di pacman (pacman -Sc), che rimuove le versioni in cache dei pacchetti non più installati, oltre alle vecchie versioni superate dei pacchetti ancora presenti. I pacchetti attualmente installati non vengono mai toccati.",
+    "Current Cache Size": "Dimensione attuale della cache",
 
     # System info
     "System Information": "Informazioni di sistema",
     "Gathering system info…": "Raccolta informazioni di sistema…",
     "System": "Sistema",
     "OS": "Sistema operativo",
+    "Desktop": "Ambiente desktop",
     "Kernel": "Kernel",
     "Hardware": "Hardware",
+    "Processor": "Processore",
     "RAM": "RAM",
     "Disk (/)": "Disco (/)",
+    "Disk Type": "Tipo di archiviazione",
     "Packages": "Pacchetti",
     "Pacman": "Pacman",
     "Installed Packages": "Pacchetti installati",
     "Foreign (AUR) Packages": "Pacchetti esterni (AUR)",
     "Package Cache Size": "Dimensione cache pacchetti",
+    "Installed by Repository": "Installati per repository",
+    "How many installed packages come from each source":
+        "Quanti pacchetti installati provengono da ciascuna fonte",
 
     # History
     "Package History": "Cronologia pacchetti",
+    "Install, upgrade and removal events read from /var/log/pacman.log, newest first — for reference only, nothing here changes your system.":
+        "Eventi di installazione, aggiornamento e rimozione letti da /var/log/pacman.log, dal più recente — solo a titolo informativo, qui non viene modificato nulla nel sistema.",
     "Filter by package name…": "Filtra per nome pacchetto…",
     "No matching entries": "Nessuna voce corrispondente",
 
@@ -1148,7 +1323,7 @@ STRINGS_IT = {
     "Daily": "Giornaliero",
     "Run background update checks": "Esegui controlli aggiornamenti in background",
     "Language": "Lingua",
-    "Changes apply after restarting Pachul": "Le modifiche si applicano dopo il riavvio di Pachul",
+    "Changes apply immediately": "Le modifiche si applicano immediatamente",
     "English": "Inglese",
     "German": "Tedesco",
     "French": "Francese",

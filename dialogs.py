@@ -16,6 +16,7 @@ import select
 import fcntl
 import termios
 import struct
+import tempfile
 import threading
 import urllib.parse
 from datetime import datetime
@@ -28,8 +29,9 @@ from gi.repository import Gtk, Adw, GLib, Pango
 from backend import (run_command, get_orphans, get_system_info,
                      get_pacman_history, get_cached_versions,
                      get_pkgbuild, get_pacnew_files, get_file_diff, get_setting, save_settings,
-                     files_db_available, search_file_owner)
+                     files_db_available, search_file_owner, get_package_cache_size)
 from i18n import tr, get_language, set_language
+from icons import themed_image, themed_paintable
 
 
 # ─── Terminal dialog ──────────────────────────────────────────────────────────
@@ -170,8 +172,7 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     input_box.set_margin_top(8);    input_box.set_margin_bottom(8)
     input_box.set_margin_start(10); input_box.set_margin_end(10)
 
-    pw_icon = Gtk.Image.new_from_icon_name("dialog-password-symbolic")
-    pw_icon.set_pixel_size(16)
+    pw_icon = themed_image("dialog-password-symbolic", 18)
     pw_icon.add_css_class("dim-label")
     input_box.append(pw_icon)
 
@@ -187,7 +188,8 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     input_box.append(send_btn)
 
     toggle_vis_btn = Gtk.ToggleButton()
-    toggle_vis_btn.set_icon_name("view-reveal-symbolic")
+    toggle_vis_btn.set_child(themed_image("view-reveal-symbolic", 18))
+    toggle_vis_btn.add_css_class("image-button")
     toggle_vis_btn.add_css_class("flat")
     toggle_vis_btn.set_tooltip_text(tr("Show/hide input"))
     toggle_vis_btn.connect("toggled", lambda b, *_: pw_entry.set_visibility(b.get_active()))
@@ -530,25 +532,92 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     threading.Thread(target=worker, daemon=True).start()
 
 
+# ─── Sync databases dialog ─────────────────────────────────────────────────────
+
+def show_sync_db_dialog(parent, on_confirm):
+    dialog = Adw.Dialog()
+    dialog.set_title(tr("Sync Databases"))
+    dialog.set_content_width(460)
+    dialog.set_content_height(280)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    cancel_btn = Gtk.Button(label=tr("Cancel"))
+    cancel_btn.add_css_class("flat")
+    cancel_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(cancel_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    info_group = Adw.PreferencesGroup()
+    info_group.set_title(tr("Refresh Package Lists"))
+    info_group.set_description(tr(
+        "Downloads the latest package lists from your enabled repositories "
+        "(pacman -Sy), so Pachul knows about new versions and new packages. "
+        "This only refreshes metadata — nothing on your system is "
+        "installed, removed, or upgraded."
+    ))
+    outer.append(info_group)
+
+    sync_btn = Gtk.Button(label=tr("Sync Databases"))
+    sync_btn.add_css_class("suggested-action")
+    sync_btn.set_halign(Gtk.Align.CENTER)
+
+    def _do_sync(*_):
+        dialog.close()
+        on_confirm()
+
+    sync_btn.connect("clicked", _do_sync)
+    outer.append(sync_btn)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_vexpand(True)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_child(tv)
+    dialog.present(parent)
+
+
 # ─── Repository manager dialog ────────────────────────────────────────────────
 
 def show_repo_manager(parent, run_terminal_fn):
     dialog = Adw.Dialog()
     dialog.set_title(tr("Manage Repositories"))
-    dialog.set_content_width(640)
-    dialog.set_content_height(500)
+    # Was 640×500 — far too cramped for comfortably editing pacman.conf.
+    # Adw.Dialog doesn't support free resizing by dragging an edge, so the
+    # practical fix is simply to open it noticeably bigger by default and
+    # let the editor area expand to fill whatever room it has.
+    dialog.set_content_width(920)
+    dialog.set_content_height(800)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
     hdr.set_show_end_title_buttons(False)
 
-    edit_btn = Gtk.Button(label=tr("Edit pacman.conf"))
-    edit_btn.add_css_class("suggested-action")
-    edit_btn.connect("clicked", lambda *_: (
-        dialog.close(),
-        run_terminal_fn("sudo -S ${VISUAL:-${EDITOR:-nano}} /etc/pacman.conf", tr("Edit pacman.conf"))
-    ))
-    hdr.pack_end(edit_btn)
+    # NOTE: this used to shell out to "sudo -S ${VISUAL:-${EDITOR:-nano}}
+    # /etc/pacman.conf" inside the terminal-dialog's plain-text output panel.
+    # That panel is a simple scrolling log view, not a real terminal
+    # emulator (it deliberately strips ANSI/escape codes so pacman's output
+    # stays readable) — so a full-screen curses editor like nano has nothing
+    # to draw with: every screen-clear/cursor-move/redraw sequence it sends
+    # gets filtered out, and after the password is sent nothing visible ever
+    # happens again, even though nano is technically still running and
+    # waiting for input.
+    #
+    # Fix: edit the file right here as a normal (editable) GTK TextView, then
+    # write it out via the same safe pattern already used elsewhere in the
+    # app for pacman.conf changes (window.py's hold/unhold flow) — dump the
+    # new content to a user-owned temp file, then apply it with a single
+    # non-interactive `sudo -S install ...` call, which the log-style
+    # terminal panel handles just fine since it isn't interactive.
+    save_btn = Gtk.Button(label=tr("Save"))
+    save_btn.add_css_class("suggested-action")
+    hdr.pack_end(save_btn)
 
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
@@ -570,7 +639,7 @@ def show_repo_manager(parent, run_terminal_fn):
     for repo in repos:
         row = Adw.ActionRow()
         row.set_title(repo)
-        icon = Gtk.Image.new_from_icon_name("folder-symbolic")
+        icon = themed_image("folder-symbolic", 18)
         icon.add_css_class("dim-label")
         row.add_prefix(icon)
         pkg_out, _ = run_command(f"pacman -Sl {repo} 2>/dev/null | wc -l")
@@ -583,23 +652,52 @@ def show_repo_manager(parent, run_terminal_fn):
 
     conf_group = Adw.PreferencesGroup()
     conf_group.set_title(tr("pacman.conf"))
-    conf_group.set_description(tr("/etc/pacman.conf — read-only view"))
+    conf_group.set_description(tr("Edit directly below, then click Save. Make sure the syntax stays valid — pacman will refuse to run on a broken config."))
+    # Let this group (and the editor inside it) actually grow into the extra
+    # room from the larger dialog above, instead of staying pinned to a
+    # small fixed height regardless of how big the dialog is.
+    conf_group.set_vexpand(True)
 
     scroll = Gtk.ScrolledWindow()
-    scroll.set_min_content_height(180)
+    scroll.set_min_content_height(420)
+    scroll.set_vexpand(True)
     scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
     scroll.add_css_class("card")
 
-    conf_out, _ = run_command("cat /etc/pacman.conf 2>/dev/null")
+    conf_out, conf_read_code = run_command("cat /etc/pacman.conf 2>/dev/null")
+    readable = bool(conf_out) and conf_read_code == 0
     buf = Gtk.TextBuffer()
-    buf.set_text(conf_out or tr("# /etc/pacman.conf not found or not readable"))
+    buf.set_text(conf_out if readable else tr("# /etc/pacman.conf not found or not readable"))
     conf_view = Gtk.TextView(buffer=buf)
-    conf_view.set_editable(False); conf_view.set_monospace(True)
+    conf_view.set_editable(readable)
+    conf_view.set_monospace(True)
     conf_view.set_wrap_mode(Gtk.WrapMode.NONE)
     conf_view.add_css_class("terminal-view")
     scroll.set_child(conf_view)
     conf_group.add(scroll)
     outer.append(conf_group)
+
+    save_btn.set_sensitive(readable)
+
+    def _do_save(*_):
+        start, end = buf.get_bounds()
+        new_content = buf.get_text(start, end, True)
+        fd, tmp_path = tempfile.mkstemp(prefix="pachul-pacman-conf-", suffix=".conf")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(new_content)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            return
+        dialog.close()
+        run_terminal_fn(
+            f"sudo -S install -m644 {shlex.quote(tmp_path)} /etc/pacman.conf",
+            tr("Save pacman.conf"))
+
+    save_btn.connect("clicked", _do_save)
 
     scroller = Gtk.ScrolledWindow()
     scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -642,7 +740,7 @@ def show_mirror_rater(parent, run_terminal_fn):
         options_group = Adw.PreferencesGroup()
         options_group.set_title(tr("Mirror Options"))
         options_group.set_description(tr(
-            "rate-mirrors tests all Arch mirrors and saves the fastest to /etc/pacman.d/mirrorlist"
+            "rate-mirrors tests all Arch mirrors and shows you the result — nothing is written to /etc/pacman.d/mirrorlist until you review it and choose to save"
         ))
 
         country_row = Adw.ActionRow()
@@ -741,25 +839,109 @@ def show_mirror_rater(parent, run_terminal_fn):
             gf = " ".join(global_flags)
             sf = " ".join(sub_flags)
 
-            if backup:
-                cmd = (
-                    f'sudo -S -v && '
-                    f'TMPFILE="$(mktemp)" && '
-                    f'rate-mirrors {gf} --save="$TMPFILE" arch {sf} '
-                    f'&& sudo mv /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist-backup '
-                    f'&& sudo mv "$TMPFILE" /etc/pacman.d/mirrorlist '
-                    f'&& echo "Done — backup saved to /etc/pacman.d/mirrorlist-backup"'
-                )
-            else:
-                cmd = (
-                    f'sudo -S -v && '
-                    f'rate-mirrors {gf} arch {sf} '
-                    f'| sudo tee /etc/pacman.d/mirrorlist > /dev/null '
-                    f'&& echo "Done — /etc/pacman.d/mirrorlist updated"'
-                )
+            # Step 1: only test/rank mirrors and save the ranked list to a
+            # plain, user-owned temp file. Nothing under /etc/pacman.d is
+            # touched yet, and — since ranking doesn't need root at all —
+            # this step doesn't even prompt for a password. The user only
+            # sees a password prompt if/when they actually choose to save.
+            fd, tmp_path = tempfile.mkstemp(prefix="pachul-mirrorlist-", suffix=".tmp")
+            os.close(fd)
+            cmd = (
+                f'rate-mirrors {gf} --save={shlex.quote(tmp_path)} arch {sf} '
+                f'&& echo "{tr("Done — review the result below")}"'
+            )
+
+            def _after_test():
+                _show_mirror_result(tmp_path, backup)
 
             dialog.close()
-            run_terminal_fn(cmd, tr("Rate Mirrors"))
+            run_terminal_fn(cmd, tr("Find Fastest Mirrors"), on_success=_after_test)
+
+        def _show_mirror_result(tmp_path, backup):
+            try:
+                with open(tmp_path, "r", errors="replace") as f:
+                    content = f.read()
+            except OSError:
+                content = ""
+            server_count = sum(1 for ln in content.splitlines() if ln.strip().startswith("Server"))
+
+            result_dialog = Adw.Dialog()
+            result_dialog.set_title(tr("Mirror Ranking Result"))
+            result_dialog.set_content_width(680)
+            result_dialog.set_content_height(600)
+
+            rtv = Adw.ToolbarView()
+            rhdr = Adw.HeaderBar()
+            rhdr.set_show_end_title_buttons(False)
+
+            def _discard(*_):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                result_dialog.close()
+
+            discard_btn = Gtk.Button(label=tr("Discard"))
+            discard_btn.add_css_class("flat")
+            discard_btn.connect("clicked", _discard)
+            rhdr.pack_start(discard_btn)
+
+            def _save(*_):
+                result_dialog.close()
+                if backup:
+                    cmd2 = (
+                        "sudo -S -v && "
+                        "sudo mv /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist-backup && "
+                        f"sudo install -m644 {shlex.quote(tmp_path)} /etc/pacman.d/mirrorlist && "
+                        f'echo "{tr("Done — backup saved to /etc/pacman.d/mirrorlist-backup")}"'
+                    )
+                else:
+                    cmd2 = (
+                        "sudo -S -v && "
+                        f"sudo install -m644 {shlex.quote(tmp_path)} /etc/pacman.d/mirrorlist && "
+                        f'echo "{tr("Done — /etc/pacman.d/mirrorlist updated")}"'
+                    )
+
+                def _cleanup():
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+
+                run_terminal_fn(cmd2, tr("Save Mirrorlist"), on_success=_cleanup)
+
+            save_btn = Gtk.Button(label=tr("Save as New Mirrorlist"))
+            save_btn.add_css_class("suggested-action")
+            save_btn.connect("clicked", _save)
+            rhdr.pack_end(save_btn)
+            rtv.add_top_bar(rhdr)
+
+            router_outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            router_outer.set_margin_top(12);   router_outer.set_margin_bottom(16)
+            router_outer.set_margin_start(16); router_outer.set_margin_end(16)
+
+            info_lbl = Gtk.Label(
+                label=tr("{n} mirrors found — review below, then choose whether to save.").format(n=server_count))
+            info_lbl.set_halign(Gtk.Align.START)
+            info_lbl.add_css_class("dim-label")
+            router_outer.append(info_lbl)
+
+            rscroll = Gtk.ScrolledWindow()
+            rscroll.set_vexpand(True)
+            rscroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            rscroll.add_css_class("card")
+            rbuf = Gtk.TextBuffer()
+            rbuf.set_text(content or tr("# No output captured"))
+            rview = Gtk.TextView(buffer=rbuf)
+            rview.set_editable(False); rview.set_monospace(True)
+            rview.set_wrap_mode(Gtk.WrapMode.NONE)
+            rview.add_css_class("terminal-view")
+            rscroll.set_child(rview)
+            router_outer.append(rscroll)
+
+            rtv.set_content(router_outer)
+            result_dialog.set_child(rtv)
+            result_dialog.present(parent)
 
         run_btn.connect("clicked", on_run)
         outer.append(run_btn)
@@ -797,7 +979,7 @@ def show_mirror_rater(parent, run_terminal_fn):
 
     else:
         status = Adw.StatusPage()
-        status.set_icon_name("network-transmit-receive-symbolic")
+        status.set_paintable(themed_paintable("network-transmit-receive-symbolic", 72))
         status.set_title(tr("rate-mirrors not installed"))
         status.set_description(tr(
             "rate-mirrors uses geo-aware routing to benchmark\n"
@@ -843,7 +1025,7 @@ def show_orphan_finder(parent, run_terminal_fn):
 
     if not orphans:
         status = Adw.StatusPage()
-        status.set_icon_name("emblem-ok-symbolic")
+        status.set_paintable(themed_paintable("emblem-ok-symbolic", 72))
         status.set_title(tr("No Orphans Found"))
         status.set_description(tr("Your system has no orphaned packages."))
         status.set_vexpand(True)
@@ -852,11 +1034,10 @@ def show_orphan_finder(parent, run_terminal_fn):
         info_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         info_bar.set_margin_start(16); info_bar.set_margin_end(16)
         info_bar.set_margin_top(12);   info_bar.set_margin_bottom(8)
-        info_icon = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
-        info_icon.set_pixel_size(16)
+        info_icon = themed_image("dialog-warning-symbolic", 18)
         info_bar.append(info_icon)
         info_lbl = Gtk.Label(
-            label=tr("{n} orphaned package(s) — installed as dependencies but no longer required").format(n=len(orphans))
+            label=tr("{n} orphaned package(s) — pulled in automatically as a dependency at some point, but nothing on your system requires them anymore. Safe to remove, or leave them if you might need them again.").format(n=len(orphans))
         )
         info_lbl.add_css_class("caption")
         info_lbl.set_hexpand(True); info_lbl.set_halign(Gtk.Align.START); info_lbl.set_wrap(True)
@@ -875,7 +1056,7 @@ def show_orphan_finder(parent, run_terminal_fn):
         for o in orphans:
             row = Adw.ActionRow()
             row.set_title(o["name"]); row.set_subtitle(o["version"])
-            icon = Gtk.Image.new_from_icon_name("package-x-generic-symbolic")
+            icon = themed_image("package-x-generic-symbolic", 18)
             icon.add_css_class("dim-label")
             row.add_prefix(icon)
             rm_btn = Gtk.Button(label=tr("Remove"))
@@ -906,6 +1087,269 @@ def show_orphan_finder(parent, run_terminal_fn):
         outer.append(btn_box)
 
     tv.set_content(outer)
+    dialog.set_child(tv)
+    dialog.present(parent)
+
+
+# ─── Clean cache dialog ────────────────────────────────────────────────────────
+
+def show_clean_cache_dialog(parent, run_terminal_fn):
+    dialog = Adw.Dialog()
+    dialog.set_title(tr("Clean Cache"))
+    dialog.set_content_width(480)
+    dialog.set_content_height(340)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Cancel"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_vexpand(True)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    _, code = run_command("which paccache 2>/dev/null")
+    has_paccache = (code == 0)
+
+    info_group = Adw.PreferencesGroup()
+    info_group.set_title(tr("What this does"))
+    if has_paccache:
+        info_group.set_description(tr(
+            "Removes old cached package versions from /var/cache/pacman/pkg "
+            "using paccache, keeping the 2 most recent versions of each "
+            "package so you can still downgrade later if needed. "
+            "Currently installed packages are never touched."
+        ))
+    else:
+        info_group.set_description(tr(
+            "paccache isn't installed, so this falls back to pacman's "
+            "built-in cleanup (pacman -Sc), which removes cached versions "
+            "of packages that are no longer installed, plus superseded old "
+            "versions of packages you still have. "
+            "Currently installed packages are never touched."
+        ))
+    outer.append(info_group)
+
+    size_group = Adw.PreferencesGroup()
+    size_row = Adw.ActionRow()
+    size_row.set_title(tr("Current Cache Size"))
+    size_row.set_subtitle("/var/cache/pacman/pkg")
+    size_lbl = Gtk.Label(label=get_package_cache_size())
+    size_lbl.add_css_class("caption"); size_lbl.add_css_class("dim-label")
+    size_row.add_suffix(size_lbl)
+    size_group.add(size_row)
+    outer.append(size_group)
+
+    clean_btn = Gtk.Button(label=tr("Clean Cache"))
+    clean_btn.add_css_class("suggested-action")
+    clean_btn.set_halign(Gtk.Align.CENTER)
+
+    def _do_clean(*_):
+        dialog.close()
+        run_terminal_fn(
+            "sudo -S -v && { paccache -rk2 2>/dev/null || sudo pacman -Sc --noconfirm; }",
+            tr("Clean Cache"))
+
+    clean_btn.connect("clicked", _do_clean)
+    outer.append(clean_btn)
+
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_child(tv)
+    dialog.present(parent)
+
+
+# ─── Import package list dialog ────────────────────────────────────────────────
+
+def show_import_pkgs_intro(parent, helper, on_choose_file):
+    """Explanation shown *before* the file picker opens, so the user knows
+    what will happen before they even pick a file."""
+    dialog = Adw.Dialog()
+    dialog.set_title(tr("Import Package List"))
+    dialog.set_content_width(480)
+    dialog.set_content_height(360)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    cancel_btn = Gtk.Button(label=tr("Cancel"))
+    cancel_btn.add_css_class("flat")
+    cancel_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(cancel_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    info_group = Adw.PreferencesGroup()
+    info_group.set_title(tr("Install Programs From a Saved List"))
+    if helper:
+        info_group.set_description(tr(
+            "Reads one package name per line from the file (lines starting "
+            "with # are ignored), then installs every listed package via "
+            "{helper}, using --needed so anything already installed is "
+            "skipped automatically. Nothing else on your system is changed."
+        ).format(helper=helper))
+    else:
+        info_group.set_description(tr(
+            "Reads one package name per line from the file (lines starting "
+            "with # are ignored), then installs every listed package via "
+            "pacman -S --needed, so anything already installed is skipped "
+            "automatically. AUR packages in the list can't be installed this "
+            "way since no AUR helper is configured — only official-repo "
+            "packages will succeed. Nothing else on your system is changed."
+        ))
+    outer.append(info_group)
+
+    choose_btn = Gtk.Button(label=tr("Choose File…"))
+    choose_btn.add_css_class("suggested-action")
+    choose_btn.set_halign(Gtk.Align.CENTER)
+
+    def _proceed(*_):
+        dialog.close()
+        on_choose_file()
+
+    choose_btn.connect("clicked", _proceed)
+    outer.append(choose_btn)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_vexpand(True)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_child(tv)
+    dialog.present(parent)
+
+
+def show_import_pkgs_dialog(parent, names, helper, run_terminal_fn):
+    """Preview of what was actually found in the chosen file, shown after
+    the file picker — the "why"/"how" was already explained by
+    show_import_pkgs_intro() before the file was even picked, so this one
+    only needs the concrete result and the final confirmation."""
+    dialog = Adw.Dialog()
+    dialog.set_title(tr("Import Package List"))
+    dialog.set_content_width(520)
+    dialog.set_content_height(480)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    cancel_btn = Gtk.Button(label=tr("Cancel"))
+    cancel_btn.add_css_class("flat")
+    cancel_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(cancel_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    list_group = Adw.PreferencesGroup()
+    list_group.set_title(tr("{n} packages found in file").format(n=len(names)))
+
+    list_scroll = Gtk.ScrolledWindow()
+    list_scroll.set_min_content_height(260)
+    list_scroll.set_vexpand(True)
+    list_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    list_scroll.add_css_class("card")
+
+    names_buf = Gtk.TextBuffer()
+    names_buf.set_text("\n".join(names))
+    names_view = Gtk.TextView(buffer=names_buf)
+    names_view.set_editable(False); names_view.set_monospace(True)
+    names_view.set_wrap_mode(Gtk.WrapMode.NONE)
+    names_view.add_css_class("terminal-view")
+    list_scroll.set_child(names_view)
+
+    outer_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    outer_box.append(list_scroll)
+    list_group.add(outer_box)
+    outer.append(list_group)
+
+    install_btn = Gtk.Button(label=tr("Install {n} packages").format(n=len(names)))
+    install_btn.add_css_class("suggested-action")
+    install_btn.set_halign(Gtk.Align.CENTER)
+
+    def _do_install(*_):
+        dialog.close()
+        quoted = " ".join(shlex.quote(n) for n in names)
+        if helper:
+            cmd = f"{helper} -S --needed --noconfirm {quoted}"
+        else:
+            cmd = f"sudo -S pacman -S --needed --noconfirm {quoted}"
+        run_terminal_fn(cmd, tr("Install {n} packages").format(n=len(names)))
+
+    install_btn.connect("clicked", _do_install)
+    outer.append(install_btn)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_vexpand(True)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_child(tv)
+    dialog.present(parent)
+
+
+# ─── Export package list dialog ────────────────────────────────────────────────
+
+def show_export_pkgs_intro(parent, on_choose_location):
+    """Explanation shown *before* the save-file picker opens, so it's clear
+    up front exactly what ends up in the file."""
+    dialog = Adw.Dialog()
+    dialog.set_title(tr("Export Package List"))
+    dialog.set_content_width(480)
+    dialog.set_content_height(320)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    cancel_btn = Gtk.Button(label=tr("Cancel"))
+    cancel_btn.add_css_class("flat")
+    cancel_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(cancel_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    info_group = Adw.PreferencesGroup()
+    info_group.set_title(tr("Save Installed Programs to a List"))
+    info_group.set_description(tr(
+        "Writes the names of every package you explicitly installed "
+        "yourself (one per line) to a plain text file — this deliberately "
+        "excludes dependencies that were only pulled in automatically. "
+        "Use \"Import Package List\" later, on this or another machine, to "
+        "reinstall the same set of programs."
+    ))
+    outer.append(info_group)
+
+    choose_btn = Gtk.Button(label=tr("Choose Location…"))
+    choose_btn.add_css_class("suggested-action")
+    choose_btn.set_halign(Gtk.Align.CENTER)
+
+    def _proceed(*_):
+        dialog.close()
+        on_choose_location()
+
+    choose_btn.connect("clicked", _proceed)
+    outer.append(choose_btn)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_vexpand(True)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
     dialog.set_child(tv)
     dialog.present(parent)
 
@@ -984,7 +1428,7 @@ def show_file_search_dialog(parent, run_terminal_fn):
             row = Adw.ExpanderRow()
             row.set_title(pkg_name)
             row.set_subtitle(f"{repo}  ·  {r['version']}" if repo else r["version"])
-            icon = Gtk.Image.new_from_icon_name("package-x-generic-symbolic")
+            icon = themed_image("package-x-generic-symbolic", 18)
             icon.add_css_class("dim-label")
             row.add_prefix(icon)
 
@@ -1050,8 +1494,8 @@ def show_file_search_dialog(parent, run_terminal_fn):
 def show_sysinfo_dialog(parent):
     dialog = Adw.Dialog()
     dialog.set_title(tr("System Information"))
-    dialog.set_content_width(520)
-    dialog.set_content_height(520)
+    dialog.set_content_width(560)
+    dialog.set_content_height(680)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -1092,7 +1536,7 @@ def show_sysinfo_dialog(parent):
 
         sys_group = Adw.PreferencesGroup()
         sys_group.set_title(tr("System"))
-        for key in ("OS", "Kernel", "Architecture"):
+        for key in ("OS", "Desktop", "Kernel", "Architecture"):
             if key in info:
                 row = Adw.ActionRow(); row.set_title(tr(key))
                 val_lbl = Gtk.Label(label=info[key])
@@ -1104,7 +1548,7 @@ def show_sysinfo_dialog(parent):
 
         hw_group = Adw.PreferencesGroup()
         hw_group.set_title(tr("Hardware"))
-        for key in ("RAM", "Disk (/)"):
+        for key in ("Processor", "RAM", "Disk (/)", "Disk Type"):
             if key in info:
                 row = Adw.ActionRow(); row.set_title(tr(key))
                 val_lbl = Gtk.Label(label=info[key])
@@ -1116,7 +1560,7 @@ def show_sysinfo_dialog(parent):
 
         pkg_group = Adw.PreferencesGroup()
         pkg_group.set_title(tr("Packages"))
-        for key in ("Pacman", "Installed Packages", "Foreign (AUR) Packages", "Package Cache Size"):
+        for key in ("Pacman", "AUR Helper", "Installed Packages", "Foreign (AUR) Packages", "Package Cache Size"):
             if key in info:
                 row = Adw.ActionRow(); row.set_title(tr(key))
                 val_lbl = Gtk.Label(label=info[key])
@@ -1125,6 +1569,25 @@ def show_sysinfo_dialog(parent):
                 row.add_suffix(val_lbl)
                 pkg_group.add(row)
         outer.append(pkg_group)
+
+        repo_counts = info.get("Repo Counts") or {}
+        if repo_counts:
+            repo_group = Adw.PreferencesGroup()
+            repo_group.set_title(tr("Installed by Repository"))
+            repo_group.set_description(tr("How many installed packages come from each source"))
+            # Official/enabled sync repos first (alphabetically), AUR/foreign
+            # last, since it isn't really a "repository" pacman knows about.
+            ordered = sorted(k for k in repo_counts if k != "aur / foreign")
+            if "aur / foreign" in repo_counts:
+                ordered.append("aur / foreign")
+            for repo in ordered:
+                row = Adw.ActionRow()
+                row.set_title(tr("AUR / Foreign") if repo == "aur / foreign" else repo)
+                count_lbl = Gtk.Label(label=tr("{n} pkgs").format(n=repo_counts[repo]))
+                count_lbl.add_css_class("caption"); count_lbl.add_css_class("dim-label")
+                row.add_suffix(count_lbl)
+                repo_group.add(row)
+            outer.append(repo_group)
         return False
 
     def worker():
@@ -1149,7 +1612,7 @@ def show_history_dialog(parent):
     dialog = Adw.Dialog()
     dialog.set_title(tr("Package History"))
     dialog.set_content_width(640)
-    dialog.set_content_height(560)
+    dialog.set_content_height(600)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -1162,10 +1625,20 @@ def show_history_dialog(parent):
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
+    desc_lbl = Gtk.Label(label=tr(
+        "Install, upgrade and removal events read from /var/log/pacman.log, newest first — for reference only, nothing here changes your system."))
+    desc_lbl.set_wrap(True)
+    desc_lbl.set_halign(Gtk.Align.START)
+    desc_lbl.set_xalign(0)
+    desc_lbl.add_css_class("caption"); desc_lbl.add_css_class("dim-label")
+    desc_lbl.set_margin_start(12); desc_lbl.set_margin_end(12)
+    desc_lbl.set_margin_top(10)
+    outer.append(desc_lbl)
+
     search = Gtk.SearchEntry()
     search.set_placeholder_text(tr("Filter by package name…"))
     search.set_margin_start(12); search.set_margin_end(12)
-    search.set_margin_top(10);   search.set_margin_bottom(6)
+    search.set_margin_top(8);    search.set_margin_bottom(6)
     outer.append(search)
 
     scroll = Gtk.ScrolledWindow()
@@ -1195,7 +1668,7 @@ def show_history_dialog(parent):
             row.set_subtitle(f"{e['action']} · {e['version']} · {e['time']}")
             row.set_subtitle_selectable(True)
             icon_name, css = _HISTORY_ICONS.get(e["action"], ("package-x-generic-symbolic", None))
-            icon = Gtk.Image.new_from_icon_name(icon_name)
+            icon = themed_image(icon_name, 18)
             icon.add_css_class("dim-label")
             row.add_prefix(icon)
             badge = Gtk.Label(label=e["action"].upper())
@@ -1244,7 +1717,7 @@ def show_downgrade_dialog(parent, pkg_name, run_terminal_fn):
 
     if not versions:
         status = Adw.StatusPage()
-        status.set_icon_name("package-x-generic-symbolic")
+        status.set_paintable(themed_paintable("package-x-generic-symbolic", 72))
         status.set_title(tr("No Cached Versions"))
         status.set_description(
             tr("No package files for {pkg} were found in /var/cache/pacman/pkg.\nOlder versions are only available while they remain in the cache.").format(pkg=pkg_name))
@@ -1291,6 +1764,123 @@ def show_downgrade_dialog(parent, pkg_name, run_terminal_fn):
     dialog.present(parent)
 
 
+# ─── Hold / unhold package dialog ──────────────────────────────────────────────
+
+def show_hold_dialog(parent, pkg_name, currently_held, on_confirm):
+    """currently_held=True means the click will *unhold* it; False means the
+    click will add it to IgnorePkg (hold it)."""
+    dialog = Adw.Dialog()
+    if currently_held:
+        dialog.set_title(tr("Unhold {pkg}").format(pkg=pkg_name))
+    else:
+        dialog.set_title(tr("Hold {pkg}").format(pkg=pkg_name))
+    dialog.set_content_width(460)
+    dialog.set_content_height(280)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    cancel_btn = Gtk.Button(label=tr("Cancel"))
+    cancel_btn.add_css_class("flat")
+    cancel_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(cancel_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    info_group = Adw.PreferencesGroup()
+    if currently_held:
+        info_group.set_title(tr("Allow {pkg} to Update Again").format(pkg=pkg_name))
+        info_group.set_description(tr(
+            "Removes {pkg} from IgnorePkg in /etc/pacman.conf. It will be "
+            "included in system upgrades again from now on."
+        ).format(pkg=pkg_name))
+        action_label = tr("Unhold {pkg}").format(pkg=pkg_name)
+    else:
+        info_group.set_title(tr("Pin {pkg} to Its Current Version").format(pkg=pkg_name))
+        info_group.set_description(tr(
+            "Adds {pkg} to IgnorePkg in /etc/pacman.conf. Held packages are "
+            "skipped by system upgrades — useful if a specific version needs "
+            "to stay put for compatibility — and won't update again until "
+            "you unhold them."
+        ).format(pkg=pkg_name))
+        action_label = tr("Hold {pkg}").format(pkg=pkg_name)
+    outer.append(info_group)
+
+    action_btn = Gtk.Button(label=action_label)
+    action_btn.add_css_class("suggested-action")
+    action_btn.set_halign(Gtk.Align.CENTER)
+
+    def _do_action(*_):
+        dialog.close()
+        on_confirm()
+
+    action_btn.connect("clicked", _do_action)
+    outer.append(action_btn)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_vexpand(True)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_child(tv)
+    dialog.present(parent)
+
+
+# ─── Mark as dependency dialog ─────────────────────────────────────────────────
+
+def show_mark_asdeps_dialog(parent, pkg_name, on_confirm):
+    dialog = Adw.Dialog()
+    dialog.set_title(tr("Mark {name} as dependency").format(name=pkg_name))
+    dialog.set_content_width(460)
+    dialog.set_content_height(300)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    cancel_btn = Gtk.Button(label=tr("Cancel"))
+    cancel_btn.add_css_class("flat")
+    cancel_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(cancel_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    info_group = Adw.PreferencesGroup()
+    info_group.set_title(tr("What this does"))
+    info_group.set_description(tr(
+        "Only changes {pkg}'s install-reason metadata to \"installed as a "
+        "dependency\" — the package itself is not touched or removed right "
+        "now. The effect: once nothing else on your system depends on {pkg} "
+        "anymore, it will show up as an orphan and can be cleaned up later "
+        "via \"Find Orphans\"."
+    ).format(pkg=pkg_name))
+    outer.append(info_group)
+
+    mark_btn = Gtk.Button(label=tr("Mark as Dependency"))
+    mark_btn.add_css_class("suggested-action")
+    mark_btn.set_halign(Gtk.Align.CENTER)
+
+    def _do_mark(*_):
+        dialog.close()
+        on_confirm()
+
+    mark_btn.connect("clicked", _do_mark)
+    outer.append(mark_btn)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_vexpand(True)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_child(tv)
+    dialog.present(parent)
+
+
 # ─── PKGBUILD viewer (AUR) ────────────────────────────────────────────────────
 
 def show_pkgbuild_dialog(parent, pkg_name, on_install):
@@ -1311,7 +1901,7 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
 
     aur_url = f"https://aur.archlinux.org/packages/{urllib.parse.quote(pkg_name, safe='')}"
     link_btn = Gtk.LinkButton(uri=aur_url)
-    link_btn.set_child(Gtk.Image.new_from_icon_name("adw-external-link-symbolic"))
+    link_btn.set_child(themed_image("adw-external-link-symbolic", 18))
     link_btn.set_tooltip_text(tr("View on AUR (votes, comments, discussion)"))
     link_btn.add_css_class("flat")
     hdr.pack_start(link_btn)
@@ -1329,6 +1919,16 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
+    desc_lbl = Gtk.Label(label=tr(
+        "A PKGBUILD is the build script an AUR package uses to compile and install itself. AUR packages aren't reviewed by Arch, so it's worth skimming this before installing."))
+    desc_lbl.set_wrap(True)
+    desc_lbl.set_halign(Gtk.Align.START)
+    desc_lbl.set_xalign(0)
+    desc_lbl.add_css_class("caption"); desc_lbl.add_css_class("dim-label")
+    desc_lbl.set_margin_start(16); desc_lbl.set_margin_end(16)
+    desc_lbl.set_margin_top(10)
+    outer.append(desc_lbl)
+
     # AUR metadata strip (votes / popularity / maintainer / last updated) —
     # placeholders until the async RPC call resolves.
     meta_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20)
@@ -1337,7 +1937,7 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
 
     def _stat(icon_name):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        icon = Gtk.Image.new_from_icon_name(icon_name)
+        icon = themed_image(icon_name, 18)
         icon.add_css_class("dim-label")
         box.append(icon)
         lbl = Gtk.Label(label="—")
@@ -1430,7 +2030,7 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
         outer.remove(loading)
         if not files:
             status = Adw.StatusPage()
-            status.set_icon_name("emblem-ok-symbolic")
+            status.set_paintable(themed_paintable("emblem-ok-symbolic", 72))
             status.set_title(tr("Nothing to Merge"))
             status.set_description(tr("No .pacnew or .pacsave files were found."))
             status.set_vexpand(True)
@@ -1587,7 +2187,7 @@ def show_preferences(parent, on_changed):
     # Language
     lang_group = Adw.PreferencesGroup()
     lang_group.set_title(tr("Language"))
-    lang_group.set_description(tr("Changes apply after restarting Pachul"))
+    lang_group.set_description(tr("Changes apply immediately"))
 
     lang_opts = ["en", "de", "fr", "it"]
     lang_row = Adw.ComboRow()
@@ -1596,7 +2196,7 @@ def show_preferences(parent, on_changed):
     cur_lang = get_language()
     lang_row.set_selected(lang_opts.index(cur_lang) if cur_lang in lang_opts else 0)
     lang_row.connect("notify::selected", lambda r, _: (
-        set_language(lang_opts[r.get_selected()])))
+        set_language(lang_opts[r.get_selected()]), on_changed()))
     lang_group.add(lang_row)
     page.add(lang_group)
 
@@ -1677,7 +2277,7 @@ def show_news_dialog(parent, on_proceed):
         outer.remove(loading)
         if items is None:
             status = Adw.StatusPage()
-            status.set_icon_name("network-offline-symbolic")
+            status.set_paintable(themed_paintable("network-offline-symbolic", 72))
             status.set_title(tr("Could Not Fetch News"))
             status.set_description(tr("You appear to be offline. You can still proceed with the upgrade."))
             status.set_vexpand(True)
@@ -1685,7 +2285,7 @@ def show_news_dialog(parent, on_proceed):
             return
         if not items:
             status = Adw.StatusPage()
-            status.set_icon_name("emblem-ok-symbolic")
+            status.set_paintable(themed_paintable("emblem-ok-symbolic", 72))
             status.set_title(tr("No Recent News"))
             status.set_vexpand(True)
             outer.append(status)

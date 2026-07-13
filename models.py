@@ -10,25 +10,26 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Gio, GObject, Pango
 
 from i18n import tr
+from icons import themed_image, get_icon_texture
 
-# ─── Icon helper with fallback chain ──────────────────────────────────────────
-# Some "-symbolic" icon names that exist in Adwaita are missing from other
-# icon themes (e.g. KDE Breeze), which makes GTK fall back to a red/pink
-# "missing icon" placeholder. Gio.ThemedIcon.new_from_names() lets GTK try a
-# whole list of candidate names in order and only fail if none of them exist,
-# so we always end on a name that is virtually guaranteed to be present.
+# ─── Icon helper ──────────────────────────────────────────────────────────────
+# Icons are rendered directly from our own inline SVG set (icons.py) instead
+# of being looked up by name in the system/GTK icon theme. This used to go
+# through Gio.ThemedIcon.new_from_names() with a list of fallback names, but
+# that only helps when a name is entirely *absent* from the active theme —
+# if the active theme's own index claims to have the icon but its file is
+# missing or broken (as happened with a KDE Breeze variant and
+# "utilities-terminal-symbolic", used below for bash/zsh/fish packages),
+# GTK never reaches the fallback names at all. Rendering our own SVG
+# directly sidesteps the system icon theme entirely, so this can't happen
+# regardless of what's wrong with the active theme.
 
-def make_icon(icon_names, pixel_size=16):
+def make_icon(icon_names, pixel_size=18):
     """Create a Gtk.Image from a single icon name or a list of fallback names."""
-    if isinstance(icon_names, str):
-        icon_names = [icon_names]
-    gicon = Gio.ThemedIcon.new_from_names(list(icon_names))
-    img = Gtk.Image.new_from_gicon(gicon)
-    img.set_pixel_size(pixel_size)
-    return img
+    return themed_image(icon_names, pixel_size)
 
 
-def set_button_icon(button, icon_names, pixel_size=16):
+def set_button_icon(button, icon_names, pixel_size=18):
     """Set an icon-only button's icon using a fallback chain of icon names."""
     img = make_icon(icon_names, pixel_size)
     button.set_child(img)
@@ -169,7 +170,7 @@ class PackageRowContent(Gtk.Box):
         self.append(self.checkbox)
 
         self.icon = Gtk.Image()
-        self.icon.set_pixel_size(20)
+        self.icon.set_pixel_size(22)
         self.icon.set_valign(Gtk.Align.CENTER)
         self.icon.add_css_class("dim-label")
         self.append(self.icon)
@@ -227,7 +228,11 @@ class PackageRowContent(Gtk.Box):
         if pkg:
             pkg._bound_widget = self
 
-        self.icon.set_from_icon_name(pkg_icon(pkg.pkg_name))
+        tex = get_icon_texture(pkg_icon(pkg.pkg_name), 22)
+        if tex is not None:
+            self.icon.set_from_paintable(tex)
+        else:
+            self.icon.set_from_icon_name(pkg_icon(pkg.pkg_name))
         self.name_label.set_label(pkg.pkg_name)
         self.desc_label.set_label(pkg.pkg_description or "")
         self.desc_label.set_visible(bool(pkg.pkg_description))
@@ -330,7 +335,7 @@ class NavRow(Gtk.ListBoxRow):
         box.set_margin_top(7);    box.set_margin_bottom(7)
         box.set_margin_start(10); box.set_margin_end(10)
 
-        icon = make_icon(icon_name, 16)
+        icon = make_icon(icon_name, 18)
         icon.set_valign(Gtk.Align.CENTER)
         icon.add_css_class("dim-label")
         box.append(icon)
