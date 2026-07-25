@@ -178,6 +178,7 @@ CSS = """
 }
 .count-update  { background: alpha(#e5a50a, 0.15); color: #c38600; }
 .count-foreign { background: alpha(#9141ac, 0.15); color: #9141ac; }
+.count-new     { background: alpha(#26a269, 0.15); color: #26a269; }
 
 /* ── Dependency chips ── */
 .dep-chip {

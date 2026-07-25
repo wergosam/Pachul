@@ -105,10 +105,13 @@ STRINGS_DE = {
     "UPDATES": "UPDATES",
     "BROWSE": "DURCHSUCHEN",
     "Search": "Suche",
+    "All Packages": "Alle Pakete",
+    "Search packages, e.g. firefox, vlc, git…": "Pakete suchen, z. B. firefox, vlc, git…",
     "Updates": "Updates",
     "Installed": "Installiert",
+    "New Packages": "Neue Pakete",
     "AUR / Foreign": "AUR / Fremd",
-    "REPOSITORIES": "REPOSITORIEN",
+    "REPOSITORIES": "REPOSITORIES",
     "TOOLS": "WERKZEUGE",
     "Check Updates": "Updates prüfen",
     "Rate Mirrors": "Spiegelserver bewerten",
@@ -457,6 +460,21 @@ STRINGS_DE = {
     "Show Arch news before upgrades": "Arch-News vor Aktualisierungen anzeigen",
     "Warns about manual interventions before a system upgrade":
         "Warnt vor manuellen Eingriffen, bevor das System aktualisiert wird",
+    "Tray Icon": "Tray-Icon",
+    "A persistent icon showing the pending update count":
+        "Ein dauerhaftes Icon, das die Anzahl ausstehender Updates anzeigt",
+    "Start automatically at login": "Beim Anmelden automatisch starten",
+    "Install Pachul?": "Pachul installieren?",
+    "Pachul isn't installed system-wide yet. Installing adds an "
+    "app-menu entry and the pachul / pachul-tray commands, and "
+    "installs any missing dependencies — this needs your password.":
+        "Pachul ist noch nicht systemweit installiert. Die Installation fügt einen "
+        "Eintrag im Anwendungsmenü sowie die Befehle pachul / pachul-tray hinzu und "
+        "installiert fehlende Abhängigkeiten — dafür wird dein Passwort benötigt.",
+    "Not Now": "Nicht jetzt",
+    "Install Pachul": "Pachul installieren",
+    "Pachul installed — available from the app menu from now on.":
+        "Pachul wurde installiert — ab jetzt auch über das Anwendungsmenü verfügbar.",
     "Background Service": "Hintergrunddienst",
     "Check for updates and notify even when Pachul is closed, via a systemd user timer":
         "Prüft auf Updates und benachrichtigt auch, wenn Pachul geschlossen ist, über einen systemd-Benutzer-Timer",
@@ -481,6 +499,7 @@ STRINGS_DE = {
     "No Recent News": "Keine aktuellen News",
     "Review recent announcements before upgrading:":
         "Prüfe aktuelle Ankündigungen vor der Aktualisierung:",
+    "(machine-translated from English)": "(maschinell aus dem Englischen übersetzt)",
     "Open": "Öffnen",
 
     # Keyboard shortcuts
@@ -493,6 +512,10 @@ STRINGS_DE = {
     "Select all packages (batch mode)": "Alle Pakete auswählen (Batch-Modus)",
     "Deselect all packages (batch mode)": "Alle Pakete abwählen (Batch-Modus)",
     "Quit": "Beenden",
+
+    # Tray indicator (tray.py)
+    "Open Pachul": "Pachul öffnen",
+    "Checking for updates…": "Prüfe auf Updates…",
 }
 
 
@@ -547,8 +570,11 @@ STRINGS_FR = {
     "UPDATES": "MISES À JOUR",
     "BROWSE": "PARCOURIR",
     "Search": "Rechercher",
+    "All Packages": "Tous les paquets",
+    "Search packages, e.g. firefox, vlc, git…": "Rechercher des paquets, p. ex. firefox, vlc, git…",
     "Updates": "Mises à jour",
     "Installed": "Installés",
+    "New Packages": "Nouveaux paquets",
     "AUR / Foreign": "AUR / Externe",
     "REPOSITORIES": "DÉPÔTS",
     "TOOLS": "OUTILS",
@@ -899,6 +925,21 @@ STRINGS_FR = {
     "Show Arch news before upgrades": "Afficher les actualités Arch avant les mises à niveau",
     "Warns about manual interventions before a system upgrade":
         "Avertit des interventions manuelles avant une mise à niveau système",
+    "Tray Icon": "Icône de notification",
+    "A persistent icon showing the pending update count":
+        "Une icône persistante affichant le nombre de mises à jour en attente",
+    "Start automatically at login": "Démarrer automatiquement à la connexion",
+    "Install Pachul?": "Installer Pachul ?",
+    "Pachul isn't installed system-wide yet. Installing adds an "
+    "app-menu entry and the pachul / pachul-tray commands, and "
+    "installs any missing dependencies — this needs your password.":
+        "Pachul n'est pas encore installé pour tout le système. L'installation ajoute une "
+        "entrée dans le menu des applications ainsi que les commandes pachul / pachul-tray, et "
+        "installe les dépendances manquantes — cela nécessite votre mot de passe.",
+    "Not Now": "Pas maintenant",
+    "Install Pachul": "Installer Pachul",
+    "Pachul installed — available from the app menu from now on.":
+        "Pachul installé — désormais disponible depuis le menu des applications.",
     "Background Service": "Service en arrière-plan",
     "Check for updates and notify even when Pachul is closed, via a systemd user timer":
         "Vérifie les mises à jour et notifie même lorsque Pachul est fermé, via un timer systemd utilisateur",
@@ -923,6 +964,7 @@ STRINGS_FR = {
     "No Recent News": "Aucune actualité récente",
     "Review recent announcements before upgrading:":
         "Examinez les annonces récentes avant la mise à niveau :",
+    "(machine-translated from English)": "(traduit automatiquement de l'anglais)",
     "Open": "Ouvrir",
 
     # Keyboard shortcuts
@@ -935,6 +977,10 @@ STRINGS_FR = {
     "Select all packages (batch mode)": "Sélectionner tous les paquets (mode batch)",
     "Deselect all packages (batch mode)": "Désélectionner tous les paquets (mode batch)",
     "Quit": "Quitter",
+
+    # Tray indicator (tray.py)
+    "Open Pachul": "Ouvrir Pachul",
+    "Checking for updates…": "Vérification des mises à jour…",
 }
 
 
@@ -989,8 +1035,11 @@ STRINGS_IT = {
     "UPDATES": "AGGIORNAMENTI",
     "BROWSE": "ESPLORA",
     "Search": "Cerca",
+    "All Packages": "Tutti i pacchetti",
+    "Search packages, e.g. firefox, vlc, git…": "Cerca pacchetti, es. firefox, vlc, git…",
     "Updates": "Aggiornamenti",
     "Installed": "Installati",
+    "New Packages": "Nuovi pacchetti",
     "AUR / Foreign": "AUR / Esterni",
     "REPOSITORIES": "REPOSITORY",
     "TOOLS": "STRUMENTI",
@@ -1341,6 +1390,21 @@ STRINGS_IT = {
     "Show Arch news before upgrades": "Mostra le notizie di Arch prima degli aggiornamenti",
     "Warns about manual interventions before a system upgrade":
         "Avvisa di interventi manuali prima di un aggiornamento di sistema",
+    "Tray Icon": "Icona nella barra di stato",
+    "A persistent icon showing the pending update count":
+        "Un'icona persistente che mostra il numero di aggiornamenti in sospeso",
+    "Start automatically at login": "Avvia automaticamente all'accesso",
+    "Install Pachul?": "Installare Pachul?",
+    "Pachul isn't installed system-wide yet. Installing adds an "
+    "app-menu entry and the pachul / pachul-tray commands, and "
+    "installs any missing dependencies — this needs your password.":
+        "Pachul non è ancora installato a livello di sistema. L'installazione aggiunge una "
+        "voce nel menu delle applicazioni e i comandi pachul / pachul-tray, e "
+        "installa le dipendenze mancanti — è necessaria la tua password.",
+    "Not Now": "Non ora",
+    "Install Pachul": "Installa Pachul",
+    "Pachul installed — available from the app menu from now on.":
+        "Pachul installato — d'ora in poi disponibile anche dal menu delle applicazioni.",
     "Background Service": "Servizio in background",
     "Check for updates and notify even when Pachul is closed, via a systemd user timer":
         "Controlla gli aggiornamenti e notifica anche quando Pachul è chiuso, tramite un timer utente systemd",
@@ -1365,6 +1429,7 @@ STRINGS_IT = {
     "No Recent News": "Nessuna notizia recente",
     "Review recent announcements before upgrading:":
         "Rivedi gli annunci recenti prima di aggiornare:",
+    "(machine-translated from English)": "(tradotto automaticamente dall'inglese)",
     "Open": "Apri",
 
     # Keyboard shortcuts
@@ -1377,6 +1442,10 @@ STRINGS_IT = {
     "Select all packages (batch mode)": "Seleziona tutti i pacchetti (modalità batch)",
     "Deselect all packages (batch mode)": "Deseleziona tutti i pacchetti (modalità batch)",
     "Quit": "Esci",
+
+    # Tray indicator (tray.py)
+    "Open Pachul": "Apri Pachul",
+    "Checking for updates…": "Verifica aggiornamenti…",
 }
 
 

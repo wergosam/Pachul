@@ -151,7 +151,7 @@ class pachulApp(Adw.Application):
         about = Adw.AboutDialog()
         about.set_application_name("Pachul")
         about.set_application_icon("io.github.wergosam.pachul")
-        about.set_version("2.2.1")
+        about.set_version("2.2.2")
         about.set_developer_name("Juerg Rechsteiner")
         about.set_license_type(Gtk.License.GPL_2_0)
         about.set_website("https://github.com/wergosam/Pachul")

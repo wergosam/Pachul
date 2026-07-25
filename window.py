@@ -1,9 +1,10 @@
 """
 Pachul — window.py
-Main application window: sidebar, search page, package list, detail panel,
-filtering, and all action handlers.
+Main application window: sidebar, package list with an integrated search
+entry, detail panel, filtering, and all action handlers.
 """
 
+import os
 import shlex
 import threading
 
@@ -17,7 +18,8 @@ from backend import (
     check_updates, search_packages_cmd, run_command,
     invalidate_cache, invalidate_syncdb_cache, get_explicit_packages,
     get_ignored_packages, set_package_ignored, get_setting,
-    build_snapshot_cmd,
+    build_snapshot_cmd, flatpak_available, snap_available,
+    is_pachul_installed, build_install_command,
 )
 from models import (
     PackageItem, NavRow, REPO_BADGE_CLASS, pkg_icon, make_package_listview,
@@ -25,15 +27,16 @@ from models import (
 )
 from icons import themed_image, themed_paintable, get_icon_texture
 
+# Directory this module (and app.py) live in — used to find install.sh
+# next to a source checkout, and as the tray.py path for the autostart
+# entry before Pachul has been installed system-wide.
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Fallback chains for icon names that are missing in some icon themes
 # (notably KDE Breeze), which otherwise show up as a red/pink broken icon.
 ICON_UPDATE_AVAILABLE = [
     "software-update-available-symbolic", "software-update-available",
     "system-software-update-symbolic", "view-refresh-symbolic",
-]
-ICON_SELECTION_MODE = [
-    "selection-mode-symbolic", "edit-select-all-symbolic",
-    "object-select-symbolic", "list-add-symbolic",
 ]
 ICON_RATE_MIRRORS = [
     "network-transmit-receive-symbolic", "network-wired-symbolic",
@@ -103,10 +106,26 @@ class DetailPanel:
         self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.stack.set_transition_duration(120)
 
-        empty = Adw.StatusPage()
-        empty.set_paintable(themed_paintable("package-x-generic-symbolic", 72))
-        empty.set_title(tr("Select a Package"))
-        empty.set_description(tr("Choose a package to view its details, files, and dependencies."))
+        empty = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        empty.set_valign(Gtk.Align.CENTER); empty.set_halign(Gtk.Align.CENTER)
+        empty.set_vexpand(True); empty.set_hexpand(True)
+        empty_icon = themed_image("package-x-generic-symbolic", 36)
+        empty_icon.add_css_class("dim-label")
+        empty_icon.set_halign(Gtk.Align.CENTER)
+        empty.append(empty_icon)
+        empty_title = Gtk.Label(label=tr("Select a Package"))
+        empty_title.add_css_class("title-4")
+        empty_title.set_halign(Gtk.Align.CENTER)
+        empty_title.set_justify(Gtk.Justification.CENTER)
+        empty.append(empty_title)
+        empty_desc = Gtk.Label(
+            label=tr("Choose a package to view its details, files, and dependencies."))
+        empty_desc.add_css_class("dim-label")
+        empty_desc.set_halign(Gtk.Align.CENTER)
+        empty_desc.set_justify(Gtk.Justification.CENTER)
+        empty_desc.set_wrap(True)
+        empty_desc.set_max_width_chars(40)
+        empty.append(empty_desc)
         self.stack.add_named(empty, "empty")
 
         # Batch selection overview
@@ -380,9 +399,10 @@ class pachulWindow(Adw.ApplicationWindow):
         self.set_size_request(900, 560)
         self._all_packages     = []
         self._selected_pkg     = None
-        self._current_filter   = "search"  # matches the "search" page _build_ui() shows by
-                                            # default (nav_listbox.select_row() below doesn't
-                                            # fire row-activated, so this has to be set here too)
+        self._current_filter   = "not_installed"  # matches the "New Packages" row _build_sidebar()
+                                          # selects by default (nav_listbox.select_row() below
+                                          # doesn't fire row-activated, so this has to be set here too)
+        self._search_query     = ""      # current text in the always-visible search entry
         self._updates          = None
         self._aur_helper_cache = None
         self._search_timer     = None   # GLib source id for debounced search
@@ -391,6 +411,7 @@ class pachulWindow(Adw.ApplicationWindow):
         self.connect("close-request", self._on_close_request)
         self._build_ui()
         self._load_packages()
+        GLib.idle_add(self._maybe_offer_install)
 
         # Add "select all" action with Ctrl+A shortcut
         select_all_action = Gio.SimpleAction.new("select_all", None)
@@ -409,6 +430,39 @@ class pachulWindow(Adw.ApplicationWindow):
         self._cancel_search_timer()
         return False   # allow window to close
 
+    def _maybe_offer_install(self):
+        """Offer to run install.sh if Pachul is running from a source
+        checkout that was never installed system-wide. A no-op once
+        installed (or when there's no install.sh next to this copy, e.g.
+        an installed copy itself, which doesn't ship one)."""
+        if is_pachul_installed():
+            return False
+        cmd = build_install_command(APP_DIR)
+        if not cmd:
+            return False
+
+        d = Adw.AlertDialog()
+        d.set_heading(tr("Install Pachul?"))
+        d.set_body(tr(
+            "Pachul isn't installed system-wide yet. Installing adds an "
+            "app-menu entry and the pachul / pachul-tray commands, and "
+            "installs any missing dependencies — this needs your password."))
+        d.add_response("skip", tr("Not Now"))
+        d.add_response("install", tr("Install"))
+        d.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
+        d.set_default_response("install")
+        d.set_close_response("skip")
+
+        def _on_response(_dlg, resp):
+            if resp == "install":
+                run_terminal_dialog(
+                    self, cmd, tr("Install Pachul"),
+                    on_success=lambda: self._toast(
+                        tr("Pachul installed — available from the app menu from now on.")))
+        d.connect("response", _on_response)
+        d.present(self)
+        return False   # GLib.idle_add: run once
+
     # ── Build UI ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -423,13 +477,9 @@ class pachulWindow(Adw.ApplicationWindow):
         sidebar_tv  = Adw.ToolbarView()
         sidebar_hdr = Adw.HeaderBar()
         sidebar_hdr.set_show_end_title_buttons(False)
-        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        app_icon  = themed_image("package-x-generic-symbolic", 20)
         title_lbl = Gtk.Label(label="Pachul")
         title_lbl.add_css_class("heading")
-        title_box.append(app_icon)
-        title_box.append(title_lbl)
-        sidebar_hdr.set_title_widget(title_box)
+        sidebar_hdr.set_title_widget(title_lbl)
         sidebar_tv.add_top_bar(sidebar_hdr)
         sidebar_tv.set_content(self._build_sidebar())
         sidebar_page.set_child(sidebar_tv)
@@ -444,20 +494,6 @@ class pachulWindow(Adw.ApplicationWindow):
         self.content_hdr.set_show_title(False)
 
         right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        self.btn_upgrade = Gtk.Button()
-        set_button_icon(self.btn_upgrade, ICON_UPDATE_AVAILABLE)
-        self.btn_upgrade.set_tooltip_text(tr("System upgrade (pacman -Syu)"))
-        self.btn_upgrade.connect("clicked", self._on_upgrade)
-        self.btn_upgrade.add_css_class("suggested-action")
-        right_box.append(self.btn_upgrade)
-
-        self.btn_selection_mode = Gtk.ToggleButton()
-        set_button_icon(self.btn_selection_mode, ICON_SELECTION_MODE)
-        self.btn_selection_mode.set_tooltip_text(tr("Select multiple packages"))
-        self.btn_selection_mode.add_css_class("flat")
-        self.btn_selection_mode.connect("toggled", self._on_toggle_selection_mode)
-        right_box.append(self.btn_selection_mode)
-
         menu_btn = Gtk.MenuButton()
         menu_btn.set_child(themed_image("open-menu-symbolic", 18))
         menu_btn.add_css_class("image-button")
@@ -493,26 +529,12 @@ class pachulWindow(Adw.ApplicationWindow):
         self.content_hdr.pack_end(right_box)
         self.content_tv.add_top_bar(self.content_hdr)
 
-        self.update_banner = Adw.Banner()
-        self.update_banner.set_button_label(tr("Upgrade Now"))
-        self.update_banner.connect("button-clicked", self._on_upgrade)
-        self.update_banner.set_revealed(False)
-        self.content_tv.add_top_bar(self.update_banner)
-
-        # Main stack: search page | list+detail paned
-        # Shared selection-mode state: one flag + one selected-name set used
-        # by BOTH the main package list and the search-results list, so
-        # toggling batch-select and picking packages behaves identically
-        # everywhere and survives switching between views.
+        # Shared selection-mode state: one flag + one selected-name set,
+        # kept as its own object since the package list panel is rebuilt
+        # (e.g. on language change) while this state should persist.
         self.pkg_sel_state = ListSelectionState()
 
-        self.main_stack = Gtk.Stack()
-        self.main_stack.set_transition_type(Gtk.StackTransitionType.NONE)  # instant — no freeze
-        self.main_stack.add_named(self._build_search_page(),      "search")
-        self.main_stack.add_named(self._build_list_detail_paned(), "list")
-        self.main_stack.set_visible_child_name("search")
-
-        self.content_tv.set_content(self.main_stack)
+        self.content_tv.set_content(self._build_list_detail_paned())
         content_page.set_child(self.content_tv)
         self.nav_split.set_content(content_page)
 
@@ -520,162 +542,18 @@ class pachulWindow(Adw.ApplicationWindow):
         self._toast_overlay.set_child(self.nav_split)
         self.set_content(self._toast_overlay)
 
-    # ── Search page ───────────────────────────────────────────────────────────
-
-    def _build_search_page(self):
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-
-        # Hero
-        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        hero.set_halign(Gtk.Align.FILL)
-        hero.set_margin_top(48); hero.set_margin_bottom(24)
-        hero.set_margin_start(60); hero.set_margin_end(60)
-
-        headline = Gtk.Label(label=tr("Search Packages"))
-        headline.add_css_class("title-1")
-        headline.set_halign(Gtk.Align.CENTER)
-        hero.append(headline)
-
-        sub = Gtk.Label(label=tr("Search official repos and AUR"))
-        sub.add_css_class("body"); sub.add_css_class("dim-label")
-        sub.set_halign(Gtk.Align.CENTER)
-        hero.append(sub)
-
-        search_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        search_row.set_halign(Gtk.Align.CENTER)
-        search_row.set_size_request(520, -1)
-        search_row.add_css_class("linked")
-
-        self.search_entry = Gtk.Entry()
-        self.search_entry.set_placeholder_text(tr("Search packages, e.g. firefox, vlc, git…"))
-        self.search_entry.set_hexpand(True)
-        self.search_entry.add_css_class("search-page-entry")
-        self.search_entry.connect("changed", self._on_search_changed)
-        self.search_entry.connect("activate", self._on_search_activate)
-        search_row.append(self.search_entry)
-
-        search_btn = Gtk.Button()
-        search_btn.set_child(themed_image("system-search-symbolic", 18))
-        search_btn.add_css_class("image-button")
-        search_btn.add_css_class("suggested-action")
-        search_btn.connect("clicked", lambda *_: self._on_search_activate())
-        search_row.append(search_btn)
-        hero.append(search_row)
-        root.append(hero)
-
-        root.append(Gtk.Separator())
-
-        # Results stack
-        self._search_results_stack = Gtk.Stack()
-        self._search_results_stack.set_vexpand(True)
-        self._search_results_stack.set_transition_type(Gtk.StackTransitionType.NONE)
-        self._search_results_stack.set_transition_duration(0)
-
-        idle_page = Adw.StatusPage()
-        idle_page.set_paintable(themed_paintable("system-search-symbolic", 72))
-        idle_page.set_title(tr("Find Packages"))
-        idle_page.set_description(tr("Type above to search the official repositories and AUR."))
-        self._search_results_stack.add_named(idle_page, "idle")
-
-        spin_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        spin_box.set_halign(Gtk.Align.CENTER); spin_box.set_valign(Gtk.Align.CENTER)
-        self._search_spinner = Gtk.Spinner()
-        self._search_spinner.set_size_request(36, 36)
-        spin_lbl = Gtk.Label(label=tr("Searching…"))
-        spin_lbl.add_css_class("dim-label")
-        spin_box.append(self._search_spinner)
-        spin_box.append(spin_lbl)
-        self._search_results_stack.add_named(spin_box, "searching")
-
-        no_results = Adw.StatusPage()
-        no_results.set_paintable(themed_paintable("system-search-symbolic", 72))
-        no_results.set_title(tr("No Results"))
-        no_results.set_description(tr("Try different keywords or check your spelling."))
-        self._search_results_stack.add_named(no_results, "empty")
-
-        # Results paned — its own DetailPanel (self.search_panel), built below
-        self._search_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self._search_paned.set_position(380)
-        self._search_paned.set_shrink_start_child(False)
-        self._search_paned.set_shrink_end_child(False)
-
-        results_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.search_scroll = Gtk.ScrolledWindow()
-        results_scroll = self.search_scroll
-        results_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        results_scroll.set_vexpand(True)
-        self.search_listview, self.search_store, self.search_selection, _ = \
-            make_package_listview(self._on_search_activated,
-                                   self._update_batch_action_bar,
-                                   sel_state=self.pkg_sel_state)
-        # Keep keyboard focus in the search entry as results stream in, so
-        # search-as-you-type can't be interrupted by the list grabbing focus.
-        self.search_listview.set_can_focus(False)
-        results_scroll.set_child(self.search_listview)
-        results_panel.append(results_scroll)
-
-        results_action = Gtk.ActionBar()
-        # Select all / deselect all button (toggles)
-        self.search_btn_select_all = Gtk.Button()
-        set_button_icon(self.search_btn_select_all, "edit-select-all-symbolic")
-        self.search_btn_select_all.set_tooltip_text(tr("Select all visible packages"))
-        self.search_btn_select_all.connect("clicked", self._on_select_all)
-        self.search_btn_select_all.add_css_class("flat")
-        self.search_btn_select_all.set_visible(False)
-        results_action.pack_start(self.search_btn_select_all)
-
-        # Deselect all button
-        self.search_btn_deselect_all = Gtk.Button()
-        set_button_icon(self.search_btn_deselect_all, "edit-clear-all-symbolic")
-        self.search_btn_deselect_all.set_tooltip_text(tr("Deselect all packages"))
-        self.search_btn_deselect_all.connect("clicked", self._on_deselect_all)
-        self.search_btn_deselect_all.add_css_class("flat")
-        self.search_btn_deselect_all.set_visible(False)
-        results_action.pack_start(self.search_btn_deselect_all)
-
-        self._search_btn_install = self._action_btn(
-            "package-x-generic-symbolic", tr("Install"),
-            "suggested-action", "install-btn", callback=self._on_install)
-        self._search_btn_install.set_sensitive(False)
-        results_action.pack_start(self._search_btn_install)
-        self._search_count_lbl = Gtk.Label(label="")
-        self._search_count_lbl.add_css_class("caption")
-        self._search_count_lbl.add_css_class("dim-label")
-        results_action.set_center_widget(self._search_count_lbl)
-        self._search_btn_remove = self._action_btn(
-            "user-trash-symbolic", tr("Uninstall"),
-            "destructive-action", "remove-btn", callback=self._on_remove)
-        self._search_btn_remove.set_sensitive(False)
-        results_action.pack_end(self._search_btn_remove)
-        results_panel.append(results_action)
-
-        self._search_paned.set_start_child(results_panel)
-        self._search_paned.set_end_child(self._build_search_detail_panel())
-        self._search_results_stack.add_named(self._search_paned, "results")
-
-        root.append(self._search_results_stack)
-        return root
-
-    # ── List+detail paned (Installed / AUR / Updates / Repos) ─────────────────
+    # ── List + Detail ────────────────────────────────────────────────────────
 
     def _build_list_detail_paned(self):
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        paned.set_position(380)
-        paned.set_shrink_start_child(False)
-        paned.set_shrink_end_child(False)
         paned.set_start_child(self._build_package_list_panel())
+        paned.set_resize_start_child(True)
+        paned.set_shrink_start_child(False)
         paned.set_end_child(self._build_detail_panel())
+        paned.set_resize_end_child(True)
+        paned.set_shrink_end_child(False)
+        paned.set_position(460)
         return paned
-
-
-    # ── Search detail panel (independent copy for search paned) ──────────────
-
-    def _build_search_detail_panel(self):
-        self.search_panel = DetailPanel(
-            self._action_btn, self._on_install, self._on_remove,
-            self._on_reinstall, self._on_downgrade)
-        self.search_panel.dep_callback = self._search_dep
-        return self.search_panel.stack
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
 
@@ -699,7 +577,6 @@ class pachulWindow(Adw.ApplicationWindow):
         outer.append(stats_box)
 
         # Browse
-        outer.append(self._sidebar_header(tr("BROWSE")))
         self.nav_listbox = Gtk.ListBox()
         self.nav_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.nav_listbox.add_css_class("navigation-sidebar")
@@ -708,10 +585,10 @@ class pachulWindow(Adw.ApplicationWindow):
 
         self._nav_rows = {}
         browse_items = [
-            ("search",    "system-search-symbolic",             tr("Search"),        None, None),
-            ("installed", "emblem-ok-symbolic",                 tr("Installed"),     None, None),
-            ("foreign",   "application-x-executable-symbolic", tr("AUR / Foreign"), None, "count-foreign"),
-            ("updates",   ICON_UPDATE_AVAILABLE,               tr("Updates"),        None, "count-update"),
+            ("not_installed", "list-add-symbolic",                  tr("New Packages"),   0,    "count-new"),
+            ("all",           "view-list-symbolic",                 tr("All Packages"),   None, None),
+            ("installed",     "emblem-ok-symbolic",                 tr("Installed"),      0,    None),
+            ("updates",       ICON_UPDATE_AVAILABLE,               tr("Updates"),         0,    "count-update"),
         ]
         for key, icon, label, cnt, badge_cls in browse_items:
             row = NavRow(icon, label, cnt, badge_cls)
@@ -753,7 +630,6 @@ class pachulWindow(Adw.ApplicationWindow):
         tools_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         tools_box.set_margin_start(5); tools_box.set_margin_end(5); tools_box.set_margin_bottom(4)
         for icon_name, btn_label, cb in [
-            (ICON_UPDATE_AVAILABLE,    tr("Check Updates"), self._on_check_updates),
             (ICON_RATE_MIRRORS,        tr("Rate Mirrors"),  self._on_rate_mirrors),
             ("user-trash-symbolic",    tr("Find Orphans"),  self._on_show_orphans),
             (ICON_CLEAN_CACHE,         tr("Clean Cache"),   self._on_clean_cache),
@@ -802,6 +678,24 @@ class pachulWindow(Adw.ApplicationWindow):
     def _build_package_list_panel(self):
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
+        search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        search_box.set_margin_top(8); search_box.set_margin_bottom(8)
+        search_box.set_margin_start(10); search_box.set_margin_end(10)
+        self.search_entry = Gtk.Entry()
+        self.search_entry.set_placeholder_text(tr("Search packages, e.g. firefox, vlc, git…"))
+        self.search_entry.set_hexpand(True)
+        self.search_entry.set_icon_from_icon_name(
+            Gtk.EntryIconPosition.PRIMARY, "system-search-symbolic")
+        self.search_entry.set_icon_from_icon_name(
+            Gtk.EntryIconPosition.SECONDARY, "edit-clear-symbolic")
+        self.search_entry.set_icon_sensitive(Gtk.EntryIconPosition.SECONDARY, False)
+        self.search_entry.connect("changed", self._on_search_changed)
+        self.search_entry.connect("activate", self._on_search_activate)
+        self.search_entry.connect("icon-press", self._on_search_icon_press)
+        search_box.append(self.search_entry)
+        panel.append(search_box)
+        panel.append(Gtk.Separator())
+
         self.pkg_scroll = Gtk.ScrolledWindow()
         pkg_scroll = self.pkg_scroll
         pkg_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -819,10 +713,30 @@ class pachulWindow(Adw.ApplicationWindow):
         sp_lbl.add_css_class("dim-label")
         spinner_box.append(self.spinner); spinner_box.append(sp_lbl)
 
-        self.empty_updates_page = Adw.StatusPage()
-        self.empty_updates_page.set_paintable(themed_paintable("emblem-ok-symbolic", 72))
-        self.empty_updates_page.set_title(tr("System is up to date"))
-        self.empty_updates_page.set_description(tr("No pending updates found."))
+        # Built to match the DetailPanel's empty-state sizing exactly (36px
+        # icon, title-4) rather than Adw.StatusPage's much larger defaults,
+        # so the two side-by-side empty states look consistent.
+        self.empty_updates_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.empty_updates_page.set_valign(Gtk.Align.CENTER)
+        self.empty_updates_page.set_halign(Gtk.Align.CENTER)
+        self.empty_updates_page.set_vexpand(True)
+        self.empty_updates_page.set_hexpand(True)
+        _eu_icon = themed_image("emblem-ok-symbolic", 36)
+        _eu_icon.add_css_class("dim-label")
+        _eu_icon.set_halign(Gtk.Align.CENTER)
+        self.empty_updates_page.append(_eu_icon)
+        self._empty_updates_title = Gtk.Label(label=tr("System is up to date"))
+        self._empty_updates_title.add_css_class("title-4")
+        self._empty_updates_title.set_halign(Gtk.Align.CENTER)
+        self._empty_updates_title.set_justify(Gtk.Justification.CENTER)
+        self.empty_updates_page.append(self._empty_updates_title)
+        self._empty_updates_desc = Gtk.Label(label=tr("No pending updates found."))
+        self._empty_updates_desc.add_css_class("dim-label")
+        self._empty_updates_desc.set_halign(Gtk.Align.CENTER)
+        self._empty_updates_desc.set_justify(Gtk.Justification.CENTER)
+        self._empty_updates_desc.set_wrap(True)
+        self._empty_updates_desc.set_max_width_chars(40)
+        self.empty_updates_page.append(self._empty_updates_desc)
 
         self.empty_generic_page = Adw.StatusPage()
         self.empty_generic_page.set_paintable(themed_paintable("system-search-symbolic", 72))
@@ -839,15 +753,33 @@ class pachulWindow(Adw.ApplicationWindow):
         self.list_stack.set_visible_child_name("loading")
         panel.append(self.list_stack)
 
-        action_bar = Gtk.ActionBar()
+        # A plain Box instead of Gtk.ActionBar, deliberately: ActionBar (like
+        # GtkCenterBox) centers its middle widget by reserving symmetric
+        # space matching whichever side — start or end — is wider. The
+        # Install/Uninstall pair and the Upgrade-All/Check-for-Updates pair
+        # are mutually exclusive here and have quite different label
+        # lengths (especially once translated), so that symmetric
+        # reservation kept swinging the bar's minimum width up and down as
+        # the sidebar filter changed — forcing the package-list column to
+        # either widen past where the divider was set, or clip its
+        # content, depending on how the paned's shrink setting was
+        # configured. A plain Box with only the count label set to expand
+        # sidesteps that: the label gets whatever space is left over and
+        # centers within it, without dictating extra minimum width.
+        action_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        action_bar.add_css_class("toolbar")   # same style class GtkActionBar applies itself
+        action_bar.set_margin_start(6); action_bar.set_margin_end(6)
+        start_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        end_box   = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+
         # Select all button
         self.btn_select_all = Gtk.Button()
         set_button_icon(self.btn_select_all, "edit-select-all-symbolic")
         self.btn_select_all.set_tooltip_text(tr("Select all visible packages"))
         self.btn_select_all.connect("clicked", self._on_select_all)
         self.btn_select_all.add_css_class("flat")
-        self.btn_select_all.set_visible(False)
-        action_bar.pack_start(self.btn_select_all)
+        self.btn_select_all.set_visible(True)
+        start_box.append(self.btn_select_all)
 
         # Deselect all button
         self.btn_deselect_all = Gtk.Button()
@@ -856,34 +788,40 @@ class pachulWindow(Adw.ApplicationWindow):
         self.btn_deselect_all.connect("clicked", self._on_deselect_all)
         self.btn_deselect_all.add_css_class("flat")
         self.btn_deselect_all.set_visible(False)
-        action_bar.pack_start(self.btn_deselect_all)
+        start_box.append(self.btn_deselect_all)
 
         self.btn_install = self._action_btn(
-            "package-x-generic-symbolic", tr("Install"),
+            None, tr("Install"),
             "suggested-action", "install-btn", callback=self._on_install)
         self.btn_install.set_sensitive(False)
-        action_bar.pack_start(self.btn_install)
+        start_box.append(self.btn_install)
 
         self.pkg_count_label = Gtk.Label(label="")
         self.pkg_count_label.add_css_class("caption"); self.pkg_count_label.add_css_class("dim-label")
-        action_bar.set_center_widget(self.pkg_count_label)
+        self.pkg_count_label.set_hexpand(True)
+        self.pkg_count_label.set_halign(Gtk.Align.CENTER)
+        self.pkg_count_label.set_ellipsize(Pango.EllipsizeMode.END)
 
         self.btn_remove = self._action_btn(
-            "user-trash-symbolic", tr("Uninstall"),
+            None, tr("Uninstall"),
             "destructive-action", "remove-btn", callback=self._on_remove)
         self.btn_remove.set_sensitive(False)
-        action_bar.pack_end(self.btn_remove)
+        end_box.append(self.btn_remove)
 
         self.btn_upgrade_all = self._action_btn(
-            "software-update-available-symbolic", tr("Upgrade All"),
+            None, tr("Upgrade All"),
             "suggested-action", callback=self._on_upgrade)
         self.btn_upgrade_all.set_sensitive(False); self.btn_upgrade_all.set_visible(False)
-        action_bar.pack_start(self.btn_upgrade_all)
+        start_box.append(self.btn_upgrade_all)
 
         self.btn_check_updates = self._action_btn(
-            "view-refresh-symbolic", tr("Check for Updates"), callback=self._on_check_updates)
+            None, tr("Check for Updates"), callback=self._on_check_updates)
         self.btn_check_updates.set_visible(False)
-        action_bar.pack_end(self.btn_check_updates)
+        end_box.append(self.btn_check_updates)
+
+        action_bar.append(start_box)
+        action_bar.append(self.pkg_count_label)
+        action_bar.append(end_box)
 
         panel.append(action_bar)
         return panel
@@ -905,8 +843,10 @@ class pachulWindow(Adw.ApplicationWindow):
             btn.add_css_class(cls)
         inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         inner.set_margin_start(4); inner.set_margin_end(4)
-        ic = themed_image(icon, 18)
-        inner.append(ic); inner.append(Gtk.Label(label=label))
+        if icon:
+            ic = themed_image(icon, 18)
+            inner.append(ic)
+        inner.append(Gtk.Label(label=label))
         btn.set_child(inner)
         if callback:
             btn.connect("clicked", callback)
@@ -939,11 +879,7 @@ class pachulWindow(Adw.ApplicationWindow):
         # Carry over the known update markers so a reload doesn't wipe them.
         self._reapply_update_markers()
         self._update_sidebar_counts()
-        # Only render the list if we're on a list page — skip if on Search
-        if self.main_stack.get_visible_child_name() != "search":
-            self._apply_filter()
-        else:
-            self.list_stack.set_visible_child_name("list")
+        self._apply_filter()
         # Re-verify updates: on first load when the setting allows it, and on
         # every reload once we've checked before (e.g. after a package op, so
         # an updated package leaves the Updates list).
@@ -965,6 +901,15 @@ class pachulWindow(Adw.ApplicationWindow):
             tr("{n} package update can be installed.").format(n=n) if n == 1
             else tr("{n} package updates can be installed.").format(n=n))
         notif.set_priority(Gio.NotificationPriority.NORMAL)
+        # An absolute file path, not a bare icon name — the notification
+        # daemon (a separate KDE/Qt process under Plasma) resolves a name
+        # against the active icon theme itself, which can silently fail
+        # the same way GTK's own lookup did (see icons.py's docstring).
+        icon_path = os.path.join(APP_DIR, "io.github.wergosam.pachul.svg")
+        if not os.path.isfile(icon_path):
+            icon_path = "/usr/share/icons/hicolor/scalable/apps/io.github.wergosam.pachul.svg"
+        if os.path.isfile(icon_path):
+            notif.set_icon(Gio.FileIcon.new(Gio.File.new_for_path(icon_path)))
         app.send_notification("pachul-updates", notif)
 
     def _on_updates_loaded(self, updates):
@@ -973,46 +918,47 @@ class pachulWindow(Adw.ApplicationWindow):
         n = len(updates)
         self.stat_updates._num.set_label(str(n))
         self._nav_rows["updates"].set_count(n)
-        if n > 0:
-            self.update_banner.set_title(
-                tr("{n} update available").format(n=n) if n == 1
-                else tr("{n} updates available").format(n=n))
-            self.update_banner.set_revealed(True)
-            # Desktop notification when the update count first rises.
-            if n != prev_n and get_setting("notify_updates"):
-                self._notify_updates(n)
-        else:
-            self.update_banner.set_revealed(False)
-        self.empty_updates_page.set_description(
+        # Desktop notification when the update count first rises.
+        if n > 0 and n != prev_n and get_setting("notify_updates"):
+            self._notify_updates(n)
+        self._empty_updates_desc.set_label(
             tr("No pending updates found.") if n == 0
             else tr("{n} update(s) available.").format(n=n))
         self._update_action_bar_mode()
         self._reapply_update_markers()
-        if self.main_stack.get_visible_child_name() != "search":
-            self._apply_filter()
+        self._apply_filter()
         return False
 
     def _reapply_update_markers(self):
         """Sync the 'update' status on _all_packages with the current
         self._updates set. Marks pending updates and clears stale ones, so a
-        fresh package reload (e.g. after installing/updating) reflects reality."""
+        fresh package reload (e.g. after installing/updating) reflects reality.
+
+        Matching uses source_id when a package has one — Flatpak/Snap
+        entries carry their app-id/package name there (what the actual
+        update commands and check_updates() both key off), which can
+        differ from the friendly display name in `name`. Plain pacman/AUR
+        packages never set source_id, so they fall back to `name` as before.
+        """
         update_map = {u["name"]: u["new"] for u in (self._updates or [])}
         for pkg in self._all_packages:
-            if pkg["name"] in update_map:
+            key = pkg.get("source_id") or pkg["name"]
+            if key in update_map:
                 pkg["status"] = "update"
-                pkg["new_version"] = update_map[pkg["name"]]
+                pkg["new_version"] = update_map[key]
             elif pkg.get("status") == "update":
                 pkg["status"] = "installed"
                 pkg.pop("new_version", None)
 
     def _update_sidebar_counts(self):
-        total     = len(self._all_packages)
-        foreign   = sum(1 for p in self._all_packages if p.get("foreign", False))
-        installed = sum(1 for p in self._all_packages if p["status"] == "installed")
+        total         = len(self._all_packages)
+        foreign       = sum(1 for p in self._all_packages if p.get("foreign", False))
+        installed     = sum(1 for p in self._all_packages if p["status"] in ("installed", "update"))
+        not_installed = total - installed
         self.stat_total._num.set_label(str(total))
         self.stat_aur._num.set_label(str(foreign))
         self._nav_rows["installed"].set_count(installed)
-        self._nav_rows["foreign"].set_count(foreign)
+        self._nav_rows["not_installed"].set_count(not_installed)
 
         seen_repos = set(
             p.get("repo", "").lower() for p in self._all_packages
@@ -1035,8 +981,8 @@ class pachulWindow(Adw.ApplicationWindow):
     def _pkg_matches_filter(pkg, filt):
         """True if pkg should be shown under sidebar filter `filt`.
 
-        `filt` is either one of the special keys (installed/foreign/updates/
-        aur) or a literal repo name. Repo names are matched generically —
+        `filt` is either one of the special keys (installed/not_installed/
+        aur/updates) or a literal repo name. Repo names are matched generically —
         not against a hardcoded shortlist — so any repo discovered at
         runtime (chaotic-aur, testing, community, flatpak, snap, …) is
         filterable as soon as it gets a sidebar row, with no extra wiring
@@ -1044,23 +990,37 @@ class pachulWindow(Adw.ApplicationWindow):
         """
         if filt == "installed":
             return pkg["status"] in ("installed", "update")
-        if filt in ("foreign", "aur"):
+        if filt == "not_installed":
+            return pkg["status"] not in ("installed", "update")
+        if filt == "aur":
             return pkg.get("foreign", False)
         if filt == "updates":
             return pkg.get("status") == "update"
-        if filt in (None, "search"):
+        if filt in (None, "all"):
             return True
         return pkg.get("repo", "").lower() == filt
 
+    @staticmethod
+    def _pkg_matches_search(pkg, query):
+        """True if pkg matches the free-text search query (empty query always matches)."""
+        if not query:
+            return True
+        q = query.lower()
+        return q in pkg["name"].lower() or q in pkg.get("description", "").lower()
+
     def _apply_filter(self):
-        """Filter in a background thread, render in batches to avoid UI freeze."""
-        filt = self._current_filter
+        """Filter (sidebar category + search text) in a background thread,
+        render in batches to avoid UI freeze."""
+        filt  = self._current_filter
+        query = self._search_query
         pkgs_snapshot = list(self._all_packages)
 
         def do_filter():
-            filtered = [p for p in pkgs_snapshot if self._pkg_matches_filter(p, filt)]
+            filtered = [p for p in pkgs_snapshot
+                        if self._pkg_matches_filter(p, filt)
+                        and self._pkg_matches_search(p, query)]
             if self._alive:
-                GLib.idle_add(self._render_filter_results, filtered, filt)
+                GLib.idle_add(self._render_filter_results, filtered, filt, query)
 
         threading.Thread(target=do_filter, daemon=True).start()
 
@@ -1076,17 +1036,22 @@ class pachulWindow(Adw.ApplicationWindow):
         items = [self._make_item(p) for p in filtered]
         self.pkg_store.splice(0, self.pkg_store.get_n_items(), items)
 
-    def _render_filter_results(self, filtered, filt):
-        if not self._alive or self._current_filter != filt:
+    def _render_filter_results(self, filtered, filt, query):
+        if not self._alive or self._current_filter != filt or self._search_query != query:
             return False
         self._fill_pkg_store(filtered)
         total = len(self._all_packages)
         shown = len(filtered)
-        self.pkg_count_label.set_label(
+        self._list_count_label_text = (
             f"{shown} of {total} packages" if shown != total else f"{total} packages")
+        # A checkbox selection persists across filter/search changes, so
+        # its "N selected" text takes priority over the plain list count —
+        # _update_batch_action_bar() is what owns the label in that case.
+        if not self.pkg_sel_state.selected:
+            self.pkg_count_label.set_label(self._list_count_label_text)
         if shown == 0:
             self.list_stack.set_visible_child_name(
-                "empty_updates" if filt == "updates" and self._updates is not None
+                "empty_updates" if filt == "updates" and not query and self._updates is not None
                 else "empty_generic")
         else:
             self.list_stack.set_visible_child_name("list")
@@ -1103,98 +1068,57 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _on_search_changed(self, entry):
         q = entry.get_text().strip()
+        self.search_entry.set_icon_sensitive(Gtk.EntryIconPosition.SECONDARY, bool(q))
         self._cancel_search_timer()
+        self._search_query = q
+        # Instant local re-filter on every keystroke — cheap, in-memory only.
+        self._apply_filter()
         if not q:
-            self._search_spinner.stop()
-            self._search_results_stack.set_visible_child_name("idle")
             return
-        # Show the searching state immediately, but defer the actual
-        # (subprocess-spawning) search until typing pauses.
-        self._search_results_stack.set_visible_child_name("searching")
-        self._search_spinner.start()
+        # Defer the expensive, subprocess-spawning remote lookup (repos +
+        # AUR) until typing pauses, so new/not-yet-known packages can still
+        # surface without a query on every keystroke.
         self._search_timer = GLib.timeout_add(
-            self.SEARCH_DEBOUNCE_MS, self._run_search, q)
+            self.SEARCH_DEBOUNCE_MS, self._run_remote_search, q)
 
     def _on_search_activate(self, *_):
         q = self.search_entry.get_text().strip()
         self._cancel_search_timer()
-        if not q:
-            self._search_results_stack.set_visible_child_name("idle")
-            return
-        self._search_results_stack.set_visible_child_name("searching")
-        self._search_spinner.start()
-        self._run_search(q)
+        self._search_query = q
+        self._apply_filter()
+        if q:
+            self._run_remote_search(q)
 
-    def _run_search(self, q):
+    def _on_search_icon_press(self, entry, icon_pos):
+        if icon_pos == Gtk.EntryIconPosition.SECONDARY:
+            entry.set_text("")   # fires _on_search_changed, which clears the filter
+
+    def _run_remote_search(self, q):
         self._search_timer = None
 
-        def worker(query):
-            ql = query.lower()
-            local = [p for p in self._all_packages
-                     if ql in p["name"].lower() or ql in p.get("description", "").lower()]
+        def worker():
+            remote = search_packages_cmd(q)
             if self._alive:
-                GLib.idle_add(self._show_search_results, local, query)
-            remote = search_packages_cmd(query)
-            if self._alive:
-                GLib.idle_add(self._merge_and_show_search, remote, query)
+                GLib.idle_add(self._merge_remote_search, remote, q)
 
-        threading.Thread(target=worker, args=(q,), daemon=True).start()
+        threading.Thread(target=worker, daemon=True).start()
         return False   # one-shot: do not repeat the timeout
 
-    def _show_search_results(self, results, query):
-        if self.search_entry.get_text().strip().lower() != query.lower():
-            return False
-        self._populate_search_list(results)
-        return False
-
-    def _merge_and_show_search(self, remote_results, query):
-        if self.search_entry.get_text().strip().lower() != query.lower():
+    def _merge_remote_search(self, remote_results, query):
+        # Ignore stale results if the query changed while we were waiting.
+        if self._search_query != query:
             return False
         existing = {p["name"] for p in self._all_packages}
+        found_new = False
         for r in remote_results:
             if r["name"] not in existing:
                 self._all_packages.append(r)
                 existing.add(r["name"])
-        ql = query.lower()
-        merged = [p for p in self._all_packages
-                  if ql in p["name"].lower() or ql in p.get("description", "").lower()]
-        self._populate_search_list(merged)
+                found_new = True
+        if found_new:
+            self._update_sidebar_counts()
+            self._apply_filter()
         return False
-
-    def _populate_search_list(self, results):
-        self._search_spinner.stop()
-        if not results:
-            self.search_store.remove_all()
-            if self._search_results_stack.get_visible_child_name() != "empty":
-                self._search_results_stack.set_visible_child_name("empty")
-            return
-        items = [self._make_item(p) for p in results]
-        self.search_store.splice(0, self.search_store.get_n_items(), items)
-        n = len(results)
-        self._search_count_lbl.set_label(
-            tr("{n} result").format(n=n) if n == 1 else tr("{n} results").format(n=n))
-        # Only switch to results page if not already there — avoids any redraw flash
-        if self._search_results_stack.get_visible_child_name() != "results":
-            self._search_results_stack.set_visible_child_name("results")
-
-    def _on_search_activated(self, pkg):
-        if pkg is None:
-            return
-        self._selected_pkg = pkg
-        installed = pkg.pkg_status in ("installed", "update")
-        # An "update" package is installed but upgradable — Install stays
-        # active and runs `pacman -S`, which upgrades that single package.
-        can_install = pkg.pkg_status != "installed"
-        install_label = tr("Update") if pkg.pkg_status == "update" else tr("Install")
-        self._set_btn_label(self._search_btn_install, install_label)
-        self._set_btn_label(self.search_panel.btn_install, install_label)
-        self._search_btn_install.set_sensitive(can_install)
-        self._search_btn_remove.set_sensitive(installed)
-        self.search_panel.btn_install.set_sensitive(can_install)
-        self.search_panel.btn_remove.set_sensitive(installed)
-        self.search_panel.btn_reinstall.set_sensitive(installed)
-        self.search_panel.btn_downgrade.set_sensitive(installed)
-        self._show_detail(self.search_panel, pkg)
 
     # ── Nav ───────────────────────────────────────────────────────────────────
 
@@ -1214,16 +1138,10 @@ class pachulWindow(Adw.ApplicationWindow):
         if idx >= len(keys):
             return
         key = keys[idx]
-        if key == "search":
-            self.main_stack.set_visible_child_name("search")
-            self._current_filter = "search"
-            GLib.idle_add(self._grab_search_focus)
-            return
         if key == "orphans":
             self._on_show_orphans()
             return
         self._current_filter = key
-        self.main_stack.set_visible_child_name("list")
         self._update_action_bar_mode()
         self._apply_filter()
 
@@ -1233,32 +1151,28 @@ class pachulWindow(Adw.ApplicationWindow):
         idx  = row.get_index()
         if idx < len(keys):
             self._current_filter = keys[idx]
-        self.main_stack.set_visible_child_name("list")
         self._update_action_bar_mode()
         self._apply_filter()
 
     def _update_action_bar_mode(self):
         is_updates = (self._current_filter == "updates")
-        # Selection mode now persists across views (Installed/Updates/repos/
-        # search) — while it's active, always show the batch Install/Remove
-        # buttons instead of the Updates-specific ones, so a person can act
-        # on their pick no matter which sidebar filter they're looking at.
-        selecting = self.pkg_sel_state.active
-        show_batch_buttons = selecting or not is_updates
+        # There's no separate selection "mode" any more — checkboxes are
+        # always available. The moment something is checked, the action bar
+        # switches to the batch Install/Remove buttons no matter which
+        # sidebar filter is active; with nothing checked it falls back to
+        # the Updates-specific buttons (or the single-package ones, handled
+        # in _update_batch_action_bar).
+        has_selection = len(self.pkg_sel_state.selected) > 0
+        show_batch_buttons = has_selection or not is_updates
         self.btn_install.set_visible(show_batch_buttons)
         self.btn_remove.set_visible(show_batch_buttons)
-        self.btn_upgrade_all.set_visible(is_updates and not selecting)
-        self.btn_check_updates.set_visible(is_updates and not selecting)
-        if is_updates and not selecting:
+        self.btn_upgrade_all.set_visible(is_updates and not has_selection)
+        self.btn_check_updates.set_visible(is_updates and not has_selection)
+        if is_updates and not has_selection:
             n = len(self._updates) if self._updates else 0
             self.btn_upgrade_all.set_sensitive(n > 0)
 
-        # Select/deselect buttons visibility
-        has_selection = len(self.pkg_sel_state.selected) > 0
-        self.btn_select_all.set_visible(selecting)
-        self.search_btn_select_all.set_visible(selecting)
-        self.btn_deselect_all.set_visible(selecting and has_selection)
-        self.search_btn_deselect_all.set_visible(selecting and has_selection)
+        self.btn_deselect_all.set_visible(has_selection)
 
     # ── Package detail ────────────────────────────────────────────────────────
 
@@ -1271,14 +1185,21 @@ class pachulWindow(Adw.ApplicationWindow):
         # active and runs `pacman -S`, which upgrades that single package.
         can_install = pkg.pkg_status != "installed"
         install_label = tr("Update") if pkg.pkg_status == "update" else tr("Install")
-        self._set_btn_label(self.btn_install, install_label)
         self._set_btn_label(self.detail_panel.btn_install, install_label)
-        self.btn_install.set_sensitive(can_install)
-        self.btn_remove.set_sensitive(installed)
         self.detail_panel.btn_install.set_sensitive(can_install)
         self.detail_panel.btn_remove.set_sensitive(installed)
         self.detail_panel.btn_reinstall.set_sensitive(installed)
         self.detail_panel.btn_downgrade.set_sensitive(installed)
+        # A row click always opens that package's detail view — even with
+        # a checkbox selection active elsewhere, so a person can still peek
+        # at a package before deciding whether to check it too. But the
+        # bottom action bar (Install/Remove) must keep reflecting the
+        # actual checked set in that case, not silently switch to acting
+        # on whatever was last peeked at.
+        if not self.pkg_sel_state.selected:
+            self._set_btn_label(self.btn_install, install_label)
+            self.btn_install.set_sensitive(can_install)
+            self.btn_remove.set_sensitive(installed)
         self._show_detail(self.detail_panel, pkg)
 
     def _set_status_pill(self, panel, status, foreign):
@@ -1327,7 +1248,7 @@ class pachulWindow(Adw.ApplicationWindow):
 
         def worker():
             if pkg.pkg_repo in ("flatpak", "snap"):
-                source_label = tr("Flatpak (user installation)") if pkg.pkg_repo == "flatpak" \
+                source_label = tr("Flatpak") if pkg.pkg_repo == "flatpak" \
                     else tr("Snap package")
                 info = (
                     f"Name           : {pkg.pkg_name}\n"
@@ -1436,47 +1357,73 @@ class pachulWindow(Adw.ApplicationWindow):
         return False
 
     def _lookup_dep_in_list(self, pkg_name):
-        """Highlight dependency in the middle panel only; leave the right panel unchanged."""
-        # Try current list first
+        """Highlight a dependency package in the package list, broadening the
+        view (and fetching it remotely if needed) so it's visible even if
+        it isn't installed or doesn't match the current filter/search."""
+        # Try the current view first
         if self._highlight_in_store(self.pkg_store, self.pkg_selection,
                                     self.pkg_listview, pkg_name):
             return
 
-        # Switch to "installed" filter to make it visible, then highlight
-        self._current_filter = "installed"
-        self.nav_listbox.select_row(self._nav_rows["installed"])
+        # Not visible under the current filter/search — broaden to "All
+        # Packages" with no search text, then try again.
+        self._current_filter = "all"
+        self._search_query = ""
+        self.search_entry.set_text("")
+        self.nav_listbox.select_row(self._nav_rows["all"])
 
         def after_filter():
-            self._highlight_in_store(self.pkg_store, self.pkg_selection,
-                                     self.pkg_listview, pkg_name)
+            if self._highlight_in_store(self.pkg_store, self.pkg_selection,
+                                        self.pkg_listview, pkg_name):
+                return False
+            # Still not found — not installed and not yet in our repo/AUR
+            # cache. Look it up remotely and prepend it once found.
+            for pkg in self._all_packages:
+                if pkg["name"] == pkg_name:
+                    self.pkg_store.insert(0, self._make_item(pkg))
+                    self.pkg_selection.set_selected(0)
+                    self.pkg_listview.scroll_to(0, Gtk.ListScrollFlags.FOCUS, None)
+                    return False
+
+            def worker():
+                results = search_packages_cmd(pkg_name)
+                if self._alive:
+                    GLib.idle_add(self._prepend_dep_result, pkg_name, results)
+
+            threading.Thread(target=worker, daemon=True).start()
             return False
 
         self._apply_filter_then(after_filter)
 
     def _apply_filter_then(self, callback):
-        """Apply filter and run callback once rendering is done."""
-        filt = self._current_filter
+        """Apply the current filter + search text; run callback once rendered."""
+        filt  = self._current_filter
+        query = self._search_query
         pkgs_snapshot = list(self._all_packages)
 
         def do_filter():
-            filtered = [p for p in pkgs_snapshot if self._pkg_matches_filter(p, filt)]
+            filtered = [p for p in pkgs_snapshot
+                        if self._pkg_matches_filter(p, filt)
+                        and self._pkg_matches_search(p, query)]
             if self._alive:
-                GLib.idle_add(self._render_filter_results_then, filtered, filt, callback)
+                GLib.idle_add(self._render_filter_results_then, filtered, filt, query, callback)
 
         threading.Thread(target=do_filter, daemon=True).start()
 
-    def _render_filter_results_then(self, filtered, filt, callback):
+    def _render_filter_results_then(self, filtered, filt, query, callback):
         """Same as _render_filter_results but fires `callback` once rendered."""
-        if not self._alive or self._current_filter != filt:
+        if not self._alive or self._current_filter != filt or self._search_query != query:
             return False
         self._fill_pkg_store(filtered)
         total = len(self._all_packages)
         shown = len(filtered)
-        self.pkg_count_label.set_label(
+        self._list_count_label_text = (
             f"{shown} of {total} packages" if shown != total else f"{total} packages")
+        if not self.pkg_sel_state.selected:
+            self.pkg_count_label.set_label(self._list_count_label_text)
         if shown == 0:
             self.list_stack.set_visible_child_name(
-                "empty_updates" if filt == "updates" and self._updates is not None
+                "empty_updates" if filt == "updates" and not query and self._updates is not None
                 else "empty_generic")
         else:
             self.list_stack.set_visible_child_name("list")
@@ -1484,37 +1431,14 @@ class pachulWindow(Adw.ApplicationWindow):
             GLib.idle_add(callback)
         return False
 
-    def _search_dep(self, pkg_name):
-        """Highlight dependency in the search results list only — no entry change, no flicker."""
-        # If already in the current results list, just highlight it
-        if self._highlight_in_store(self.search_store, self.search_selection,
-                                    self.search_listview, pkg_name):
-            return
-
-        # Not visible — find it in _all_packages and insert it at the top of the list
-        for pkg in self._all_packages:
-            if pkg["name"] == pkg_name:
-                self.search_store.insert(0, self._make_item(pkg))
-                self.search_selection.set_selected(0)
-                self.search_listview.scroll_to(0, Gtk.ListScrollFlags.FOCUS, None)
-                return
-
-        # Not in cache at all — fetch in background and prepend when ready
-        def worker():
-            results = search_packages_cmd(pkg_name)
-            if self._alive:
-                GLib.idle_add(self._prepend_dep_result, pkg_name, results)
-
-        threading.Thread(target=worker, daemon=True).start()
-
     def _prepend_dep_result(self, pkg_name, results):
         for r in results:
             if r["name"] == pkg_name:
                 if r["name"] not in {p["name"] for p in self._all_packages}:
                     self._all_packages.append(r)
-                self.search_store.insert(0, self._make_item(r))
-                self.search_selection.set_selected(0)
-                self.search_listview.scroll_to(0, Gtk.ListScrollFlags.FOCUS, None)
+                self.pkg_store.insert(0, self._make_item(r))
+                self.pkg_selection.set_selected(0)
+                self.pkg_listview.scroll_to(0, Gtk.ListScrollFlags.FOCUS, None)
                 return
         return False
 
@@ -1541,16 +1465,14 @@ class pachulWindow(Adw.ApplicationWindow):
     def _on_refresh(self, *_):
         self._all_packages = []
         self._updates = None
+        self._search_query = ""
         self.search_entry.set_text("")
-        self._search_results_stack.set_visible_child_name("idle")
         self.detail_panel.stack.set_visible_child_name("empty")
         self._selected_pkg = None
         self.pkg_sel_state.selected.clear()
-        if self.btn_selection_mode.get_active():
-            self.btn_selection_mode.set_active(False)  # fires _on_toggle_selection_mode
+        self._update_action_bar_mode()
         self.btn_install.set_sensitive(False)
         self.btn_remove.set_sensitive(False)
-        self.update_banner.set_revealed(False)
         self._load_packages()
 
     def _on_sync_db(self, *_):
@@ -1567,17 +1489,28 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _do_upgrade(self):
         def _after():
-            self.update_banner.set_revealed(False)
             self._updates = []
             self.stat_updates._num.set_label("0")
             self._nav_rows["updates"].set_count(0)
         # Use the AUR helper if present so repo *and* AUR packages are upgraded.
+        # Note: pacman's -Syu already covers every repo listed in
+        # /etc/pacman.conf uniformly (core, extra, multilib, chaotic-aur,
+        # ...) — there's no per-repo command needed for those.
         helper = self._get_aur_helper()
         cmd = f"{helper} -Syu --noconfirm" if helper else "sudo -S pacman -Syu --noconfirm"
         if get_setting("snapshot_before_upgrade"):
             snap_cmd = build_snapshot_cmd()
             if snap_cmd:
                 cmd = f"{snap_cmd} && {cmd}"
+        # Flatpak and Snap are entirely separate ecosystems that pacman/AUR
+        # helpers never touch, so they need their own commands chained on —
+        # only when the person has actually opted into showing them
+        # (flatpak_enabled/snap_enabled), matching how the rest of the app
+        # treats these two optional sources.
+        if get_setting("flatpak_enabled") and flatpak_available():
+            cmd = f"{cmd} && flatpak update -y"
+        if get_setting("snap_enabled") and snap_available():
+            cmd = f"{cmd} && sudo -S snap refresh"
         self._run_terminal(cmd, tr("System Upgrade"), on_success=_after)
 
     def _on_clean_cache(self, *_):
@@ -1585,10 +1518,42 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _on_check_updates(self, *_):
         helper = self._get_aur_helper()
-        aur = (f"; echo; echo '== AUR =='; {helper} -Qua 2>/dev/null") if helper else ""
+        aur_section = (
+            "echo; echo '== AUR =='; "
+            f"_aur_out=$({helper} -Qua 2>/dev/null); "
+            "if [ -n \"$_aur_out\" ]; then echo \"$_aur_out\"; "
+            "else echo '(No AUR updates found.)'; fi; "
+        ) if helper else ""
+        flatpak_section = (
+            "echo; echo '== Flatpak =='; "
+            "flatpak update --appstream 2>/dev/null; "
+            "_fp_out=$(flatpak remote-ls --updates --all "
+            "--columns=application,version 2>/dev/null); "
+            "if [ -n \"$_fp_out\" ]; then echo \"$_fp_out\"; "
+            "else echo '(No Flatpak updates found.)'; fi; "
+        ) if (get_setting("flatpak_enabled") and flatpak_available()) else ""
+        snap_section = (
+            "echo; echo '== Snap =='; "
+            "_snap_out=$(snap refresh --list 2>/dev/null | tail -n +2); "
+            "if [ -n \"$_snap_out\" ]; then echo \"$_snap_out\"; "
+            "else echo '(No Snap updates found.)'; fi; "
+        ) if (get_setting("snap_enabled") and snap_available()) else ""
         self._run_terminal(
-            f"{{ checkupdates 2>/dev/null || pacman -Qu 2>/dev/null; }}{aur}"
-            "; echo; echo 'Done.'",
+            "echo '== Official Repositories =='; "
+            "if command -v checkupdates >/dev/null 2>&1; then "
+            "_repo_out=$(checkupdates 2>/dev/null); "
+            "else "
+            "_repo_out=$(pacman -Qu 2>/dev/null); "
+            "echo '(Note: pacman-contrib/checkupdates not found -- checked against the "
+            "last-synced local database instead of a live one. Install pacman-contrib, "
+            "or run Sync Databases first, for a fully up-to-date check.)'; "
+            "fi; "
+            "if [ -n \"$_repo_out\" ]; then echo \"$_repo_out\"; "
+            "else echo '(No repo updates found.)'; fi; "
+            f"{aur_section}"
+            f"{flatpak_section}"
+            f"{snap_section}"
+            "echo; echo 'Done.'",
             tr("Check for Updates"))
 
     def _on_manage_repos(self, *_):
@@ -1645,7 +1610,7 @@ class pachulWindow(Adw.ApplicationWindow):
         show_hold_dialog(self, pkg.pkg_name, currently, _do_toggle)
 
     def _on_preferences(self, *_):
-        show_preferences(self, self._on_settings_changed)
+        show_preferences(self, self._on_settings_changed, app_dir=APP_DIR)
 
     def _on_settings_changed(self):
         new_lang = get_language()
@@ -1670,52 +1635,41 @@ class pachulWindow(Adw.ApplicationWindow):
         long-lived widgets built once in _build_ui() that otherwise
         wouldn't update without restarting the app.
 
-        Best-effort: restores which sidebar view (installed/updates/repo/
-        search) was active, and the search text if you were searching.
+        Best-effort: restores which sidebar view (all/installed/updates/
+        repo) was active, and the search text if any was entered.
         The exact selected package and open detail view are not restored
         (the list reloads asynchronously and re-matching a selection into
         that isn't worth the added complexity) — a minor, deliberate
         tradeoff for not needing a full restart.
         """
-        filt = self._current_filter
-        search_text = self.search_entry.get_text() if filt == "search" else ""
+        filt  = self._current_filter
+        query = self._search_query
 
         self._build_ui()
         self._load_packages()
 
-        if filt == "search":
+        row = self._nav_rows.get(filt)
+        if row is not None:
             self.repo_listbox.unselect_all()
-            self.nav_listbox.select_row(self._nav_rows.get("search"))
-            self.main_stack.set_visible_child_name("search")
-            if search_text:
-                self.search_entry.set_text(search_text)  # fires _on_search_changed
+            self.nav_listbox.select_row(row)
         else:
-            row = self._nav_rows.get(filt)
+            row = self._repo_nav_rows.get(filt)
             if row is not None:
-                self.repo_listbox.unselect_all()
-                self.nav_listbox.select_row(row)
-            else:
-                row = self._repo_nav_rows.get(filt)
-                if row is not None:
-                    self.nav_listbox.unselect_all()
-                    self.repo_listbox.select_row(row)
-            self._current_filter = filt
-            self.main_stack.set_visible_child_name("list")
-            self._update_action_bar_mode()
-            # No explicit _apply_filter() call here: _load_packages() (just
-            # above) finishes asynchronously and its own completion handler
-            # (_on_packages_loaded) already calls _apply_filter() once
-            # loading is done, as long as we're not showing "search" — which
-            # is exactly what the state we just restored ensures.
+                self.nav_listbox.unselect_all()
+                self.repo_listbox.select_row(row)
+        self._current_filter = filt
+        self._update_action_bar_mode()
+        if query:
+            self.search_entry.set_text(query)  # fires _on_search_changed
+        # No explicit _apply_filter() call here: _load_packages() (just
+        # above) finishes asynchronously and its own completion handler
+        # (_on_packages_loaded) already calls _apply_filter() once loading
+        # is done.
 
     def _on_show_shortcuts(self, *_):
         show_shortcuts_dialog(self)
 
     def _on_focus_search(self, *_):
-        self.main_stack.set_visible_child_name("search")
-        self._current_filter = "search"
-        self.nav_listbox.unselect_all()
-        self.repo_listbox.unselect_all()
         GLib.idle_add(self._grab_search_focus)
 
     def _on_downgrade(self, *_):
@@ -1803,52 +1757,52 @@ class pachulWindow(Adw.ApplicationWindow):
 
     # ── Multi-select / batch actions ─────────────────────────────────────────
 
-    def _on_toggle_selection_mode(self, btn):
-        active = btn.get_active()
+    def _rebind_all_rows(self):
+        """Detach/reattach the package ListView's model to force every
+        visible row to rebind (e.g. after Select All / Deselect All changes
+        many rows' checkboxes at once — a single row's own checkbox click
+        updates itself directly and doesn't need this), preserving scroll
+        position."""
+        lv, scroll = self.pkg_listview, self.pkg_scroll
+        model = lv.get_model()
+        if model is None:
+            return
+        vadj = scroll.get_vadjustment()
+        saved_pos = vadj.get_value() if vadj is not None else None
+        lv.set_model(None)
+        lv.set_model(model)
+        if saved_pos:
+            def _restore():
+                vadj = scroll.get_vadjustment()
+                if vadj is not None:
+                    vadj.set_value(saved_pos)
+                return False
+            # Restore after GTK has finished laying out the reattached
+            # model — doing it in the same frame gets overwritten.
+            GLib.idle_add(_restore)
+
+    def _iter_known_packages(self):
+        """Yield every PackageItem currently loaded in the package list."""
+        for i in range(self.pkg_store.get_n_items()):
+            item = self.pkg_store.get_item(i)
+            if item is not None:
+                yield item
+
+    def _update_batch_action_bar(self):
+        """Recompute the action bar + detail panel for the current checkbox
+        selection.
+
+        Serves as the `on_selection_change` callback fired every time a
+        checkbox is toggled (by a single row, or in bulk by Select/Deselect
+        All) — there's no separate "selection mode" any more, so this also
+        handles falling back to the normal single-package view the moment
+        the selection becomes empty again.
+        """
         state = self.pkg_sel_state
-        if active:
-            # Remember the normal count-label text so we can restore it
-            # exactly when selection mode ends.
-            self._pre_selection_count_label = self.pkg_count_label.get_label()
-            self._pre_selection_search_count_label = self._search_count_lbl.get_label()
-        state.active = active
-        if not active:
-            state.selected.clear()
-            # Restore the empty (or last selected) detail view
-            self.detail_panel.stack.set_visible_child_name("empty")
-            self.search_panel.stack.set_visible_child_name("empty")
-        # Force every currently-realized row in BOTH lists to rebind so
-        # checkboxes appear/disappear immediately — not just after a data
-        # reload from switching sidebar filters. Signalling the store
-        # (items_changed / splice-with-same-objects) turned out to NOT be
-        # reliably picked up by GtkListView for rows that are already bound
-        # and on screen. Detaching and reattaching the ListView's model is
-        # the one approach that unconditionally forces GTK to tear down and
-        # rebuild every visible row against the current sel_state — but it
-        # also resets scroll position, so we save/restore it around it.
-        for lv, scroll in ((self.pkg_listview, self.pkg_scroll),
-                            (self.search_listview, self.search_scroll)):
-            model = lv.get_model()
-            if model is None:
-                continue
-            vadj = scroll.get_vadjustment()
-            saved_pos = vadj.get_value() if vadj is not None else None
-            lv.set_model(None)
-            lv.set_model(model)
-            if saved_pos:
-                def _restore(scroll=scroll, saved_pos=saved_pos):
-                    vadj = scroll.get_vadjustment()
-                    if vadj is not None:
-                        vadj.set_value(saved_pos)
-                    return False
-                # Restore after GTK has finished laying out the reattached
-                # model — doing it in the same frame gets overwritten.
-                GLib.idle_add(_restore)
-        if active:
-            self._update_batch_action_bar()
-            self._update_action_bar_mode()
-        else:
-            self.pkg_count_label.set_label(getattr(self, "_pre_selection_count_label", ""))
+        n = len(state.selected)
+
+        if n == 0:
+            self.pkg_count_label.set_label(getattr(self, "_list_count_label_text", ""))
             if self._selected_pkg is not None:
                 self._on_pkg_activated(self._selected_pkg)
             else:
@@ -1856,40 +1810,10 @@ class pachulWindow(Adw.ApplicationWindow):
                 self._set_btn_label(self.btn_remove, tr("Uninstall"))
                 self.btn_install.set_sensitive(False)
                 self.btn_remove.set_sensitive(False)
-
-            self._search_count_lbl.set_label(
-                getattr(self, "_pre_selection_search_count_label", ""))
-            search_sel = self.search_selection.get_selected_item()
-            if search_sel is not None:
-                self._on_search_activated(search_sel)
-            else:
-                self._set_btn_label(self._search_btn_install, tr("Install"))
-                self._set_btn_label(self._search_btn_remove, tr("Uninstall"))
-                self._search_btn_install.set_sensitive(False)
-                self._search_btn_remove.set_sensitive(False)
+                self.detail_panel.stack.set_visible_child_name("empty")
             self._update_action_bar_mode()
-
-    def _iter_known_packages(self):
-        """Yield every PackageItem currently loaded in either list (main +
-        search), so batch actions work no matter which view a package was
-        selected from — selection is shared and survives switching views."""
-        for store in (self.pkg_store, self.search_store):
-            for i in range(store.get_n_items()):
-                item = store.get_item(i)
-                if item is not None:
-                    yield item
-
-    def _update_batch_action_bar(self):
-        """Recompute install/remove buckets + labels for the current
-        selection, across BOTH the main list and search results, and update
-        both action bars in sync.
-
-        Also serves as the `on_selection_change` callback fired by either
-        ListView every time a checkbox is toggled.
-        """
-        state = self.pkg_sel_state
-        if not state.active:
             return
+
         seen = set()
         to_install, to_remove = [], []
         selected_names = []
@@ -1903,8 +1827,7 @@ class pachulWindow(Adw.ApplicationWindow):
                     to_install.append(item)
         self._batch_install_items = to_install
         self._batch_remove_items = to_remove
-        n = len(state.selected)
-        count_text = tr("{n} selected").format(n=n) if n else tr("Select packages…")
+        count_text = tr("{n} selected").format(n=n)
         install_label = tr("Install ({n})").format(n=len(to_install))
         remove_label = tr("Remove ({n})").format(n=len(to_remove))
 
@@ -1914,20 +1837,9 @@ class pachulWindow(Adw.ApplicationWindow):
         self.btn_install.set_sensitive(len(to_install) > 0)
         self.btn_remove.set_sensitive(len(to_remove) > 0)
 
-        self._search_count_lbl.set_label(count_text)
-        self._set_btn_label(self._search_btn_install, install_label)
-        self._set_btn_label(self._search_btn_remove, remove_label)
-        self._search_btn_install.set_sensitive(len(to_install) > 0)
-        self._search_btn_remove.set_sensitive(len(to_remove) > 0)
-
-        # Show selected packages in the detail panels
+        # Show selected packages in the detail panel
         self.detail_panel.show_batch(selected_names)
-        self.search_panel.show_batch(selected_names)
-
-        # Update select/deselect button visibility
-        has_selection = n > 0
-        self.btn_deselect_all.set_visible(has_selection)
-        self.search_btn_deselect_all.set_visible(has_selection)
+        self._update_action_bar_mode()
 
     def _pkg_is_foreign(self, name):
         for item in self._iter_known_packages():
@@ -1936,106 +1848,43 @@ class pachulWindow(Adw.ApplicationWindow):
         return False
 
     def _exit_selection_mode(self):
-        if self.pkg_sel_state.active:
-            self.btn_selection_mode.set_active(False)  # fires _on_toggle_selection_mode
+        """Clear the current checkbox selection (e.g. after a batch
+        install/remove completes) and fall back to the normal view."""
+        if self.pkg_sel_state.selected:
+            self.pkg_sel_state.selected.clear()
+            self._rebind_all_rows()
+        self._update_batch_action_bar()
 
-    # ---- NEUE METHODE: Suchliste synchronisieren ----
-    def _sync_search_store_with_all_packages(self):
-        """Update all PackageItems in the search store to reflect current _all_packages data."""
-        if self.search_store.get_n_items() == 0:
-            return
-        all_by_name = {p["name"]: p for p in self._all_packages}
-        to_replace = []
-        for i in range(self.search_store.get_n_items()):
-            item = self.search_store.get_item(i)
-            if item is None:
-                continue
-            pkg_data = all_by_name.get(item.pkg_name)
-            if pkg_data:
-                new_item = self._make_item(pkg_data)
-                to_replace.append((i, new_item))
-        for i, new_item in to_replace:
-            self.search_store.splice(i, 1, [new_item])
-
-    # ---- NEUE METHODE: Alle auswählen ----
     def _on_select_all(self, *_):
-        """Select all packages currently visible in the active list (main or search)."""
-        state = self.pkg_sel_state
-        if not state.active:
-            return
-
-        # Determine which store is currently active
-        if self.main_stack.get_visible_child_name() == "search":
-            store = self.search_store
-        else:
-            store = self.pkg_store
-
-        # Collect all package names from the store
-        all_names = []
-        for i in range(store.get_n_items()):
-            item = store.get_item(i)
-            if item is not None:
-                all_names.append(item.pkg_name)
-
+        """Select all packages currently visible in the package list."""
+        all_names = [item.pkg_name for item in self._iter_known_packages()]
         if not all_names:
             return
-
-        # Replace the selected set with all names
+        state = self.pkg_sel_state
         state.selected.clear()
         state.selected.update(all_names)
-
-        # Update the batch action bar and detail panels
         self._update_batch_action_bar()
+        # Force refresh of visible rows to update checkboxes — a bulk
+        # change like this doesn't go through any single row's own click
+        # handler, so nothing else would repaint them.
+        self._rebind_all_rows()
 
-        # Force refresh of visible rows to update checkboxes
-        for lv, scroll in ((self.pkg_listview, self.pkg_scroll),
-                            (self.search_listview, self.search_scroll)):
-            model = lv.get_model()
-            if model is None:
-                continue
-            vadj = scroll.get_vadjustment()
-            saved_pos = vadj.get_value() if vadj is not None else None
-            lv.set_model(None)
-            lv.set_model(model)
-            if saved_pos:
-                def _restore(scroll=scroll, saved_pos=saved_pos):
-                    vadj = scroll.get_vadjustment()
-                    if vadj is not None:
-                        vadj.set_value(saved_pos)
-                    return False
-                GLib.idle_add(_restore)
-
-        # Update action bar mode to show deselect button
-        self._update_action_bar_mode()
-
-    # ---- NEUE METHODE: Alle abwählen ----
     def _on_deselect_all(self, *_):
         """Deselect all packages."""
-        state = self.pkg_sel_state
-        if not state.active:
-            return
-
-        state.selected.clear()
+        self.pkg_sel_state.selected.clear()
         self._update_batch_action_bar()
-        self._update_action_bar_mode()
+        self._rebind_all_rows()
 
-        # Force refresh of visible rows to update checkboxes
-        for lv, scroll in ((self.pkg_listview, self.pkg_scroll),
-                            (self.search_listview, self.search_scroll)):
-            model = lv.get_model()
-            if model is None:
-                continue
-            vadj = scroll.get_vadjustment()
-            saved_pos = vadj.get_value() if vadj is not None else None
-            lv.set_model(None)
-            lv.set_model(model)
-            if saved_pos:
-                def _restore(scroll=scroll, saved_pos=saved_pos):
-                    vadj = scroll.get_vadjustment()
-                    if vadj is not None:
-                        vadj.set_value(saved_pos)
-                    return False
-                GLib.idle_add(_restore)
+    def _flatpak_uninstall_cmd(self, app_id):
+        """Uninstall a Flatpak ref, trying the --user scope first and
+        falling back to --system (needs sudo) if it's not found there.
+        Flatpaks are commonly installed system-wide — that's Flatpak's own
+        default scope, and what tools like Pamac or Discover typically
+        use — so a fixed --user-only uninstall would silently fail on
+        those, same root cause as the earlier Upgrade-All issue."""
+        q = shlex.quote(app_id)
+        return (f"{{ flatpak uninstall -y --user {q} 2>/dev/null "
+                f"|| sudo -S flatpak uninstall -y --system {q}; }}")
 
     def _install_cmd_for(self, pkg):
         """Build the right install command for a single package, based on
@@ -2058,7 +1907,7 @@ class pachulWindow(Adw.ApplicationWindow):
         which source it came from."""
         if pkg.pkg_repo == "flatpak":
             app_id = pkg.pkg_source_id or pkg.pkg_name
-            return f"flatpak uninstall -y --user {shlex.quote(app_id)}"
+            return self._flatpak_uninstall_cmd(app_id)
         if pkg.pkg_repo == "snap":
             name = pkg.pkg_source_id or pkg.pkg_name
             return f"sudo -S snap remove {shlex.quote(name)}"
@@ -2097,8 +1946,7 @@ class pachulWindow(Adw.ApplicationWindow):
             return
         cmd = " && ".join(cmds)
         self._run_terminal(cmd, tr("Install {n} packages").format(n=len(items)),
-                           on_success=lambda: (self._sync_search_store_with_all_packages(),
-                                               self._exit_selection_mode()))
+                           on_success=self._exit_selection_mode)
 
     def _on_batch_remove(self):
         items = list(getattr(self, "_batch_remove_items", []))
@@ -2115,8 +1963,9 @@ class pachulWindow(Adw.ApplicationWindow):
                 quoted = " ".join(shlex.quote(i.pkg_name) for i in pac_items)
                 cmds.append(f"sudo -S pacman -R --noconfirm {quoted}")
             if fp_items:
-                ids = " ".join(shlex.quote(i.pkg_source_id or i.pkg_name) for i in fp_items)
-                cmds.append(f"flatpak uninstall -y --user {ids}")
+                fp_cmds = [self._flatpak_uninstall_cmd(i.pkg_source_id or i.pkg_name)
+                          for i in fp_items]
+                cmds.append(" && ".join(fp_cmds))
             if sn_items:
                 names = " ".join(shlex.quote(i.pkg_source_id or i.pkg_name) for i in sn_items)
                 cmds.append(f"sudo -S snap remove {names}")
@@ -2126,8 +1975,7 @@ class pachulWindow(Adw.ApplicationWindow):
             self._run_terminal(
                 " && ".join(cmds),
                 tr("Remove {n} packages").format(n=len(items)),
-                on_success=lambda: (self._sync_search_store_with_all_packages(),
-                                    self._exit_selection_mode()))
+                on_success=self._exit_selection_mode)
 
         if not get_setting("confirm_remove"):
             do_remove()
@@ -2144,7 +1992,7 @@ class pachulWindow(Adw.ApplicationWindow):
         d.present(self)
 
     def _on_install(self, *_):
-        if self.pkg_sel_state.active:
+        if self.pkg_sel_state.selected:
             self._on_batch_install()
             return
         if not self._selected_pkg:
@@ -2155,7 +2003,7 @@ class pachulWindow(Adw.ApplicationWindow):
                            on_success=self._refresh_selected_pkg)
 
     def _on_remove(self, *_):
-        if self.pkg_sel_state.active:
+        if self.pkg_sel_state.selected:
             self._on_batch_remove()
             return
         if not self._selected_pkg:
@@ -2208,41 +2056,39 @@ class pachulWindow(Adw.ApplicationWindow):
         installed = pkg.pkg_status == "installed"
         self.btn_install.set_sensitive(not installed)
         self.btn_remove.set_sensitive(installed)
-        self._search_btn_install.set_sensitive(not installed)
-        self._search_btn_remove.set_sensitive(installed)
-        for panel in (self.detail_panel, self.search_panel):
-            panel.btn_install.set_sensitive(not installed)
-            self._set_btn_label(panel.btn_install, tr("Install"))
-            panel.btn_remove.set_sensitive(installed)
-            panel.btn_reinstall.set_sensitive(installed)
-            panel.btn_downgrade.set_sensitive(installed)
-            self._set_status_pill(panel, pkg.pkg_status, pkg.pkg_foreign)
+        panel = self.detail_panel
+        panel.btn_install.set_sensitive(not installed)
+        self._set_btn_label(panel.btn_install, tr("Install"))
+        panel.btn_remove.set_sensitive(installed)
+        panel.btn_reinstall.set_sensitive(installed)
+        panel.btn_downgrade.set_sensitive(installed)
+        self._set_status_pill(panel, pkg.pkg_status, pkg.pkg_foreign)
         self._set_btn_label(self.btn_install, tr("Install"))
-        self._set_btn_label(self._search_btn_install, tr("Install"))
         # If the package was a pending update and is now installed, drop it
         # from the updates set so it leaves the Updates list right away.
+        # Flatpak/Snap entries key off pkg_source_id (their app-id/package
+        # name), which is what check_updates() actually reports for them —
+        # pkg_name there is only the friendly display name.
+        match_key = pkg.pkg_source_id or pkg.pkg_name
         if installed and self._updates and any(
-                u["name"] == pkg.pkg_name for u in self._updates):
+                u["name"] == match_key for u in self._updates):
             self._updates = [u for u in self._updates
-                             if u["name"] != pkg.pkg_name]
+                             if u["name"] != match_key]
             n = len(self._updates)
             self.stat_updates._num.set_label(str(n))
             self._nav_rows["updates"].set_count(n)
-            if n == 0:
-                self.update_banner.set_revealed(False)
             for p in self._all_packages:
-                if p["name"] == pkg.pkg_name:
+                if (p.get("source_id") or p["name"]) == match_key:
                     p["status"] = "installed"
                     p.pop("new_version", None)
-            if self.main_stack.get_visible_child_name() != "search":
-                self._apply_filter()
+            self._apply_filter()
         if installed:
             def worker():
                 if pkg.pkg_repo in ("flatpak", "snap"):
                     # No pacman-style metadata exists for these — show what
                     # we actually have instead of running a meaningless
                     # pacman -Qi/-Fl query against a non-pacman name.
-                    source_label = tr("Flatpak (user installation)") if pkg.pkg_repo == "flatpak" \
+                    source_label = tr("Flatpak") if pkg.pkg_repo == "flatpak" \
                         else tr("Snap package")
                     info = (
                         f"Name           : {pkg.pkg_name}\n"
@@ -2258,15 +2104,11 @@ class pachulWindow(Adw.ApplicationWindow):
                     GLib.idle_add(self._populate_both_panels, info, files)
             threading.Thread(target=worker, daemon=True).start()
 
-        # Suchliste mit aktuellen Daten synchronisieren
-        self._sync_search_store_with_all_packages()
-        # Batch-Leiste aktualisieren, falls im Batch-Modus
-        if self.pkg_sel_state.active:
+        if self.pkg_sel_state.selected:
             self._update_batch_action_bar()
 
     def _populate_both_panels(self, info, files):
         self._populate_detail(self.detail_panel, info, files)
-        self._populate_detail(self.search_panel, info, files)
         return False
 
     def _get_aur_helper(self):

@@ -120,20 +120,20 @@ class PackageItem(GObject.Object):
         self._bound_widget   = None
 
 
-# ─── Shared selection-mode state ──────────────────────────────────────────────
+# ─── Shared selection state ────────────────────────────────────────────────
 
 class ListSelectionState:
-    """Shared mutable selection-mode state for a package ListView's row factory.
+    """Shared mutable checkbox-selection state for a package ListView's row
+    factory.
 
     A single instance is captured by every row's `bind()` closure, so it is
     read fresh on every (re)bind — meaning recycled/virtualized rows always
-    reflect the current mode and selected set, even for rows that scroll
-    into view only after the mode was toggled.
+    reflect the current selected set, even for rows that scroll into view
+    only after a bulk change (Select All / Deselect All).
     """
-    __slots__ = ("active", "selected")
+    __slots__ = ("selected",)
 
     def __init__(self):
-        self.active = False      # whether checkbox/batch selection mode is on
         self.selected = set()    # set of selected pkg_name strings
 
 
@@ -152,29 +152,37 @@ class PackageRowContent(Gtk.Box):
     """
     __gtype_name__ = 'PachulPackageRowContent'
 
-    def __init__(self):
+    def __init__(self, on_selection_change=None):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.pkg = None
         self.sel_state = None
+        self._on_selection_change = on_selection_change
 
         self.set_margin_top(9);    self.set_margin_bottom(9)
         self.set_margin_start(10); self.set_margin_end(10)
         self.add_css_class("pkg-row")
 
-        # Selection-mode checkbox
+        # Selection checkbox — always shown, and its own click target: a
+        # click here toggles selection *only*, a click anywhere else on the
+        # row opens the package's detail view. Claiming the click sequence
+        # on press stops it from also bubbling up to the ListView's own
+        # row-activation gesture.
         self.checkbox = Gtk.Box()
         self.checkbox.add_css_class("pkg-checkbox")
         self.checkbox.set_size_request(20, 20)
         self.checkbox.set_valign(Gtk.Align.CENTER)
         self.checkbox.set_halign(Gtk.Align.CENTER)
-        self.checkbox.set_can_target(False)
+        self.checkbox.set_can_target(True)
+        checkbox_click = Gtk.GestureClick()
+        checkbox_click.set_button(1)
+        checkbox_click.connect("pressed", self._on_checkbox_pressed)
+        self.checkbox.add_controller(checkbox_click)
 
         self.checkbox_mark = Gtk.Label(label="✓")
         self.checkbox_mark.add_css_class("pkg-checkbox-mark")
         self.checkbox_mark.set_halign(Gtk.Align.CENTER)
         self.checkbox_mark.set_valign(Gtk.Align.CENTER)
         self.checkbox.append(self.checkbox_mark)
-        self.checkbox.set_visible(False)
         self.append(self.checkbox)
 
         self.icon = Gtk.Image()
@@ -269,20 +277,35 @@ class PackageRowContent(Gtk.Box):
         self.ver_label.set_label(pkg.pkg_version or "")
 
     def update_selection_visuals(self):
-        """Aktualisiert rein die Checkbox-Anzeige ohne komplettes Rebinden der Zeile."""
-        if self.pkg and self.sel_state and self.sel_state.active:
-            self.checkbox.set_visible(True)
-            is_selected = self.pkg.pkg_name in self.sel_state.selected
-            self.checkbox_mark.set_visible(is_selected)
-            if is_selected:
-                self.checkbox.add_css_class("pkg-checkbox-checked")
-                self.add_css_class("pkg-row-selected")
-            else:
-                self.checkbox.remove_css_class("pkg-checkbox-checked")
-                self.remove_css_class("pkg-row-selected")
+        """Reflects whether this row's package is checked. The checkbox
+        itself is always visible now — only its checked/unchecked state
+        changes."""
+        if not self.pkg or not self.sel_state:
+            return
+        is_selected = self.pkg.pkg_name in self.sel_state.selected
+        self.checkbox_mark.set_visible(is_selected)
+        if is_selected:
+            self.checkbox.add_css_class("pkg-checkbox-checked")
+            self.add_css_class("pkg-row-selected")
         else:
-            self.checkbox.set_visible(False)
+            self.checkbox.remove_css_class("pkg-checkbox-checked")
             self.remove_css_class("pkg-row-selected")
+
+    def _on_checkbox_pressed(self, gesture, n_press, x, y):
+        # Claim the sequence so it doesn't also bubble up and activate the
+        # row (which would open the detail view instead of/as well as
+        # toggling the checkbox).
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        if not self.pkg or self.sel_state is None:
+            return
+        name = self.pkg.pkg_name
+        if name in self.sel_state.selected:
+            self.sel_state.selected.discard(name)
+        else:
+            self.sel_state.selected.add(name)
+        self.update_selection_visuals()
+        if self._on_selection_change:
+            self._on_selection_change()
 
 
 def make_package_listview(on_activate, on_selection_change=None, sel_state=None):
@@ -299,7 +322,7 @@ def make_package_listview(on_activate, on_selection_change=None, sel_state=None)
         sel_state = ListSelectionState()
 
     factory = Gtk.SignalListItemFactory()
-    factory.connect("setup", lambda f, li: li.set_child(PackageRowContent()))
+    factory.connect("setup", lambda f, li: li.set_child(PackageRowContent(on_selection_change)))
     factory.connect("bind", lambda f, li: li.get_child().bind(li.get_item(), sel_state))
 
     listview = Gtk.ListView(model=selection, factory=factory)
@@ -308,23 +331,7 @@ def make_package_listview(on_activate, on_selection_change=None, sel_state=None)
 
     def _activate(lv, pos):
         item = store.get_item(pos)
-        if item is None:
-            return
-        if sel_state.active:
-            name = item.pkg_name
-            if name in sel_state.selected:
-                sel_state.selected.discard(name)
-            else:
-                sel_state.selected.add(name)
-            
-            # Anstatt store.splice aufzurufen (was das Selektionsmodell bricht),
-            # triggern wir das Update direkt auf dem aktuell sichtbaren Widget.
-            if hasattr(item, "_bound_widget") and item._bound_widget:
-                item._bound_widget.update_selection_visuals()
-            
-            if on_selection_change:
-                on_selection_change()
-        else:
+        if item is not None:
             on_activate(item)
 
     listview.connect("activate", _activate)
@@ -370,4 +377,5 @@ class NavRow(Gtk.ListBoxRow):
     def set_count(self, n):
         if self.count_lbl:
             self.count_lbl.set_label(str(n))
+            self.count_lbl.set_visible(n > 0)
             self.count_lbl.set_visible(n > 0)

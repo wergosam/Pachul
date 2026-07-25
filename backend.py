@@ -206,14 +206,22 @@ def snap_available():
 
 
 def get_flatpak_packages():
-    """Installed Flatpak apps, in the same dict shape get_packages() uses.
-    `source_id` carries the Flatpak application ID (e.g. "org.gimp.GIMP"),
+    """Installed Flatpak apps *and* runtimes, in the same dict shape
+    get_packages() uses. Runtimes (e.g. "org.gnome.Platform") are included
+    deliberately, not just apps — Pamac and other Flatpak-aware tools list
+    them too, and they can have their own pending updates that would
+    otherwise be invisible in the package list even though they're counted.
+    `--all` is required for that: `flatpak list` hides locale and debug
+    extensions (e.g. "org.gnome.Platform.Locale") by default, same as
+    remote-ls — without it those never show up here even though
+    get_flatpak_updates() (which also uses --all) counts them as pending.
+    `source_id` carries the Flatpak ref ID (e.g. "org.gimp.GIMP"),
     which is what the actual install/uninstall commands need — pkg_name
     stays the friendly display name."""
     if not (get_setting("flatpak_enabled") and flatpak_available()):
         return []
     out, code = run_command(
-        "flatpak list --app --columns=application,name,version 2>/dev/null", timeout=15)
+        "flatpak list --all --columns=application,name,version 2>/dev/null", timeout=15)
     if not out or code != 0:
         return []
     items = []
@@ -635,7 +643,8 @@ def search_file_owner(query):
 # ─── Updates / orphans / sysinfo ─────────────────────────────────────────────
 
 def check_updates():
-    """Repo updates (checkupdates) plus AUR updates from a helper, if present."""
+    """Repo updates (checkupdates) plus AUR updates from a helper, if
+    present, plus Flatpak/Snap updates when those sources are enabled."""
     updates = []
     seen = set()
     out, code = run_command("checkupdates 2>/dev/null || pacman -Qu 2>/dev/null", timeout=60)
@@ -657,6 +666,63 @@ def check_updates():
                     updates.append({"name": parts[0], "old": parts[1],
                                     "new": parts[3], "aur": True})
                     seen.add(parts[0])
+
+    updates.extend(get_flatpak_updates())
+    updates.extend(get_snap_updates())
+    return updates
+
+
+def get_flatpak_updates():
+    """Pending Flatpak updates, in the same {name, old, new, aur} shape
+    check_updates() uses for repo/AUR entries, so they merge into one list.
+    `name` is set to the Flatpak app ID (not the friendly display name) —
+    that's what `flatpak update` itself and the matching logic in the UI
+    (which keys off each installed package's `source_id`) both expect.
+    Empty list if Flatpak support isn't enabled/installed, or refreshing
+    the local metadata fails (offline, etc.) — this is purely informational
+    and should never block the rest of the update check."""
+    if not (get_setting("flatpak_enabled") and flatpak_available()):
+        return []
+    # Refresh the local appstream/summary cache first — otherwise
+    # `remote-ls --updates` can compare against a stale local copy and
+    # under-report what's actually available.
+    run_command("flatpak update --appstream 2>/dev/null", timeout=30)
+    out, code = run_command(
+        "flatpak remote-ls --updates --all --columns=application,version 2>/dev/null",
+        timeout=20)
+    if not out or code != 0:
+        return []
+    updates = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        app_id = parts[0].strip() if parts else ""
+        if not app_id:
+            continue
+        new_version = parts[1].strip() if len(parts) > 1 else ""
+        updates.append({"name": app_id, "old": "", "new": new_version, "aur": False})
+    return updates
+
+
+def get_snap_updates():
+    """Pending Snap updates, in the same {name, old, new, aur} shape
+    check_updates() uses. `snap refresh --list` only queries snapd for
+    what's pending — it does not install or change anything. Prints
+    'All snaps up to date.' (no table) when nothing's pending, which the
+    parsing below naturally yields zero rows for."""
+    if not (get_setting("snap_enabled") and snap_available()):
+        return []
+    out, code = run_command("snap refresh --list 2>/dev/null", timeout=30)
+    if not out or code != 0:
+        return []
+    lines = out.splitlines()
+    if len(lines) < 2:   # just the "All snaps up to date." line, or empty
+        return []
+    updates = []
+    for line in lines[1:]:   # first line is the "Name Version Rev ..." header
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        updates.append({"name": parts[0], "old": "", "new": parts[1], "aur": False})
     return updates
 
 
@@ -943,9 +1009,47 @@ def get_pacman_history(limit=500):
 
 # ─── Arch news (pre-upgrade warning) ──────────────────────────────────────────
 
-def get_arch_news(limit=6):
-    """Fetch recent Arch Linux news headlines. Returns a list, or None on failure
-    (so callers can tell 'no news' apart from 'couldn't reach the server')."""
+def _translate_text(text, target_lang, source_lang="en"):
+    """Best-effort machine translation via Google's free, no-key translate
+    endpoint (the same one tools like `trans`/`googletrans` use). Returns
+    the original text unchanged on any failure (offline, endpoint
+    unreachable, unexpected response, ...) — translation here is a nice-to-
+    have, never something that should block showing the news at all.
+    """
+    import urllib.request
+    import urllib.parse
+    import json
+    if not text or target_lang == source_lang:
+        return text
+    try:
+        params = urllib.parse.urlencode({
+            "client": "gtx", "sl": source_lang, "tl": target_lang,
+            "dt": "t", "q": text,
+        })
+        req = urllib.request.Request(
+            "https://translate.googleapis.com/translate_a/single?" + params,
+            headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        # Response shape: [[[translated_chunk, original_chunk, ...], ...], ...] —
+        # long input can come back split into several chunks to concatenate.
+        return "".join(chunk[0] for chunk in data[0] if chunk[0])
+    except Exception:
+        return text
+
+
+def get_arch_news(limit=6, lang="en"):
+    """Fetch recent Arch Linux news headlines. Returns a list, or None on
+    failure (so callers can tell 'no news' apart from 'couldn't reach the
+    server').
+
+    Arch Linux only publishes this feed in English — there's no official
+    translated source — so when `lang` isn't English, each headline is
+    additionally run through best-effort machine translation. Each item
+    keeps the original English title too (as "title_en"), since machine
+    translation of technical wording can occasionally be imprecise and a
+    caller may want to show or link back to the original.
+    """
     import urllib.request
     import xml.etree.ElementTree as ET
     try:
@@ -957,13 +1061,18 @@ def get_arch_news(limit=6):
         return None
     items = []
     for item in root.iterfind(".//item"):
+        title = (item.findtext("title") or "").strip()
         items.append({
-            "title": (item.findtext("title") or "").strip(),
-            "date":  (item.findtext("pubDate") or "").strip(),
-            "link":  (item.findtext("link") or "").strip(),
+            "title":    title,
+            "title_en": title,
+            "date":     (item.findtext("pubDate") or "").strip(),
+            "link":     (item.findtext("link") or "").strip(),
         })
         if len(items) >= limit:
             break
+    if lang != "en":
+        for it in items:
+            it["title"] = _translate_text(it["title_en"], lang)
     return items
 
 
@@ -1233,6 +1342,153 @@ def search_packages_cmd(query):
     return packages
 
 
+# ─── Self-installation & tray autostart ────────────────────────────────────
+# Mirrors install.sh's own paths exactly, so the in-app installer and the
+# standalone script are just two front-ends to the same result — running
+# one after the other is always a safe no-op.
+
+INSTALL_BIN_DIR      = "/usr/local/bin"
+INSTALL_DESKTOP_DIR  = "/usr/share/applications"
+INSTALL_ICON_ID      = "io.github.wergosam.pachul"
+INSTALL_LAUNCHER     = f"{INSTALL_BIN_DIR}/pachul"
+INSTALL_DESKTOP_FILE = f"{INSTALL_DESKTOP_DIR}/{INSTALL_ICON_ID}.desktop"
+
+# Per-user autostart entry for the tray icon. Deliberately NOT the
+# system-wide /etc/xdg/autostart install.sh used to write — a file here
+# needs no root to create, remove, or toggle, and per the XDG autostart
+# spec a user's own ~/.config/autostart always takes precedence anyway.
+AUTOSTART_DIR  = Path.home() / ".config" / "autostart"
+AUTOSTART_FILE = AUTOSTART_DIR / f"{INSTALL_ICON_ID}-tray.desktop"
+
+
+def is_pachul_installed():
+    """Whether install.sh (or the in-app installer) has already run."""
+    return os.path.isfile(INSTALL_LAUNCHER) and os.path.isfile(INSTALL_DESKTOP_FILE)
+
+
+def find_install_script(app_dir):
+    """install.sh sits next to app.py only in a source checkout — an
+    already-installed copy under /usr/local/share/pachul never ships it,
+    so this naturally returns None once there's nothing left to install."""
+    path = os.path.join(app_dir, "install.sh")
+    return path if os.path.isfile(path) else None
+
+
+def build_install_command(app_dir):
+    """sudo -S command that runs install.sh non-interactively, through the
+    exact same terminal/password flow every other privileged action in the
+    app already uses — there's only one installation code path to maintain."""
+    script = find_install_script(app_dir)
+    if not script:
+        return None
+    return f"sudo -S bash {shlex.quote(script)}"
+
+
+def is_autostart_enabled():
+    return AUTOSTART_FILE.is_file()
+
+
+def _resolve_icon_path(app_dir=None):
+    """Absolute path to the app icon — never a bare icon-theme name.
+    Both install.sh and the AUR PKGBUILD install the icon to the same
+    system-wide hicolor path, so that's checked first (works regardless
+    of a dev checkout still being around); a source checkout next to
+    app_dir is the fallback for a not-yet-installed run. Used for the
+    autostart .desktop's Icon= key: AppIndicator/Ayatana auto-populates
+    the tray's SNI "DesktopEntry" property from this file, and Plasma's
+    system tray resolves ITS OWN icon from that file's Icon= key by name
+    — via Plasma's own icon cache, independent of whatever tray.py sets
+    via set_icon_full(). A bare name there raced against Plasma's cache
+    and fell back to the generic "applications-other" icon a few seconds
+    in; an absolute path bypasses that lookup entirely, the same fix
+    already applied to tray.py's own icon and to
+    backend.py's own _pachul_icon_path() for notify-send.
+    """
+    system_path = f"/usr/share/icons/hicolor/scalable/apps/{INSTALL_ICON_ID}.svg"
+    if os.path.isfile(system_path):
+        return system_path
+    if app_dir:
+        checkout_path = os.path.join(app_dir, f"{INSTALL_ICON_ID}.svg")
+        if os.path.isfile(checkout_path):
+            return checkout_path
+    return INSTALL_ICON_ID  # last-resort fallback to the old by-name behaviour
+
+
+def set_autostart_enabled(enabled, app_dir=None):
+    """Create or remove the per-user tray-icon autostart entry. Never
+    touches anything outside the user's own config directory, so this
+    never needs a password."""
+    try:
+        if enabled:
+            AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+            if is_pachul_installed():
+                exec_cmd = "pachul-tray"
+            elif app_dir:
+                exec_cmd = (f"{shlex.quote(sys.executable or 'python3')} "
+                            f"{shlex.quote(os.path.join(app_dir, 'tray.py'))}")
+            else:
+                exec_cmd = "pachul-tray"
+            icon_path = _resolve_icon_path(app_dir)
+            AUTOSTART_FILE.write_text(
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=Pachul Update Tray\n"
+                "Comment=Persistent tray icon showing pending Pacman/AUR updates\n"
+                f"Exec={exec_cmd}\n"
+                f"Icon={icon_path}\n"
+                "Terminal=false\n"
+                "NoDisplay=true\n"
+                "X-GNOME-Autostart-enabled=true\n")
+        else:
+            AUTOSTART_FILE.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def is_tray_running():
+    """Whether a pachul-tray process is currently running for this user."""
+    _, code = run_command("pgrep -f 'tray[.]py' >/dev/null 2>&1")
+    return code == 0
+
+
+def start_tray(app_dir=None):
+    """Launch the tray icon right now, detached from this process — used
+    so enabling autostart in Preferences shows the icon immediately
+    instead of only at the next login. No-op if already running.
+
+    Prefers a tray.py right next to app_dir (i.e. whatever code is
+    actually running right now) over the installed `pachul-tray` command:
+    otherwise, on a machine where install.sh was run at some point in the
+    past, this would always launch that old installed copy even while
+    actively testing a newer source checkout — silently running stale
+    code with no indication that's what happened.
+    """
+    if is_tray_running():
+        return True
+    if app_dir and os.path.isfile(os.path.join(app_dir, "tray.py")):
+        exec_args = [sys.executable or "python3", os.path.join(app_dir, "tray.py")]
+    elif is_pachul_installed():
+        exec_args = ["pachul-tray"]
+    else:
+        exec_args = ["pachul-tray"]
+    try:
+        subprocess.Popen(
+            exec_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+        return True
+    except OSError:
+
+        return False
+
+
+def stop_tray():
+    """Quit the running tray icon right now — the counterpart to
+    start_tray(), used when autostart is turned off in Preferences."""
+    run_command("pkill -f 'tray[.]py' 2>/dev/null")
+    return True
+
+
 # ─── Background update-check (systemd --user timer) ───────────────────────────
 
 SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
@@ -1285,6 +1541,22 @@ def disable_update_timer():
     return True
 
 
+def _pachul_icon_path():
+    """Absolute path to Pachul's own icon file, checked directly rather
+    than resolved by name through an icon theme — works both in a source
+    checkout (icon sits right next to this file) and once installed
+    system-wide (install.sh's ICON_DIR). Falls back to the bare name only
+    if the file genuinely can't be found anywhere."""
+    name = "io.github.wergosam.pachul"
+    local = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{name}.svg")
+    if os.path.isfile(local):
+        return local
+    system_path = f"/usr/share/icons/hicolor/scalable/apps/{name}.svg"
+    if os.path.isfile(system_path):
+        return system_path
+    return name
+
+
 def send_update_notification(n):
     """Send a desktop notification about n available updates (via notify-send)."""
     if run_command("which notify-send 2>/dev/null")[1] != 0:
@@ -1294,8 +1566,9 @@ def send_update_notification(n):
     body = tr("{n} package update can be installed.") if n == 1 \
         else tr("{n} package updates can be installed.")
     body = body.format(n=n)
+    icon = _pachul_icon_path()
     run_command(
-        "notify-send --app-name=Pachul --icon=io.github.wergosam.pachul "
+        f"notify-send --app-name=Pachul --icon={shlex.quote(icon)} "
         f"{shlex.quote('Pachul: ' + title)} {shlex.quote(body)}")
 
 

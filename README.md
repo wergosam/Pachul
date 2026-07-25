@@ -52,13 +52,15 @@ Pachul follows the GNOME Human Interface Guidelines and adapts automatically to 
 
 ## What's New
 
-Recent improvements to the terminal/privileged-action panel:
+- **Multi-select batch actions** — tick packages via checkbox (the selection survives search and filter changes) and install, remove, hold, or mark them all as explicit/dependency in one batch instead of one at a time.
+- **File → Package search** — find out which package owns a given file path via `pacman -Fx`, with a one-click prompt to sync the files database (`pacman -Fy`) first if it's missing.
+- **GPG signature-failure recovery** — Pachul recognizes unknown-key and outdated-keyring signature errors in the terminal output and offers a one-click **Import & Retry** or **Update Keyring & Retry** fix, the same way it already handles stale database locks.
+- **Pre-upgrade snapshot safety net** — optionally create a Timeshift or Snapper snapshot automatically before every system upgrade (off by default, since Timeshift's rsync mode can be slow).
+- **Live progress bar** — upgrade/install/remove operations show a real, percentage-based progress bar parsed straight from pacman's own output.
+- **AUR package metadata** — vote count, popularity, maintainer and out-of-date status now appear in the detail panel for AUR packages, pulled live from the official AUR RPC API.
+- **Chaotic-AUR support** — packages from Chaotic-AUR get their own badge and sidebar filter, alongside any other repository configured in `pacman.conf`.
 
-- **Password field auto-focus** — the sudo password field is now focused automatically as soon as the terminal dialog opens, so you can start typing immediately without clicking into it first.
-- **Automatic stale-lock recovery** — if pacman reports a locked database (`db.lck`), Pachul detects this and offers a one-click **"Remove Lock & Retry"** fix. It first checks (via `fuser`) whether anything is *actually* still holding the lock, so it never removes it out from under a genuinely running operation.
-- **Cleaner terminal output** — newer escape sequences some systems emit around `sudo` (systemd/pam_systemd session markers) are now filtered out instead of appearing as raw, unreadable text in the output panel.
-
-See [Troubleshooting](#troubleshooting) below if you keep seeing database-lock errors — it's usually caused by another package-management daemon (PackageKit, Manjaro's `pamac-daemon`) running alongside Pachul.
+See [Troubleshooting](#troubleshooting) below for the database-lock and GPG-signature fixes in more detail.
 
 ---
 
@@ -93,16 +95,19 @@ See [Troubleshooting](#troubleshooting) below if you keep seeing database-lock e
 
 ### Package management
 - **Search** official repositories and the AUR simultaneously, with live result counts
-- **Browse** packages by repository: `core`, `extra`, `multilib`, `aur`, `chaotic-aur`
+- **Browse** packages by repository: `core`, `extra`, `multilib`, `aur`, `chaotic-aur`, and any other repo configured in `pacman.conf` — each gets its own sidebar filter and badge automatically
 - **Installed packages** — view, filter and manage everything on your system
 - **AUR / Foreign** packages tracked separately, with source clearly badged
-- **Update manager** — see all available updates at a glance and upgrade in one click, or one at a time
+- **AUR package metadata** — vote count, popularity, maintainer and out-of-date status, pulled live from the AUR RPC API and shown right in the detail panel
+- **Update manager** — see all available updates at a glance and upgrade in one click, or one at a time, with a live percentage progress bar during the operation
+- **Multi-select batch actions** — tick packages via checkbox and install, remove, hold, or mark them all as explicit/dependency in one batch; the selection survives search and filter changes
 - **Downgrade** — reinstall an older cached version straight from `/var/cache/pacman/pkg`
 - **Detail panel** — description, dependencies, size, install reason, build/install dates, and full `pacman -Qi` raw output for every package
 
 ### Tools
 - Sync Databases (`F5`)
 - Check for Updates (`Strg+U` / `Ctrl+U`)
+- **File → Package Search** — find out which package owns a given file path, via `pacman -Fx` (offers a one-click files-database sync if it's missing)
 - **Rate Mirrors** — geo-aware ranking via `rate-mirrors`, with sort order, HTTPS-only filter, automatic backup and configurable mirror count
 - Find Orphans — bulk-remove packages that are no longer required by anything
 - Clean Cache
@@ -116,12 +121,17 @@ See [Troubleshooting](#troubleshooting) below if you keep seeing database-lock e
 - Mark Selected as Explicit or as Dependency
 - Arch Linux news check before system upgrades, so you never miss a manual-intervention notice
 
+### Safety & recovery
+- **Pre-upgrade snapshots** — optionally create a Timeshift or Snapper snapshot automatically before every system upgrade, as a safety net if something goes wrong (off by default)
+- **GPG signature-failure recovery** — recognizes unknown-key and outdated-keyring errors and offers a one-click **Import & Retry** or **Update Keyring & Retry** fix
+- **Stale database-lock recovery** — detects a locked pacman database (`db.lck`), confirms (via `fuser`) nothing is genuinely still using it, and offers a one-click **Remove Lock & Retry** fix
+- Confirmation dialogs before destructive actions (configurable)
+
 ### Quality of life
 - **Background update checks** — an optional `systemd --user` timer checks for updates and sends a desktop notification even while Pachul is closed
 - **Multi-language interface** — English, German, French and Italian, switchable in Preferences
 - **Keyboard shortcuts** for all common actions
 - Light and dark theme support, following your system style automatically
-- Confirmation dialogs before destructive actions (configurable)
 
 ---
 
@@ -152,6 +162,7 @@ python app.py
 | `pacman` | Package backend |
 | `yay`, `paru` or `pikaur` | AUR support (optional, auto-detected) |
 | `rate-mirrors` | Mirror ranking (optional) |
+| `timeshift` or `snapper` | Pre-upgrade snapshot safety net (optional, either one) |
 | `systemd` | Background update-check timer (optional) |
 
 ---
@@ -175,6 +186,12 @@ python app.py
 Enable **Run background update checks** in Preferences to install a `systemd --user` timer (`pachul-update-check`). It runs headlessly on a schedule (no GTK dependency in this code path) and sends a desktop notification via `notify-send` when updates are available — even if Pachul itself isn't running.
 
 The check interval — **hourly**, **every 6 hours**, or **daily** — is configurable in Preferences alongside the toggle.
+
+### Tray icon
+
+For a persistent, always-visible indicator instead of (or alongside) the popup notification, `pachul-tray` shows a system-tray icon reflecting the current update status — the normal Pachul icon when the system is up to date, or a small update-count badge when updates are pending. It starts automatically at login via an autostart entry installed with the package, and its own menu lets you check now, open Pachul, or quit it. It re-checks on the same interval configured above.
+
+Requires `libayatana-appindicator` (optional dependency — install with `sudo pacman -S libayatana-appindicator` if the icon doesn't appear).
 
 ---
 
@@ -283,13 +300,15 @@ Pachul folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch a
 
 ## Neuigkeiten
 
-Aktuelle Verbesserungen am Terminal-/Privilegien-Panel:
+- **Mehrfachauswahl-Sammelaktionen** — Pakete per Checkbox ankreuzen (die Auswahl bleibt auch bei Such-/Filteränderungen erhalten) und alle zusammen installieren, entfernen, sperren oder als explizit/Abhängigkeit markieren, statt einzeln.
+- **Datei-→-Paket-Suche** — herausfinden, welches Paket einen bestimmten Dateipfad besitzt (über `pacman -Fx`), mit Ein-Klick-Angebot zum Synchronisieren der Dateien-Datenbank (`pacman -Fy`), falls diese fehlt.
+- **GPG-Signaturfehler-Behebung** — Pachul erkennt unbekannte Schlüssel und veraltete Keyring-Signaturfehler in der Terminal-Ausgabe und bietet einen Ein-Klick-Fix **„Importieren & erneut versuchen"** oder **„Keyring aktualisieren & erneut versuchen"** an — genauso wie bereits bei veralteten Datenbank-Sperren.
+- **Snapshot-Sicherheitsnetz vor Upgrades** — optional automatisch einen Timeshift- oder Snapper-Snapshot vor jedem Systemupgrade erstellen (standardmässig deaktiviert, da Timeshifts Rsync-Modus langsam sein kann).
+- **Live-Fortschrittsbalken** — Upgrade-/Installations-/Entfernungsvorgänge zeigen jetzt einen echten, prozentbasierten Fortschrittsbalken, direkt aus der Ausgabe von Pacman selbst ausgelesen.
+- **AUR-Paketmetadaten** — Stimmenzahl, Popularität, Maintainer und Veraltet-Status erscheinen jetzt in der Detailansicht für AUR-Pakete, live über die offizielle AUR-RPC-API abgerufen.
+- **Chaotic-AUR-Unterstützung** — Pakete aus Chaotic-AUR erhalten ein eigenes Badge und einen eigenen Filter in der Seitenleiste, wie jedes andere in `pacman.conf` konfigurierte Repository auch.
 
-- **Automatischer Fokus auf das Passwortfeld** — das Sudo-Passwortfeld wird jetzt automatisch fokussiert, sobald sich der Terminal-Dialog öffnet, sodass du sofort tippen kannst, ohne vorher hineinzuklicken.
-- **Automatische Behebung veralteter Sperren** — meldet Pacman eine gesperrte Datenbank (`db.lck`), erkennt Pachul das und bietet einen Ein-Klick-Fix **„Sperre entfernen & erneut versuchen"** an. Vorher wird per `fuser` geprüft, ob überhaupt noch etwas die Sperre wirklich hält, damit sie nie unter einem tatsächlich laufenden Vorgang entfernt wird.
-- **Saubere Terminal-Ausgabe** — neuere Escape-Sequenzen, die manche Systeme rund um `sudo` ausgeben (systemd-/pam_systemd-Sitzungsmarkierungen), werden jetzt herausgefiltert, statt als roher, unlesbarer Text im Ausgabebereich zu erscheinen.
-
-Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten, falls weiterhin Datenbank-Sperre-Fehler auftreten — meist verursacht durch einen weiteren, parallel laufenden Paketverwaltungs-Dienst (PackageKit, Manjaros `pamac-daemon`).
+Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten für Details zu den Datenbank-Sperre- und GPG-Signatur-Fixes.
 
 ---
 
@@ -314,16 +333,19 @@ Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten, falls weiterhin Datenbank-
 
 ### Paketverwaltung
 - **Suche** gleichzeitig in offiziellen Repositorien und im AUR, mit Live-Trefferzahl
-- **Durchsuchen** nach Repository: `core`, `extra`, `multilib`, `aur`, `chaotic-aur`
+- **Durchsuchen** nach Repository: `core`, `extra`, `multilib`, `aur`, `chaotic-aur` sowie jedem weiteren, in `pacman.conf` konfigurierten Repository — jedes erhält automatisch einen eigenen Filter und ein eigenes Badge in der Seitenleiste
 - **Installierte Pakete** — alles auf deinem System ansehen, filtern und verwalten
 - **AUR / Fremde** Pakete werden separat erfasst, mit klar erkennbarer Herkunfts-Badge
-- **Update-Verwaltung** — alle verfügbaren Updates auf einen Blick, mit einem Klick alle oder einzeln aktualisieren
+- **AUR-Paketmetadaten** — Stimmenzahl, Popularität, Maintainer und Veraltet-Status, live über die AUR-RPC-API abgerufen und direkt in der Detailansicht angezeigt
+- **Update-Verwaltung** — alle verfügbaren Updates auf einen Blick, mit einem Klick alle oder einzeln aktualisieren, mit Live-Fortschrittsbalken in Prozent während des Vorgangs
+- **Mehrfachauswahl-Sammelaktionen** — Pakete per Checkbox ankreuzen und alle zusammen installieren, entfernen, sperren oder als explizit/Abhängigkeit markieren; die Auswahl bleibt auch bei Such-/Filteränderungen erhalten
 - **Downgrade** — eine ältere zwischengespeicherte Version direkt aus `/var/cache/pacman/pkg` neu installieren
 - **Detailansicht** — Beschreibung, Abhängigkeiten, Größe, Installationsgrund, Build-/Installationsdatum sowie die vollständige `pacman -Qi`-Rohausgabe zu jedem Paket
 
 ### Werkzeuge
 - Datenbanken synchronisieren (`F5`)
 - Auf Updates prüfen (`Strg+U`)
+- **Datei-→-Paket-Suche** — herausfinden, welches Paket einen bestimmten Dateipfad besitzt, über `pacman -Fx` (bietet bei fehlender Dateien-Datenbank einen Ein-Klick-Sync an)
 - **Spiegelserver bewerten** — standortbasiertes Ranking über `rate-mirrors`, mit Sortieroptionen, Nur-HTTPS-Filter, automatischer Sicherung und einstellbarer Anzahl der Spiegelserver
 - Waisen finden — nicht mehr benötigte Pakete gesammelt entfernen
 - Cache leeren
@@ -337,12 +359,17 @@ Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten, falls weiterhin Datenbank-
 - Auswahl als explizit oder als Abhängigkeit markieren
 - Arch-Linux-News-Prüfung vor Systemaktualisierungen, damit manuelle Eingriffe nie übersehen werden
 
+### Sicherheit & Wiederherstellung
+- **Snapshots vor Upgrades** — optional automatisch einen Timeshift- oder Snapper-Snapshot vor jedem Systemupgrade erstellen, als Sicherheitsnetz falls etwas schiefgeht (standardmässig deaktiviert)
+- **GPG-Signaturfehler-Behebung** — erkennt unbekannte Schlüssel und veraltete Keyring-Fehler und bietet einen Ein-Klick-Fix „Importieren & erneut versuchen" oder „Keyring aktualisieren & erneut versuchen" an
+- **Behebung veralteter Datenbank-Sperren** — erkennt eine gesperrte Pacman-Datenbank (`db.lck`), bestätigt per `fuser`, dass wirklich nichts mehr darauf zugreift, und bietet einen Ein-Klick-Fix „Sperre entfernen & erneut versuchen" an
+- Bestätigungsdialoge vor destruktiven Aktionen (einstellbar)
+
 ### Komfortfunktionen
 - **Hintergrund-Update-Prüfung** — ein optionaler `systemd --user`-Timer prüft auf Updates und sendet eine Desktop-Benachrichtigung, auch wenn Pachul geschlossen ist
 - **Mehrsprachige Oberfläche** — Englisch, Deutsch, Französisch und Italienisch, umschaltbar in den Einstellungen
 - **Tastenkombinationen** für alle gängigen Aktionen
 - Unterstützung für helles und dunkles Design, folgt automatisch dem Systemstil
-- Bestätigungsdialoge vor destruktiven Aktionen (einstellbar)
 
 ---
 
@@ -373,6 +400,7 @@ python app.py
 | `pacman` | Paket-Backend |
 | `yay`, `paru` oder `pikaur` | AUR-Unterstützung (optional, automatisch erkannt) |
 | `rate-mirrors` | Spiegelserver-Bewertung (optional) |
+| `timeshift` oder `snapper` | Snapshot-Sicherheitsnetz vor Upgrades (optional, eines von beiden) |
 | `systemd` | Timer für Hintergrund-Update-Prüfung (optional) |
 
 ---
@@ -396,6 +424,12 @@ python app.py
 Aktiviere **Update-Prüfungen im Hintergrund ausführen** in den Einstellungen, um einen `systemd --user`-Timer (`pachul-update-check`) einzurichten. Dieser läuft nach Zeitplan headless (in diesem Codepfad ohne GTK-Abhängigkeit) und sendet über `notify-send` eine Desktop-Benachrichtigung, sobald Updates verfügbar sind — auch wenn Pachul selbst nicht läuft.
 
 Das Prüfintervall — **stündlich**, **alle 6 Stunden** oder **täglich** — lässt sich zusammen mit dem Schalter in den Einstellungen konfigurieren.
+
+### Tray-Icon
+
+Für eine dauerhaft sichtbare Anzeige statt (oder zusätzlich zu) der Popup-Benachrichtigung zeigt `pachul-tray` ein Tray-Icon mit dem aktuellen Update-Status — das normale Pachul-Icon, wenn das System aktuell ist, oder ein Icon mit kleinem Zähler, wenn Updates anstehen. Es startet automatisch bei der Anmeldung über einen mit dem Paket installierten Autostart-Eintrag; über sein eigenes Menü lässt sich manuell prüfen, Pachul öffnen oder beenden. Es prüft im selben Intervall wie oben konfiguriert.
+
+Benötigt `libayatana-appindicator` (optionale Abhängigkeit — mit `sudo pacman -S libayatana-appindicator` nachinstallieren, falls das Icon nicht erscheint).
 
 ---
 

@@ -134,12 +134,11 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     # Real progress bar, parsed live from pacman's own "[####----] NN%" lines
     # (download progress and "(i/n) installing pkg [...] NN%" alike). Hidden
     # until the first such line arrives; hidden again once the command ends.
-    progress_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    progress_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
     progress_box.set_visible(False)
     progress_label = Gtk.Label(label="")
     progress_label.add_css_class("caption")
     progress_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-    progress_label.set_width_chars(18)
     progress_label.set_xalign(0.0)
     progress_box.append(progress_label)
     progress_bar = Gtk.ProgressBar()
@@ -2112,9 +2111,10 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
 
 # ─── Preferences ──────────────────────────────────────────────────────────────
 
-def show_preferences(parent, on_changed):
+def show_preferences(parent, on_changed, app_dir=None):
     from backend import (load_settings, save_settings, is_update_timer_enabled,
-                         enable_update_timer, disable_update_timer, detect_snapshot_tool)
+                         enable_update_timer, disable_update_timer, detect_snapshot_tool,
+                         is_autostart_enabled, set_autostart_enabled, start_tray, stop_tray)
     s = load_settings()
 
     dlg = Adw.PreferencesDialog()
@@ -2235,6 +2235,29 @@ def show_preferences(parent, on_changed):
     lang_group.add(lang_row)
     page.add(lang_group)
 
+    # Tray icon autostart (per-user autostart entry — no root needed)
+    tray_group = Adw.PreferencesGroup()
+    tray_group.set_title(tr("Tray Icon"))
+    tray_group.set_description(tr(
+        "A persistent icon showing the pending update count"))
+
+    autostart_row = Adw.SwitchRow()
+    autostart_row.set_title(tr("Start automatically at login"))
+    autostart_row.set_active(is_autostart_enabled())
+
+    def _on_autostart_toggle(row, _):
+        active = row.get_active()
+        set_autostart_enabled(active, app_dir=app_dir)
+        # Take effect right away instead of only at the next login.
+        if active:
+            start_tray(app_dir=app_dir)
+        else:
+            stop_tray()
+
+    autostart_row.connect("notify::active", _on_autostart_toggle)
+    tray_group.add(autostart_row)
+    page.add(tray_group)
+
     # Background service (systemd --user timer)
     svc = Adw.PreferencesGroup()
     svc.set_title(tr("Background Service"))
@@ -2326,7 +2349,10 @@ def show_news_dialog(parent, on_proceed):
             outer.append(status)
             return
 
-        hint = Gtk.Label(label=tr("Review recent announcements before upgrading:"))
+        hint_text = tr("Review recent announcements before upgrading:")
+        if get_language() != "en":
+            hint_text += " " + tr("(machine-translated from English)")
+        hint = Gtk.Label(label=hint_text)
         hint.add_css_class("caption"); hint.set_halign(Gtk.Align.START)
         hint.set_margin_start(16); hint.set_margin_end(16)
         hint.set_margin_top(12);   hint.set_margin_bottom(8)
@@ -2341,6 +2367,8 @@ def show_news_dialog(parent, on_proceed):
             row = Adw.ActionRow()
             row.set_title(GLib.markup_escape_text(it["title"]))
             row.set_subtitle(it["date"])
+            if it["title"] != it.get("title_en", it["title"]):
+                row.set_tooltip_text(it["title_en"])  # original English, for transparency
             if it["link"]:
                 link = Gtk.LinkButton.new_with_label(it["link"], tr("Open"))
                 link.set_valign(Gtk.Align.CENTER)
@@ -2352,7 +2380,7 @@ def show_news_dialog(parent, on_proceed):
 
     def worker():
         from backend import get_arch_news
-        items = get_arch_news()
+        items = get_arch_news(lang=get_language())
         GLib.idle_add(render, items)
 
     threading.Thread(target=worker, daemon=True).start()
