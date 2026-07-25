@@ -1347,10 +1347,8 @@ def search_packages_cmd(query):
 # standalone script are just two front-ends to the same result — running
 # one after the other is always a safe no-op.
 
-INSTALL_BIN_DIR      = "/usr/local/bin"
 INSTALL_DESKTOP_DIR  = "/usr/share/applications"
 INSTALL_ICON_ID      = "io.github.wergosam.pachul"
-INSTALL_LAUNCHER     = f"{INSTALL_BIN_DIR}/pachul"
 INSTALL_DESKTOP_FILE = f"{INSTALL_DESKTOP_DIR}/{INSTALL_ICON_ID}.desktop"
 
 # Per-user autostart entry for the tray icon. Deliberately NOT the
@@ -1362,8 +1360,13 @@ AUTOSTART_FILE = AUTOSTART_DIR / f"{INSTALL_ICON_ID}-tray.desktop"
 
 
 def is_pachul_installed():
-    """Whether install.sh (or the in-app installer) has already run."""
-    return os.path.isfile(INSTALL_LAUNCHER) and os.path.isfile(INSTALL_DESKTOP_FILE)
+    """Whether Pachul is installed system-wide — via install.sh
+    (launcher in /usr/local/bin) or the AUR package (launcher in
+    /usr/bin). Checked through PATH rather than a single hardcoded
+    directory, since the two installation methods disagree on where the
+    launcher lives; a hardcoded /usr/local/bin check would silently
+    treat a perfectly good AUR install as "not installed"."""
+    return shutil.which("pachul") is not None and os.path.isfile(INSTALL_DESKTOP_FILE)
 
 
 def find_install_script(app_dir):
