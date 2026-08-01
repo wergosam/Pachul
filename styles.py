@@ -127,6 +127,15 @@ CSS = """
     margin-bottom: 4px;
 }
 
+/* FlowBoxChild wrapper for the hero action buttons — reset its default
+   padding/outline so the buttons sit flush, same as they did in the old
+   plain Box layout. */
+.hero-action-cell {
+    padding: 0;
+    border: none;
+    outline: none;
+}
+
 /* ── Sidebar section labels (GTK4-valid CSS only) ── */
 .sidebar-section {
     font-size: 0.78rem;

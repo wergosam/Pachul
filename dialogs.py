@@ -29,7 +29,9 @@ from gi.repository import Gtk, Adw, GLib, Pango
 from backend import (run_command, get_orphans, get_system_info,
                      get_pacman_history, get_cached_versions,
                      get_pkgbuild, get_pacnew_files, get_file_diff, get_setting, save_settings,
-                     files_db_available, search_file_owner, get_package_cache_size)
+                     files_db_available, search_file_owner, get_package_cache_size,
+                     get_tool_updates, paru_installed, get_paru_bootstrap_cmd,
+                     get_ignored_packages, set_packages_ignored)
 from i18n import tr, get_language, set_language
 from icons import themed_image, themed_paintable
 
@@ -2109,9 +2111,348 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
     threading.Thread(target=worker, daemon=True).start()
 
 
+# ─── External tool updaters ───────────────────────────────────────────────────
+
+# Full catalog of every "More Update Sources" tool, shown in a help
+# expander regardless of what's actually detected — so the person can see
+# what Pachul is *able* to update, not just what it already found. Name
+# strings match the ones used by the live rows so tr() resolves the same
+# translation; most descriptions reuse an existing note string, a few are
+# new and only used here.
+_TOOL_HELP_ENTRIES = [
+    ("Config Files (.pacnew / .pacsave)",
+     "Review and merge configuration files left behind by package updates."),
+    ("Firmware (fwupdmgr)",
+     "Firmware updates for the mainboard, SSDs, and other devices via fwupd."),
+    ("Rust Toolchains (rustup)", "Updates installed Rust toolchains."),
+    ("Cargo (crates.io binaries)", "Updates binaries installed via cargo install."),
+    ("pip (--user packages)", "Upgrades every outdated package installed with --user."),
+    ("pipx", "Upgrades every pipx-installed application."),
+    ("npm (global packages)", "Updates globally installed npm packages."),
+    ("fnm (Fast Node Manager)", "Installs the latest Node.js LTS release via fnm."),
+    ("nvm (Node Version Manager)",
+     "Installs the latest Node.js LTS release and sets it as the default."),
+    ("pyenv (Python Version Manager)",
+     "Updates pyenv itself \u2014 install new Python versions separately with 'pyenv install'."),
+    ("SDKMAN (Java/Kotlin/Gradle/Maven)",
+     "Updates SDKMAN itself and its candidate index \u2014 not each installed SDK version."),
+    ("Conda/Mamba (base environment)",
+     "Updates the base environment only \u2014 other environments need updating separately."),
+    ("TeX Live (tlmgr)", "Updates TeX Live packages."),
+    ("GitHub CLI Extensions", "Updates all installed gh extensions."),
+    ("Claude Code", "Updates the Claude Code CLI."),
+    ("VS Code/VSCodium Extensions",
+     "Reinstalls every extension at its latest Marketplace version."),
+    ("Lensfun Camera/Lens Database",
+     "Fetches the latest camera/lens calibration data used by darktable, digiKam, and similar apps."),
+    ("uv (Python package/tool manager)",
+     "Only works for the standalone uv installer \u2014 a pacman/AUR install is updated there instead."),
+    ("Ollama", "Re-runs the official installer script to fetch the latest release."),
+    ("ClamAV Virus Definitions", "Downloads the latest ClamAV signature database."),
+    ("Docker/Podman Images", "Pulls the latest version of every locally tagged image."),
+    ("Flatpak: Unused Runtimes",
+     "Removes runtimes and extensions no installed app depends on anymore."),
+    ("JetBrains PyCharm Plugins",
+     "Updates installed plugins via the command line (installPlugins) \u2014 falls back to opening Toolbox/PyCharm."),
+    ("Vim/Neovim Plugins", "Updates plugins managed by lazy.nvim, packer.nvim, or vim-plug."),
+    ("tmux Plugins (TPM)", "Updates everything managed through the tmux Plugin Manager."),
+    ("Zsh/Fish Frameworks", "Oh My Zsh, Zinit, Antigen, Sheldon, Fisher."),
+    ("Dotfiles Git Repos", "Runs 'git pull' on detected config repos with a remote configured."),
+    ("Nerd Fonts (getnf)", "Updates already-installed Nerd Fonts to their latest release."),
+    ("tldr Pages", "Updates the local tldr page cache."),
+    ("Nix / home-manager",
+     "Updates Nix packages (nix-env) or applies your home-manager configuration."),
+]
+
+
+def show_ignored_packages_dialog(parent, run_terminal_fn):
+    """Overview of every package currently held via IgnorePkg in
+    /etc/pacman.conf — a single place to see and undo holds, instead of
+    having to remember which packages were pinned and visit each one's
+    detail panel individually."""
+    dialog = Adw.Dialog()
+    dialog.set_title(tr("Ignored Packages"))
+    dialog.set_content_width(520)
+    dialog.set_content_height(560)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+
+    unignore_all_btn = Gtk.Button(label=tr("Unignore All"))
+    unignore_all_btn.add_css_class("destructive-action")
+    hdr.pack_end(unignore_all_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+    tv.set_content(outer)
+    dialog.set_child(tv)
+    dialog.present(parent)
+
+    def run_unignore(names):
+        tmp = set_packages_ignored(names, False)
+        if not tmp:
+            return
+        dialog.close()
+        run_terminal_fn(
+            f"sudo -S install -m644 {shlex.quote(tmp)} /etc/pacman.conf",
+            tr("Unignore {n} packages").format(n=len(names)))
+
+    def render():
+        for child in list(outer):
+            outer.remove(child)
+        names = sorted(get_ignored_packages())
+        unignore_all_btn.set_visible(bool(names))
+
+        if not names:
+            status = Adw.StatusPage()
+            status.set_paintable(themed_paintable("emblem-ok-symbolic", 64))
+            status.set_title(tr("No Ignored Packages"))
+            status.set_description(tr(
+                "Packages held via IgnorePkg (skipped by system upgrades) show up here."))
+            outer.append(status)
+            return
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_margin_start(12); scroll.set_margin_end(12)
+        scroll.set_margin_top(12);   scroll.set_margin_bottom(12)
+        group = Adw.PreferencesGroup()
+        group.set_description(tr(
+            "These packages are skipped by system upgrades until you unignore them."))
+        for name in names:
+            row = Adw.ActionRow()
+            row.set_title(name)
+            btn = Gtk.Button(label=tr("Unignore"))
+            btn.set_valign(Gtk.Align.CENTER)
+            btn.connect("clicked", lambda *_, n=name: run_unignore([n]))
+            row.add_suffix(btn)
+            group.add(row)
+        scroll.set_child(group)
+        outer.append(scroll)
+
+    unignore_all_btn.connect(
+        "clicked", lambda *_: run_unignore(sorted(get_ignored_packages())))
+    render()
+
+
+def show_tool_updates_dialog(parent, run_terminal_fn):
+    """Scan for developer/system tools that pacman/Flatpak/Snap don't cover
+    (rustup, cargo, pip/pipx, npm, gh extensions, Claude Code, Lensfun, uv,
+    Ollama, JetBrains PyCharm plugins, fwupd firmware, …) and let the user
+    both run a one-off update now and opt individual tools into running
+    automatically alongside every normal system upgrade."""
+    dialog = Adw.Dialog()
+    dialog.set_title(tr("More Update Sources"))
+    dialog.set_content_width(760)
+    dialog.set_content_height(620)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+
+    update_btn = Gtk.Button(label=tr("Update Selected"))
+    update_btn.add_css_class("suggested-action")
+    update_btn.set_sensitive(False)
+    hdr.pack_end(update_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+    loading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+    loading.set_halign(Gtk.Align.CENTER); loading.set_valign(Gtk.Align.CENTER)
+    loading.set_vexpand(True)
+    sp = Gtk.Spinner(); sp.start(); sp.set_size_request(32, 32)
+    loading.append(sp)
+    loading.append(Gtk.Label(label=tr("Scanning for update sources…")))
+    outer.append(loading)
+
+    tv.set_content(outer)
+    dialog.set_child(tv)
+    dialog.present(parent)
+
+    checks = {}   # id -> (Gtk.CheckButton, update_cmd, display name)
+
+    def _installed_badge():
+        badge = Gtk.Label(label=tr("INSTALLED"))
+        badge.add_css_class("row-status-pill")
+        badge.add_css_class("status-installed")
+        badge.set_valign(Gtk.Align.CENTER)
+        return badge
+
+    def _outdated_count_badge(n):
+        # Reuses the same amber "update" pill style already used for
+        # individual packages elsewhere in the app.
+        badge = Gtk.Label(label=tr("{n} outdated").format(n=n))
+        badge.add_css_class("row-status-pill")
+        badge.add_css_class("status-update")
+        badge.set_valign(Gtk.Align.CENTER)
+        return badge
+
+    def _refresh_update_btn(*_):
+        update_btn.set_sensitive(any(cb.get_active() for cb, _cmd, _n in checks.values()))
+
+    def _on_auto_toggled(cb, tool_id):
+        current = set(get_setting("auto_update_tool_ids") or [])
+        if cb.get_active():
+            current.add(tool_id)
+        else:
+            current.discard(tool_id)
+        save_settings({"auto_update_tool_ids": sorted(current)})
+        _refresh_update_btn()
+
+    def _on_update_clicked(*_):
+        picked = [(name, cmd) for cb, cmd, name in checks.values()
+                  if cb.get_active() and cmd]
+        if not picked:
+            return
+        dialog.close()
+        steps = " ; ".join(
+            f'echo; echo "=== {name} ==="; echo; {cmd}' for name, cmd in picked)
+        run_terminal_fn(steps, tr("Update Selected Tools"))
+    update_btn.connect("clicked", _on_update_clicked)
+
+    def _launch_and_close(cmd):
+        dialog.close()
+        try:
+            subprocess_start(cmd)
+        except Exception:
+            pass
+
+    def render(tools):
+        outer.remove(loading)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_margin_start(12); scroll.set_margin_end(12)
+        scroll.set_margin_top(12);   scroll.set_margin_bottom(12)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+
+        # Config files (.pacnew/.pacsave) always gets its own entry point —
+        # it has its own diff-review dialog rather than a plain update_cmd.
+        cfg_group = Adw.PreferencesGroup()
+        cfg_group.set_title(tr("Configuration"))
+        cfg_row = Adw.ActionRow()
+        cfg_row.set_title(tr("Config Files (.pacnew / .pacsave)"))
+        cfg_row.set_subtitle(tr("Review and merge configuration files left behind by package updates."))
+        cfg_btn = Gtk.Button(label=tr("Review…"))
+        cfg_btn.set_valign(Gtk.Align.CENTER)
+        cfg_btn.connect("clicked", lambda *_: (dialog.close(), show_pacdiff_dialog(parent, run_terminal_fn)))
+        cfg_row.add_suffix(cfg_btn)
+        cfg_group.add(cfg_row)
+        box.append(cfg_group)
+
+        # Static help text — visible even when nothing is detected, so the
+        # person can see what Pachul is *able* to update once installed.
+        help_group = Adw.PreferencesGroup()
+        help_row = Adw.ExpanderRow()
+        help_row.set_title(tr("What can be updated here?"))
+        help_row.set_subtitle(tr(
+            "Full list of supported sources \u2014 shown once installed and detected."))
+        for name, desc in _TOOL_HELP_ENTRIES:
+            info_row = Adw.ActionRow()
+            info_row.set_title(tr(name))
+            info_row.set_subtitle(tr(desc))
+            help_row.add_row(info_row)
+        help_group.add(help_row)
+        box.append(help_group)
+
+        if tools:
+            enabled_ids = set(get_setting("auto_update_tool_ids") or [])
+
+            tools_group = Adw.PreferencesGroup()
+            tools_group.set_title(tr("Detected Tools"))
+            tools_group.set_description(tr(
+                "Checked tools run automatically with every normal system upgrade from now on. "
+                "\u201cUpdate Selected\u201d above also runs whatever is checked right now, once."))
+
+            for t in tools:
+                name = tr(t["name"])
+                outdated_count = t.get("outdated_count")
+                subtitle_parts = [p for p in (t.get("version") or "",
+                                               tr(t["note"]) if t.get("note") else "") if p]
+                if t.get("update_cmd"):
+                    row = Adw.ExpanderRow() if t.get("detail") else Adw.ActionRow()
+                    row.set_title(name)
+                    if subtitle_parts:
+                        row.set_subtitle(" \u2014 ".join(subtitle_parts))
+                    cb = Gtk.CheckButton()
+                    cb.set_valign(Gtk.Align.CENTER)
+                    cb.set_active(t["id"] in enabled_ids)
+                    cb.connect("toggled", _refresh_update_btn)
+                    cb.connect("toggled", _on_auto_toggled, t["id"])
+                    row.add_prefix(cb)
+                    if outdated_count is not None:
+                        row.add_suffix(_outdated_count_badge(outdated_count))
+                    row.add_suffix(_installed_badge())
+                    checks[t["id"]] = (cb, t["update_cmd"], name)
+
+                    if t.get("detail"):
+                        detail_lbl = Gtk.Label(label=t["detail"])
+                        detail_lbl.set_selectable(True); detail_lbl.set_wrap(True)
+                        detail_lbl.set_wrap_mode(Pango.WrapMode.CHAR)
+                        detail_lbl.add_css_class("monospace"); detail_lbl.add_css_class("caption")
+                        detail_lbl.set_xalign(0); detail_lbl.set_yalign(0)
+                        detail_lbl.set_margin_start(12); detail_lbl.set_margin_end(12)
+                        detail_lbl.set_margin_top(6);    detail_lbl.set_margin_bottom(6)
+                        detail_row = Gtk.ListBoxRow(); detail_row.set_activatable(False)
+                        detail_row.set_child(detail_lbl)
+                        row.add_row(detail_row)
+                    tools_group.add(row)
+                elif t.get("launch_cmd"):
+                    # No scriptable updater (e.g. JetBrains fallback) — offer
+                    # to launch the tool; can't be part of the auto-run list.
+                    row = Adw.ActionRow()
+                    row.set_title(name)
+                    if subtitle_parts:
+                        row.set_subtitle(" \u2014 ".join(subtitle_parts))
+                    row.add_suffix(_installed_badge())
+                    open_btn = Gtk.Button(label=tr("Open"))
+                    open_btn.set_valign(Gtk.Align.CENTER)
+                    open_btn.connect("clicked", lambda *_, c=t["launch_cmd"]: _launch_and_close(c))
+                    row.add_suffix(open_btn)
+                    tools_group.add(row)
+
+            box.append(tools_group)
+        else:
+            status = Adw.StatusPage()
+            status.set_paintable(themed_paintable("emblem-ok-symbolic", 64))
+            status.set_title(tr("No Additional Tools Found"))
+            status.set_description(tr(
+                "None of the supported external tools (rustup, cargo, pip/pipx, npm, "
+                "gh extensions, Claude Code, Lensfun, uv, Ollama, JetBrains) were detected."))
+            box.append(status)
+
+        scroll.set_child(box)
+        outer.append(scroll)
+
+    def worker():
+        tools = get_tool_updates()
+        GLib.idle_add(render, tools)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def subprocess_start(cmd):
+    """Launch a GUI tool detached from Pachul (no PTY/terminal needed)."""
+    import subprocess
+    subprocess.Popen(
+        cmd, shell=True, start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+
+
 # ─── Preferences ──────────────────────────────────────────────────────────────
 
-def show_preferences(parent, on_changed, app_dir=None):
+def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
     from backend import (load_settings, save_settings, is_update_timer_enabled,
                          enable_update_timer, disable_update_timer, detect_snapshot_tool,
                          is_autostart_enabled, set_autostart_enabled, start_tray, stop_tray)
@@ -2144,6 +2485,27 @@ def show_preferences(parent, on_changed, app_dir=None):
     helper_row.connect("notify::selected", lambda r, _: (
         save_settings({"aur_helper": helper_opts[r.get_selected()]}), on_changed()))
     aur_group.add(helper_row)
+
+    if not paru_installed():
+        paru_row = Adw.ActionRow()
+        paru_row.set_title(tr("paru not installed"))
+        paru_row.set_subtitle(tr(
+            "paru handles some AUR-vs-repo ambiguities (e.g. a package that "
+            "exists both in a plain repo and on the AUR) more reliably than "
+            "other helpers. Builds it from the AUR the same way any AUR "
+            "package is built (needs base-devel and git)."))
+        paru_btn = Gtk.Button(label=tr("Install paru"))
+        paru_btn.add_css_class("suggested-action")
+        paru_btn.set_valign(Gtk.Align.CENTER)
+
+        def _on_install_paru(btn):
+            if not run_terminal_fn:
+                return
+            btn.set_sensitive(False)
+            run_terminal_fn(get_paru_bootstrap_cmd(), tr("Install paru"))
+        paru_btn.connect("clicked", _on_install_paru)
+        paru_row.add_suffix(paru_btn)
+        aur_group.add(paru_row)
 
     inc_row = Adw.SwitchRow()
     inc_row.set_title(tr("Include AUR in update checks"))

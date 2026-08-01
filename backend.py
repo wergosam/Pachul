@@ -21,6 +21,9 @@ import sys
 import threading
 import time
 import hashlib
+import zipfile
+import xml.etree.ElementTree as ET
+import concurrent.futures
 from pathlib import Path
 from gi.repository import GLib
 
@@ -70,6 +73,7 @@ _DEFAULT_SETTINGS = {
     "language":                 "en",     # en | de
     "flatpak_enabled":          False,    # off by default — opt-in extra package source
     "snap_enabled":             False,    # off by default — opt-in extra package source
+    "auto_update_tool_ids":     [],       # ids of "More Update Sources" tools to run with every normal upgrade
 }
 _settings_cache = None
 
@@ -162,7 +166,7 @@ def _find_aur_helper():
         return None
     global _aur_helper_cache
     if _aur_helper_cache == "__unset__":
-        candidates = [pref] if (pref and pref != "auto") else ("paru", "yay", "pikaur", "trizen")
+        candidates = [pref] if (pref and pref != "auto") else ("yay", "paru", "pikaur", "trizen")
         _aur_helper_cache = None
         for h in candidates:
             _, c = run_command(f"which {h} 2>/dev/null")
@@ -170,6 +174,67 @@ def _find_aur_helper():
                 _aur_helper_cache = h
                 break
     return _aur_helper_cache
+
+
+def paru_installed():
+    return shutil.which("paru") is not None
+
+
+def get_paru_bootstrap_cmd():
+    """Standard AUR-bootstrap sequence for paru itself. paru isn't in any
+    official repo, so — like any other AUR package — it has to be built
+    from its own AUR git repo the very first time (base-devel/git provide
+    the build toolchain makepkg needs)."""
+    build_dir = "/tmp/pachul-paru-build"
+    return (
+        f"rm -rf {build_dir} && "
+        f"sudo -S pacman -S --needed --noconfirm base-devel git && "
+        f"git clone https://aur.archlinux.org/paru.git {build_dir} && "
+        f"cd {build_dir} && makepkg -si --noconfirm && "
+        f"cd - && rm -rf {build_dir}"
+    )
+
+
+def get_aur_rpc_version(pkg_name):
+    """Query the AUR RPC API for a package's current version there, if any.
+    Best-effort only: returns None on any failure (offline, package not on
+    the AUR, API hiccup, …) rather than raising — this is a supplementary
+    check and must never disrupt anything else if it doesn't work."""
+    import urllib.request
+    import urllib.parse
+    try:
+        url = "https://aur.archlinux.org/rpc/v5/info?arg[]=" + urllib.parse.quote(pkg_name)
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        results = data.get("results") or []
+        if results:
+            return results[0].get("Version")
+    except Exception:
+        pass
+    return None
+
+
+def check_aur_ahead_of_repo(pkg_name, installed_version):
+    """For a package Pachul knows via a plain repo (not pkg_foreign) —
+    e.g. a popular AUR package also mirrored as a prebuilt binary in a
+    repo like chaotic-aur — check whether the *true* AUR has the same
+    name at a strictly newer version than what's currently installed.
+    This is exactly the "arch-update" situation: the repo mirror can lag
+    behind the AUR's own rebuild cadence, and pacman/checkupdates alone
+    have no way to notice since AUR isn't a sync-db source at all.
+    Returns the AUR version string if it's ahead, else None (also None if
+    the AUR RPC can't be reached — this never blocks or errors out)."""
+    aur_version = get_aur_rpc_version(pkg_name)
+    if not aur_version:
+        return None
+    out, code = run_command(
+        f"vercmp {shlex.quote(aur_version)} {shlex.quote(installed_version)}", timeout=5)
+    if code != 0:
+        return None
+    try:
+        return aur_version if int(out.strip()) > 0 else None
+    except (ValueError, TypeError):
+        return None
 
 
 # ─── Flatpak / Snap: optional extra package sources ───────────────────────────
@@ -644,31 +709,51 @@ def search_file_owner(query):
 
 def check_updates():
     """Repo updates (checkupdates) plus AUR updates from a helper, if
-    present, plus Flatpak/Snap updates when those sources are enabled."""
-    updates = []
-    seen = set()
-    out, code = run_command("checkupdates 2>/dev/null || pacman -Qu 2>/dev/null", timeout=60)
-    if out and code == 0:
-        for line in out.splitlines():
-            parts = line.strip().split()
-            if len(parts) >= 4 and parts[0] not in seen:
-                updates.append({"name": parts[0], "old": parts[1],
-                                "new": parts[3], "aur": False})
-                seen.add(parts[0])
+    present, plus Flatpak/Snap updates when those sources are enabled.
+    The four checks are independent of each other, so they run in
+    parallel threads rather than one after another — checkupdates and
+    {helper} -Qua alone each allow up to a minute, so sequentially this
+    could take several minutes in the worst case; in parallel the whole
+    check takes about as long as the single slowest one."""
+    def _repo_check():
+        results = []
+        out, code = run_command("checkupdates 2>/dev/null || pacman -Qu 2>/dev/null", timeout=60)
+        if out and code == 0:
+            for line in out.splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 4:
+                    results.append({"name": parts[0], "old": parts[1],
+                                    "new": parts[3], "aur": False})
+        return results
 
-    helper = _find_aur_helper()
-    if helper and get_setting("include_aur_updates"):
+    def _aur_check():
+        helper = _find_aur_helper()
+        if not (helper and get_setting("include_aur_updates")):
+            return []
+        results = []
         aout, acode = run_command(f"{helper} -Qua 2>/dev/null", timeout=90)
         if aout and acode == 0:
             for line in aout.splitlines():
                 parts = line.strip().split()
-                if len(parts) >= 4 and parts[0] not in seen:
-                    updates.append({"name": parts[0], "old": parts[1],
+                if len(parts) >= 4:
+                    results.append({"name": parts[0], "old": parts[1],
                                     "new": parts[3], "aur": True})
-                    seen.add(parts[0])
+        return results
 
-    updates.extend(get_flatpak_updates())
-    updates.extend(get_snap_updates())
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(fn) for fn in
+                   (_repo_check, _aur_check, get_flatpak_updates, get_snap_updates)]
+        groups = [f.result() for f in futures]
+
+    # Merge preserving the original precedence (repo > AUR > Flatpak > Snap)
+    # for de-duplication, same as when these ran sequentially one at a time.
+    updates = []
+    seen = set()
+    for group in groups:
+        for u in group:
+            if u["name"] not in seen:
+                updates.append(u)
+                seen.add(u["name"])
     return updates
 
 
@@ -1188,6 +1273,723 @@ def get_file_diff(orig, new):
     return out or "(files are identical or could not be read)"
 
 
+# ─── External tool updaters ───────────────────────────────────────────────────
+# Detection + update commands for developer/system tools that live outside
+# pacman/Flatpak/Snap and therefore never show up in check_updates(). Every
+# entry below only runs each tool's own --version/list/check subcommand for
+# detection — nothing here changes the system until the user explicitly
+# picks "Update" in the dialog.
+#
+# Each static spec dict:
+#   id           unique id
+#   name         display name (English; looked up through i18n.tr() in the UI)
+#   binaries     list of candidate executable names, first match wins
+#   version_cmd  optional "{bin} --version"-style command (first line kept)
+#   check_cmd    optional command whose output is shown as detail/preview
+#   update_cmd   command that performs the update; may use "{bin}"
+#   note         optional explanatory caption shown under the row
+
+TOOL_SPECS = [
+    {
+        "id": "firmware", "name": "Firmware (fwupdmgr)",
+        "binaries": ["fwupdmgr"],
+        "version_cmd": "fwupdmgr --version 2>/dev/null | head -1",
+        "check_cmd": "fwupdmgr refresh --force >/dev/null 2>&1; fwupdmgr get-updates 2>&1",
+        "update_cmd": "fwupdmgr update -y",
+        "note": "Firmware updates for the mainboard, SSDs, and other devices via fwupd.",
+    },
+    {
+        "id": "rustup", "name": "Rust Toolchains (rustup)",
+        "binaries": ["rustup"],
+        "version_cmd": "rustup --version 2>/dev/null | head -1",
+        "check_cmd": "rustup check 2>&1",
+        "update_cmd": "rustup update",
+        "note": "",
+    },
+    {
+        "id": "pip", "name": "pip (--user packages)",
+        "binaries": ["pip", "pip3"],
+        "version_cmd": None,
+        "check_cmd": "{bin} list --outdated --user --format=freeze 2>/dev/null",
+        "update_cmd": ("{bin} list --outdated --user --format=freeze 2>/dev/null "
+                        "| grep -v '^-e' | cut -d= -f1 | xargs -r -n1 {bin} install --user -U"),
+        "note": "Upgrades every outdated package installed with --user.",
+    },
+    {
+        "id": "pipx", "name": "pipx",
+        "binaries": ["pipx"],
+        "version_cmd": None,
+        "check_cmd": "pipx list --short 2>/dev/null",
+        "update_cmd": "pipx upgrade-all",
+        "note": "",
+    },
+    {
+        "id": "npm", "name": "npm (global packages)",
+        "binaries": ["npm"],
+        "version_cmd": None,
+        "check_cmd": "npm outdated -g 2>/dev/null",
+        "update_cmd": "npm update -g",
+        "note": "",
+    },
+    {
+        "id": "claude_code", "name": "Claude Code",
+        "binaries": ["claude"],
+        "version_cmd": "claude --version 2>/dev/null | head -1",
+        "check_cmd": None,
+        "update_cmd": "claude update",
+        "note": "",
+    },
+    {
+        "id": "lensfun", "name": "Lensfun Camera/Lens Database",
+        "binaries": ["lensfun-update-data"],
+        "version_cmd": None,
+        "check_cmd": None,
+        "update_cmd": "lensfun-update-data",
+        "note": "Fetches the latest camera/lens calibration data used by darktable, digiKam, and similar apps.",
+    },
+    {
+        "id": "uv", "name": "uv (Python package/tool manager)",
+        "binaries": ["uv"],
+        "version_cmd": "uv --version 2>/dev/null",
+        "check_cmd": None,
+        "update_cmd": "uv self update",
+        "note": "Only works for the standalone uv installer — a pacman/AUR install is updated there instead.",
+    },
+    {
+        "id": "fnm", "name": "fnm (Fast Node Manager)",
+        "binaries": ["fnm"],
+        "version_cmd": "fnm --version 2>/dev/null",
+        "check_cmd": None,
+        "update_cmd": "fnm install --lts",
+        "note": "Installs the latest Node.js LTS release via fnm.",
+    },
+]
+
+
+def _cargo_update_check():
+    """cargo-installed binaries, via the separate cargo-update subcommand
+    (cargo install cargo-update). Detected dynamically because whether the
+    subcommand itself is installed changes the update command we offer."""
+    if not shutil.which("cargo"):
+        return None
+    out, _ = run_command("cargo install-update -l 2>&1", timeout=20)
+    out = out or ""
+    if "no such subcommand" in out.lower() or "no such command" in out.lower():
+        return {
+            "id": "cargo", "name": "Cargo (crates.io binaries)",
+            "version": "", "detail": "",
+            "update_cmd": "cargo install cargo-update && cargo install-update -a",
+            "launch_cmd": None,
+            "note": "Installs the 'cargo-update' helper crate first, then upgrades all cargo-installed binaries.",
+        }
+    return {
+        "id": "cargo", "name": "Cargo (crates.io binaries)",
+        "version": "", "detail": out.strip(),
+        "update_cmd": "cargo install-update -a",
+        "launch_cmd": None,
+        "note": "",
+    }
+
+
+def _gh_extensions_check():
+    """Only offered when gh is installed AND at least one extension is
+    present — gh itself is often installed without any extensions."""
+    if not shutil.which("gh"):
+        return None
+    out, code = run_command("gh extension list 2>/dev/null", timeout=15)
+    if code != 0 or not (out or "").strip():
+        return None
+    return {
+        "id": "gh_extensions", "name": "GitHub CLI Extensions",
+        "version": "", "detail": out.strip(),
+        "update_cmd": "gh extension upgrade --all",
+        "launch_cmd": None,
+        "note": "",
+    }
+
+
+def _ollama_check():
+    """Skipped when Ollama is a pacman/AUR package — the regular update
+    list (check_updates) already covers that case."""
+    if not shutil.which("ollama"):
+        return None
+    _, code = run_command("pacman -Qq ollama 2>/dev/null", timeout=10)
+    if code == 0:
+        return None
+    version, _ = run_command("ollama --version 2>/dev/null", timeout=10)
+    return {
+        "id": "ollama", "name": "Ollama",
+        "version": (version or "").strip(), "detail": "",
+        "update_cmd": "curl -fsSL https://ollama.com/install.sh | sh",
+        "launch_cmd": None,
+        "note": "Re-runs the official installer script to fetch the latest release.",
+    }
+
+
+def _find_pycharm_binary():
+    """Locate a PyCharm CLI launcher script — plain install, Toolbox
+    install, or a manual/AUR install under /opt."""
+    for name in ("pycharm", "pycharm.sh"):
+        found = shutil.which(name)
+        if found:
+            return found
+    toolbox_apps = Path.home() / ".local" / "share" / "JetBrains" / "Toolbox" / "apps"
+    try:
+        for pattern in ("PyCharm-P/ch-*/*/bin/pycharm.sh", "PyCharm-C/ch-*/*/bin/pycharm.sh"):
+            matches = sorted(toolbox_apps.glob(pattern), reverse=True)
+            if matches:
+                return str(matches[0])
+    except Exception:
+        pass
+    for pattern in ("/opt/pycharm*/bin/pycharm.sh", "/usr/share/pycharm/bin/pycharm.sh"):
+        matches = sorted(Path("/").glob(pattern.lstrip("/")), reverse=True)
+        if matches:
+            return str(matches[0])
+    return None
+
+
+def _pycharm_plugins_dir():
+    """XDG data dir holding installed PyCharm plugins
+    (~/.local/share/JetBrains/PyCharm<version>/) — picks the most
+    recently used version directory if several are present."""
+    base = Path.home() / ".local" / "share" / "JetBrains"
+    try:
+        dirs = [d for d in base.glob("PyCharm*") if d.is_dir()]
+    except Exception:
+        return None
+    if not dirs:
+        return None
+    return max(dirs, key=lambda p: p.stat().st_mtime)
+
+
+def _extract_plugin_id(plugin_dir):
+    """Read the <id> out of a plugin's plugin.xml, packed inside one of
+    its lib/*.jar files."""
+    lib_dir = plugin_dir / "lib"
+    if not lib_dir.is_dir():
+        return None
+    try:
+        jars = list(lib_dir.glob("*.jar"))
+    except Exception:
+        return None
+    for jar_path in jars:
+        try:
+            with zipfile.ZipFile(jar_path) as zf:
+                if "META-INF/plugin.xml" not in zf.namelist():
+                    continue
+                with zf.open("META-INF/plugin.xml") as f:
+                    root = ET.fromstring(f.read())
+                    id_el = root.find("id")
+                    if id_el is not None and id_el.text:
+                        return id_el.text.strip()
+        except Exception:
+            continue
+    return None
+
+
+def _pycharm_installed_plugin_ids():
+    plugins_dir = _pycharm_plugins_dir()
+    if not plugins_dir:
+        return []
+    ids = []
+    try:
+        for entry in plugins_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            pid = _extract_plugin_id(entry)
+            if pid:
+                ids.append(pid)
+    except Exception:
+        pass
+    return ids
+
+
+def _jetbrains_plugins_check():
+    """Updates PyCharm plugins from the command line the same way
+    topgrade does it: JetBrains IDEs have no dedicated 'update plugins'
+    verb, but re-running 'installPlugins <id>' for an already-installed
+    plugin always fetches the latest compatible version and overwrites
+    the old one — so calling it for every detected plugin ID amounts to
+    updating all of them. PyCharm must be closed for this to work (the
+    launcher refuses a second instance against the same config).
+    Falls back to just launching Toolbox/PyCharm if the CLI launcher or
+    the installed plugin IDs can't be determined."""
+    binary = _find_pycharm_binary()
+    ids = _pycharm_installed_plugin_ids() if binary else []
+    if binary and ids:
+        quoted_ids = " ".join(shlex.quote(i) for i in ids)
+        return {
+            "id": "jetbrains_plugins", "name": "JetBrains PyCharm Plugins",
+            "version": "", "detail": "\n".join(ids),
+            "update_cmd": f"{shlex.quote(binary)} installPlugins {quoted_ids}",
+            "launch_cmd": None,
+            "note": "Re-installs every detected plugin at its latest compatible version "
+                    "(the same trick topgrade uses) — close PyCharm first.",
+        }
+
+    try:
+        config_dirs = list(Path.home().glob(".config/JetBrains/PyCharm*"))
+    except Exception:
+        config_dirs = []
+    toolbox = shutil.which("jetbrains-toolbox")
+    fallback_bin = binary or shutil.which("pycharm") or shutil.which("pycharm.sh")
+    if not (config_dirs or toolbox or fallback_bin):
+        return None
+    return {
+        "id": "jetbrains_plugins", "name": "JetBrains PyCharm Plugins",
+        "version": "", "detail": "",
+        "update_cmd": None,
+        "launch_cmd": toolbox or fallback_bin,
+        "note": "Couldn't determine the CLI launcher or installed plugin IDs automatically — "
+                "this opens Toolbox/PyCharm so you can use Settings \u2192 Plugins \u2192 Update All instead.",
+    }
+
+
+def _nvm_check():
+    """nvm installs as a shell function (nvm.sh), not a binary on PATH, so
+    detection is by directory rather than shutil.which."""
+    script = Path.home() / ".nvm" / "nvm.sh"
+    if not script.exists():
+        return None
+    version, _ = run_command(
+        f"bash -lc 'source {shlex.quote(str(script))}; nvm --version' 2>/dev/null", timeout=15)
+    return {
+        "id": "nvm", "name": "nvm (Node Version Manager)",
+        "version": (version or "").strip(), "detail": "",
+        "update_cmd": (f"bash -lc 'source {shlex.quote(str(script))}; "
+                        "nvm install --lts; nvm alias default lts/*'"),
+        "launch_cmd": None,
+        "note": "Installs the latest Node.js LTS release and sets it as the default.",
+    }
+
+
+def _pyenv_check():
+    if not shutil.which("pyenv"):
+        return None
+    version, _ = run_command("pyenv --version 2>/dev/null", timeout=10)
+    pyenv_root = os.environ.get("PYENV_ROOT", str(Path.home() / ".pyenv"))
+    return {
+        "id": "pyenv", "name": "pyenv (Python Version Manager)",
+        "version": (version or "").strip(), "detail": "",
+        "update_cmd": f"pyenv update 2>/dev/null || (cd {shlex.quote(pyenv_root)} && git pull)",
+        "launch_cmd": None,
+        "note": "Updates pyenv itself — install new Python versions separately with 'pyenv install'.",
+    }
+
+
+def _sdkman_check():
+    """SDKMAN's 'sdk' command is a shell function too, sourced from
+    sdkman-init.sh rather than being a plain executable."""
+    init_script = Path.home() / ".sdkman" / "bin" / "sdkman-init.sh"
+    if not init_script.exists():
+        return None
+    return {
+        "id": "sdkman", "name": "SDKMAN (Java/Kotlin/Gradle/Maven)",
+        "version": "", "detail": "",
+        "update_cmd": f"bash -lc 'source {shlex.quote(str(init_script))}; sdk selfupdate; sdk update'",
+        "launch_cmd": None,
+        "note": "Updates SDKMAN itself and its candidate index — not each installed SDK version.",
+    }
+
+
+def _conda_check():
+    """Prefers mamba over conda when both are present (same base env, mamba
+    is just the faster front end)."""
+    binary = shutil.which("mamba") or shutil.which("conda")
+    if not binary:
+        return None
+    cmd_name = os.path.basename(binary)
+    version, _ = run_command(f"{shlex.quote(binary)} --version 2>/dev/null", timeout=10)
+    if cmd_name == "mamba":
+        update_cmd = "mamba update --all -y"
+        name = "Mamba (base environment)"
+    else:
+        update_cmd = "conda update -n base -c defaults conda -y && conda update --all -y"
+        name = "Conda (base environment)"
+    return {
+        "id": "conda", "name": name,
+        "version": (version or "").strip(), "detail": "",
+        "update_cmd": update_cmd,
+        "launch_cmd": None,
+        "note": "Updates the base environment only — other environments need updating separately.",
+    }
+
+
+def _texlive_check():
+    """Skipped when TeX Live is a pacman/AUR package — the regular update
+    list (check_updates) already covers that case."""
+    if not shutil.which("tlmgr"):
+        return None
+    _, code = run_command("pacman -Qo $(command -v tlmgr) 2>/dev/null", timeout=10)
+    if code == 0:
+        return None
+    version, _ = run_command("tlmgr --version 2>/dev/null | head -1", timeout=10)
+    return {
+        "id": "texlive", "name": "TeX Live (tlmgr)",
+        "version": (version or "").strip(), "detail": "",
+        "update_cmd": "tlmgr update --self --all",
+        "launch_cmd": None,
+        "note": "",
+    }
+
+
+def _vscode_extensions_check():
+    binary = shutil.which("code") or shutil.which("codium")
+    if not binary:
+        return None
+    out, code = run_command(f"{shlex.quote(binary)} --list-extensions 2>/dev/null", timeout=15)
+    if code != 0 or not (out or "").strip():
+        return None
+    cmd_name = os.path.basename(binary)
+    return {
+        "id": "vscode_ext",
+        "name": "VS Code Extensions" if cmd_name == "code" else "VSCodium Extensions",
+        "version": "", "detail": out.strip(),
+        "update_cmd": f"{cmd_name} --list-extensions | xargs -L 1 {cmd_name} --install-extension --force",
+        "launch_cmd": None,
+        "note": "Reinstalls every extension at its latest Marketplace version.",
+    }
+
+
+def _clamav_db_check():
+    if not shutil.which("freshclam"):
+        return None
+    version, _ = run_command("freshclam --version 2>/dev/null | head -1", timeout=10)
+    return {
+        "id": "clamav_db", "name": "ClamAV Virus Definitions",
+        "version": (version or "").strip(), "detail": "",
+        "update_cmd": "sudo freshclam",
+        "launch_cmd": None,
+        "note": "Downloads the latest ClamAV signature database.",
+    }
+
+
+def _docker_images_check():
+    if not shutil.which("docker"):
+        return None
+    out, code = run_command(
+        "docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v '<none>'",
+        timeout=15)
+    if code != 0 or not (out or "").strip():
+        return None
+    return {
+        "id": "docker_images", "name": "Docker Images",
+        "version": "", "detail": out.strip(),
+        "update_cmd": ("docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null "
+                        "| grep -v '<none>' | xargs -L1 docker pull"),
+        "launch_cmd": None,
+        "note": "Pulls the latest version of every locally tagged image.",
+    }
+
+
+def _podman_images_check():
+    if not shutil.which("podman"):
+        return None
+    out, code = run_command(
+        "podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v '<none>'",
+        timeout=15)
+    if code != 0 or not (out or "").strip():
+        return None
+    return {
+        "id": "podman_images", "name": "Podman Images",
+        "version": "", "detail": out.strip(),
+        "update_cmd": ("podman images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null "
+                        "| grep -v '<none>' | xargs -L1 podman pull"),
+        "launch_cmd": None,
+        "note": "Pulls the latest version of every locally tagged image.",
+    }
+
+
+def _flatpak_unused_check():
+    if not (get_setting("flatpak_enabled") and flatpak_available()):
+        return None
+    out, code = run_command(
+        "flatpak list --columns=application --app=false 2>/dev/null", timeout=15)
+    if code != 0 or not (out or "").strip():
+        return None
+    return {
+        "id": "flatpak_unused", "name": "Flatpak: Unused Runtimes",
+        "version": "", "detail": "",
+        "update_cmd": "flatpak uninstall --unused -y",
+        "launch_cmd": None,
+        "note": "Removes runtimes and extensions no installed app depends on anymore.",
+    }
+
+
+def _vim_neovim_plugins_check():
+    """Detects whichever plugin manager is present and picks the matching
+    headless update invocation — lazy.nvim and packer.nvim take priority
+    over vim-plug when more than one is found, matching how most users
+    who have several actually only use the newest one."""
+    data_home = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+
+    if shutil.which("nvim"):
+        lazy_dir = data_home / "nvim" / "lazy" / "lazy.nvim"
+        packer_dir = data_home / "nvim" / "site" / "pack" / "packer" / "start" / "packer.nvim"
+        plug_file = data_home / "nvim" / "site" / "autoload" / "plug.vim"
+        if lazy_dir.is_dir():
+            return {
+                "id": "nvim_plugins", "name": "Neovim Plugins (lazy.nvim)",
+                "version": "", "detail": "",
+                "update_cmd": 'nvim --headless "+Lazy! sync" +qa',
+                "launch_cmd": None, "note": "",
+            }
+        if packer_dir.is_dir():
+            return {
+                "id": "nvim_plugins", "name": "Neovim Plugins (packer.nvim)",
+                "version": "", "detail": "",
+                "update_cmd": ('nvim --headless -c "autocmd User PackerComplete quitall" '
+                                '-c "PackerSync"'),
+                "launch_cmd": None, "note": "",
+            }
+        if plug_file.exists():
+            return {
+                "id": "nvim_plugins", "name": "Neovim Plugins (vim-plug)",
+                "version": "", "detail": "",
+                "update_cmd": 'nvim --headless "+PlugUpdate" +qa',
+                "launch_cmd": None, "note": "",
+            }
+
+    if shutil.which("vim"):
+        plug_file = Path.home() / ".vim" / "autoload" / "plug.vim"
+        if plug_file.exists():
+            return {
+                "id": "vim_plugins", "name": "Vim Plugins (vim-plug)",
+                "version": "", "detail": "",
+                "update_cmd": 'vim -Es -c "PlugUpdate" -c "qa"',
+                "launch_cmd": None, "note": "",
+            }
+    return None
+
+
+def _tmux_tpm_check():
+    tpm_script = Path.home() / ".tmux" / "plugins" / "tpm" / "bin" / "update_plugins"
+    if not tpm_script.exists():
+        return None
+    return {
+        "id": "tmux_tpm", "name": "tmux Plugins (TPM)",
+        "version": "", "detail": "",
+        "update_cmd": f"{shlex.quote(str(tpm_script))} all",
+        "launch_cmd": None, "note": "",
+    }
+
+
+def _zsh_frameworks_check():
+    """Returns a list (0-2 entries) since more than one zsh/fish plugin
+    framework can coexist, unlike the other checks here which are 1:1."""
+    entries = []
+
+    ohmyzsh_dir = Path(os.environ.get("ZSH", str(Path.home() / ".oh-my-zsh")))
+    if ohmyzsh_dir.is_dir() and (ohmyzsh_dir / "tools" / "upgrade.sh").exists():
+        entries.append({
+            "id": "oh_my_zsh", "name": "Oh My Zsh",
+            "version": "", "detail": "",
+            "update_cmd": f'env ZSH={shlex.quote(str(ohmyzsh_dir))} sh {shlex.quote(str(ohmyzsh_dir / "tools" / "upgrade.sh"))}',
+            "launch_cmd": None, "note": "",
+        })
+
+    zinit_dirs = [
+        Path.home() / ".local" / "share" / "zinit" / "zinit.git",
+        Path.home() / ".zinit" / "bin" / "zinit.zsh",
+    ]
+    if any(p.exists() for p in zinit_dirs) and shutil.which("zsh"):
+        entries.append({
+            "id": "zinit", "name": "Zinit (zsh plugin manager)",
+            "version": "", "detail": "",
+            "update_cmd": 'zsh -ic "zinit self-update; zinit update --all"',
+            "launch_cmd": None, "note": "",
+        })
+
+    antigen_files = [Path.home() / ".antigen" / "antigen.zsh", Path.home() / ".antigen.zsh"]
+    if any(p.exists() for p in antigen_files) and shutil.which("zsh"):
+        entries.append({
+            "id": "antigen", "name": "Antigen (zsh plugin manager)",
+            "version": "", "detail": "",
+            "update_cmd": 'zsh -ic "antigen update"',
+            "launch_cmd": None, "note": "",
+        })
+
+    if shutil.which("sheldon"):
+        entries.append({
+            "id": "sheldon", "name": "Sheldon (shell plugin manager)",
+            "version": "", "detail": "",
+            "update_cmd": "sheldon lock --update",
+            "launch_cmd": None, "note": "",
+        })
+
+    if shutil.which("fish") and shutil.which("fisher"):
+        entries.append({
+            "id": "fisher", "name": "Fisher (fish plugin manager)",
+            "version": "", "detail": "",
+            "update_cmd": 'fish -c "fisher update"',
+            "launch_cmd": None, "note": "",
+        })
+
+    return entries
+
+
+def _dotfiles_git_repos_check():
+    """Auto-discovers common dotfiles/config repos and offers a 'git pull'
+    for each — only ones that are an actual git repo AND have a remote
+    configured (skipping local-only repos, same as topgrade does)."""
+    candidates = [
+        Path.home() / ".dotfiles",
+        Path.home() / "dotfiles",
+        Path.home() / ".config" / "nvim",
+        Path.home() / ".vim",
+        Path.home() / ".emacs.d",
+    ]
+    entries = []
+    for repo in candidates:
+        if not (repo / ".git").exists():
+            continue
+        _, code = run_command(f"git -C {shlex.quote(str(repo))} remote get-url origin 2>/dev/null", timeout=10)
+        if code != 0:
+            continue
+        entries.append({
+            "id": f"git_repo_{repo.name}", "name": f"Git Repo: {repo}",
+            "version": "", "detail": "",
+            "update_cmd": f"git -C {shlex.quote(str(repo))} pull --ff-only",
+            "launch_cmd": None, "note": "",
+        })
+    return entries
+
+
+def _getnf_check():
+    if not shutil.which("getnf"):
+        return None
+    return {
+        "id": "getnf", "name": "Nerd Fonts (getnf)",
+        "version": "", "detail": "",
+        "update_cmd": "getnf -U",
+        "launch_cmd": None,
+        "note": "Updates already-installed Nerd Fonts to their latest release.",
+    }
+
+
+def _tldr_check():
+    if not shutil.which("tldr"):
+        return None
+    return {
+        "id": "tldr", "name": "tldr Pages",
+        "version": "", "detail": "",
+        "update_cmd": "tldr --update",
+        "launch_cmd": None, "note": "",
+    }
+
+
+def _nix_check():
+    if not (shutil.which("nix-env") or shutil.which("nix")):
+        return None
+    return {
+        "id": "nix", "name": "Nix Packages (nix-env)",
+        "version": "", "detail": "",
+        "update_cmd": "nix-channel --update && nix-env -u '*'",
+        "launch_cmd": None,
+        "note": "Classic nix-env profile only \u2014 flake-based setups update differently.",
+    }
+
+
+def _home_manager_check():
+    if not shutil.which("home-manager"):
+        return None
+    return {
+        "id": "home_manager", "name": "home-manager",
+        "version": "", "detail": "",
+        "update_cmd": "home-manager switch",
+        "launch_cmd": None, "note": "",
+    }
+
+
+def get_tool_updates():
+    """Detect installed external tools (rustup, cargo, pip, pipx, npm, fnm,
+    nvm, pyenv, SDKMAN, Conda/Mamba, TeX Live, GitHub CLI extensions,
+    Claude Code, VS Code/VSCodium extensions, Lensfun, uv, Ollama, ClamAV
+    definitions, Docker/Podman images, Flatpak unused runtimes, JetBrains
+    PyCharm plugins, Vim/Neovim/tmux plugin managers, zsh/fish frameworks,
+    dotfiles git repos, Nerd Fonts, tldr, Nix/home-manager, firmware via
+    fwupd, …) that aren't covered by check_updates(). Returns a list of
+    dicts: id, name, version, detail, update_cmd (or None), launch_cmd
+    (or None), note. A tool with update_cmd set can be run directly; one
+    with only launch_cmd set (JetBrains plugins fallback) has no
+    scriptable updater and just gets opened. Purely read-only: only each
+    tool's own --version/list/check subcommand runs here, nothing is
+    changed."""
+    results = []
+    for spec in TOOL_SPECS:
+        found_bin = next((b for b in spec["binaries"] if shutil.which(b)), None)
+        if not found_bin:
+            continue
+        version = ""
+        if spec.get("version_cmd"):
+            vout, vcode = run_command(spec["version_cmd"], timeout=10)
+            if vcode == 0 and vout:
+                version = vout.strip().splitlines()[0]
+        detail = ""
+        if spec.get("check_cmd"):
+            cout, _ = run_command(spec["check_cmd"].format(bin=found_bin), timeout=30)
+            detail = (cout or "").strip()
+        update_cmd = spec.get("update_cmd")
+        if update_cmd:
+            update_cmd = update_cmd.format(bin=found_bin)
+        # Only npm and pip have a check_cmd output format that's
+        # guaranteed to list *only* genuinely outdated items (no
+        # "up to date" rows mixed in) — rustup check, cargo install-update
+        # -l, gh extension list, pipx list, etc. all show every installed
+        # item regardless of status, so counting their lines would
+        # overstate how much is actually pending. Left None there rather
+        # than showing a misleading number.
+        outdated_count = None
+        if detail:
+            if spec["id"] == "npm":
+                # "npm outdated -g" output: one header line, then one row
+                # per outdated package (it never lists up-to-date ones).
+                outdated_count = max(0, len(detail.splitlines()) - 1)
+            elif spec["id"] == "pip":
+                # "--format=freeze" output: exactly one line per outdated
+                # package, no header.
+                outdated_count = len(detail.splitlines())
+        results.append({
+            "id": spec["id"], "name": spec["name"], "version": version,
+            "detail": detail, "update_cmd": update_cmd, "launch_cmd": None,
+            "note": spec.get("note", ""), "outdated_count": outdated_count,
+        })
+
+    for fn in (_cargo_update_check, _gh_extensions_check, _ollama_check,
+               _jetbrains_plugins_check, _nvm_check, _pyenv_check, _sdkman_check,
+               _conda_check, _texlive_check, _vscode_extensions_check,
+               _clamav_db_check, _docker_images_check, _podman_images_check,
+               _flatpak_unused_check, _vim_neovim_plugins_check, _tmux_tpm_check,
+               _getnf_check, _tldr_check, _nix_check, _home_manager_check):
+        entry = fn()
+        if entry:
+            results.append(entry)
+
+    for fn in (_zsh_frameworks_check, _dotfiles_git_repos_check):
+        results.extend(fn())
+
+    return results
+
+
+def get_enabled_auto_update_commands():
+    """Re-scans get_tool_updates() and returns [(name, update_cmd), ...]
+    for every tool the user has opted into auto-running alongside the
+    normal system upgrade (via the 'More Update Sources' checkboxes).
+    Re-scanning rather than trusting the saved list means a tool that was
+    uninstalled since being enabled is silently skipped instead of
+    failing the whole upgrade chain. Launch-only entries (no update_cmd,
+    e.g. the JetBrains fallback) can't run headlessly and are excluded."""
+    enabled_ids = set(get_setting("auto_update_tool_ids") or [])
+    if not enabled_ids:
+        return []
+    commands = []
+    for t in get_tool_updates():
+        if t["id"] in enabled_ids and t.get("update_cmd"):
+            commands.append((t["name"], t["update_cmd"]))
+    return commands
+
+
 # ─── IgnorePkg (hold) ─────────────────────────────────────────────────────────
 
 PACMAN_CONF = Path("/etc/pacman.conf")
@@ -1254,6 +2056,58 @@ def set_package_ignored(pkg_name, ignore):
                 lines[idx] = "IgnorePkg = " + " ".join(sorted(current))
             else:
                 del lines[idx]
+
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="pachul-pacman-conf-", suffix=".conf")
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return tmp
+
+
+def set_packages_ignored(pkg_names, ignore):
+    """Batch version of set_package_ignored: adds/removes several package
+    names to/from IgnorePkg in a single pass, returning one temp file to
+    install. Returns None if none of the requested names actually needed
+    a change (all already in the requested state)."""
+    try:
+        lines = PACMAN_CONF.read_text().splitlines()
+    except Exception:
+        return None
+
+    idx, current = None, set()
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        if s.startswith("IgnorePkg"):
+            idx = i
+            _, _, val = s.partition("=")
+            current = set(val.split())
+            break
+
+    names = set(pkg_names)
+    if ignore:
+        changed = bool(names - current)
+        current |= names
+    else:
+        changed = bool(names & current)
+        current -= names
+    if not changed:
+        return None
+
+    if idx is not None:
+        if current:
+            lines[idx] = "IgnorePkg = " + " ".join(sorted(current))
+        else:
+            del lines[idx]
+    elif current:
+        new_line = "IgnorePkg = " + " ".join(sorted(current))
+        for i, line in enumerate(lines):
+            if line.strip() == "[options]":
+                lines.insert(i + 1, new_line)
+                break
+        else:
+            lines.append(new_line)
 
     import tempfile
     fd, tmp = tempfile.mkstemp(prefix="pachul-pacman-conf-", suffix=".conf")
@@ -1560,15 +2414,24 @@ def _pachul_icon_path():
     return name
 
 
-def send_update_notification(n):
-    """Send a desktop notification about n available updates (via notify-send)."""
+def send_update_notification(n, extra=0):
+    """Send a desktop notification about n available package updates,
+    plus (optionally) how many enabled "More Update Sources" tools are
+    ready to run alongside the next system upgrade."""
     if run_command("which notify-send 2>/dev/null")[1] != 0:
         return
     from i18n import tr   # local import: avoids a circular import with i18n.py
     title = tr("Updates Available")
-    body = tr("{n} package update can be installed.") if n == 1 \
-        else tr("{n} package updates can be installed.")
-    body = body.format(n=n)
+    parts = []
+    if n > 0:
+        line = tr("{n} package update can be installed.") if n == 1 \
+            else tr("{n} package updates can be installed.")
+        parts.append(line.format(n=n))
+    if extra > 0:
+        line = tr("1 additional update source is ready to run.") if extra == 1 \
+            else tr("{n} additional update sources are ready to run.")
+        parts.append(line.format(n=extra))
+    body = " ".join(parts)
     icon = _pachul_icon_path()
     run_command(
         f"notify-send --app-name=Pachul --icon={shlex.quote(icon)} "
@@ -1576,10 +2439,14 @@ def send_update_notification(n):
 
 
 def run_update_notification_check():
-    """Entry point for the systemd timer: check for updates and notify if any."""
+    """Entry point for the systemd timer: check for updates and notify if
+    any — package updates, or enabled "More Update Sources" tools that
+    are still actually detected right now (re-checked fresh each time, so
+    an uninstalled tool never shows up here even if it was once enabled)."""
     if not get_setting("notify_updates"):
         return 0
     n = len(check_updates())
-    if n > 0:
-        send_update_notification(n)
+    extra = len(get_enabled_auto_update_commands())
+    if n > 0 or extra > 0:
+        send_update_notification(n, extra)
     return n

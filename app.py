@@ -116,6 +116,8 @@ class pachulApp(Adw.Application):
             "sysinfo":       self.win._on_show_sysinfo,
             "history":       self.win._on_show_history,
             "pacdiff":       self.win._on_show_pacdiff,
+            "tool_updates":  self.win._on_show_tool_updates,
+            "ignored":       self.win._on_show_ignored,
             "export_pkgs":   self.win._on_export_pkgs,
             "import_pkgs":   self.win._on_import_pkgs,
             "pkgbuild":      self.win._on_view_pkgbuild,

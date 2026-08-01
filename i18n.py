@@ -190,6 +190,8 @@ STRINGS_DE = {
     "Hold": "Sperren",
     "Hold {pkg}": "{pkg} sperren",
     "Unhold {pkg}": "{pkg} entsperren",
+    "Ignore Updates": "Update ignorieren",
+    "Unignore": "Nicht mehr ignorieren",
     "Allow {pkg} to Update Again": "{pkg} wieder aktualisierbar machen",
     "Removes {pkg} from IgnorePkg in /etc/pacman.conf. It will be included in system upgrades again from now on.":
         "Entfernt {pkg} aus IgnorePkg in /etc/pacman.conf. Es wird ab sofort wieder bei System-Updates berücksichtigt.",
@@ -237,6 +239,8 @@ STRINGS_DE = {
     "Updates Available": "Updates verfügbar",
     "{n} package update can be installed.": "{n} Paketupdate kann installiert werden.",
     "{n} package updates can be installed.": "{n} Paketupdates können installiert werden.",
+    "1 additional update source is ready to run.": "1 weitere Update-Quelle ist bereit.",
+    "{n} additional update sources are ready to run.": "{n} weitere Update-Quellen sind bereit.",
 
     # Multi-select / batch actions
     "Select multiple packages": "Mehrere Pakete auswählen",
@@ -250,6 +254,10 @@ STRINGS_DE = {
         "Dadurch werden die {n} ausgewählten Pakete von deinem System entfernt.",
     "No AUR helper found — skipped {n} AUR package(s).":
         "Kein AUR-Helper gefunden — {n} AUR-Paket(e) übersprungen.",
+    "No AUR helper found": "Kein AUR-Helper gefunden",
+    "Newer version {v} available on the AUR": "Neuere Version {v} im AUR verfügbar",
+    "Install from AUR": "Aus dem AUR installieren",
+    "Install {n} from AUR": "{n} aus dem AUR installieren",
 
     # File search (pacman -F)
     "Find Package by File…": "Paket über Datei finden …",
@@ -445,6 +453,16 @@ STRINGS_DE = {
         "Wird für AUR-Installationen, Updates und PKGBUILDs verwendet",
     "Auto-detect": "Automatisch erkennen",
     "None (pacman only)": "Keiner (nur pacman)",
+    "paru not installed": "paru nicht installiert",
+    "paru handles some AUR-vs-repo ambiguities (e.g. a package that "
+    "exists both in a plain repo and on the AUR) more reliably than "
+    "other helpers. Builds it from the AUR the same way any AUR "
+    "package is built (needs base-devel and git).":
+        "paru löst manche Mehrdeutigkeiten zwischen Repo und AUR (z. B. ein Paket, das "
+        "sowohl in einem normalen Repo als auch im AUR existiert) zuverlässiger als "
+        "andere Helfer. Wird aus dem AUR gebaut, genau wie jedes andere AUR-Paket "
+        "(benötigt base-devel und git).",
+    "Install paru": "paru installieren",
     "Include AUR in update checks": "AUR bei Update-Prüfungen einbeziehen",
     "Additional Package Sources": "Zusätzliche Paketquellen",
     "Show installed Flatpak/Snap apps alongside pacman packages, and include them when searching. Flatpak installs use --user (no password needed); Snap always needs one, since snapd requires root.":
@@ -516,6 +534,163 @@ STRINGS_DE = {
     # Tray indicator (tray.py)
     "Open Pachul": "Pachul öffnen",
     "Checking for updates…": "Prüfe auf Updates…",
+
+    # External tool updaters (More Update Sources…)
+    "More Update Sources…": "Weitere Update-Quellen…",
+    "More Update Sources": "Weitere Update-Quellen",
+    "Scanning for update sources…": "Suche nach Update-Quellen…",
+    "Update Selected": "Auswahl aktualisieren",
+    "Update Selected Tools": "Ausgewählte Tools aktualisieren",
+    "Configuration": "Konfiguration",
+    "Review and merge configuration files left behind by package updates.":
+        "Konfigurationsdateien prüfen und zusammenführen, die bei Paket-Updates zurückbleiben.",
+    "Review…": "Prüfen…",
+    "{n} outdated": "{n} veraltet",
+
+    # Batch "Ignore" + Ignored Packages overview
+    "Ignore ({n})": "Ignorieren ({n})",
+    "Ignore {n} packages": "{n} Pakete ignorieren",
+    "Ignore {n} packages?": "{n} Pakete ignorieren?",
+    "All selected packages are already ignored": "Alle ausgewählten Pakete werden bereits ignoriert",
+    "Adds {n} package(s) to IgnorePkg in /etc/pacman.conf. They'll be "
+    "skipped by system upgrades until you unignore them individually.":
+        "Fügt {n} Paket(e) zu IgnorePkg in /etc/pacman.conf hinzu. Sie werden bei "
+        "System-Updates übersprungen, bis du sie einzeln wieder freigibst.",
+    "Ignored Packages…": "Ignorierte Pakete…",
+    "Ignored Packages": "Ignorierte Pakete",
+    "Unignore All": "Alle nicht mehr ignorieren",
+    "Unignore {n} packages": "{n} Pakete nicht mehr ignorieren",
+    "No Ignored Packages": "Keine ignorierten Pakete",
+    "Packages held via IgnorePkg (skipped by system upgrades) show up here.":
+        "Über IgnorePkg gesperrte Pakete (werden bei System-Updates übersprungen) erscheinen hier.",
+    "These packages are skipped by system upgrades until you unignore them.":
+        "Diese Pakete werden bei System-Updates übersprungen, bis du sie wieder freigibst.",
+    "Detected Tools": "Erkannte Tools",
+    "Checked tools run automatically with every normal system upgrade from now on. "
+    "\u201cUpdate Selected\u201d above also runs whatever is checked right now, once.":
+        "Angehakte Tools werden ab sofort automatisch bei jedem normalen System-Update mit ausgeführt. "
+        "„Auswahl aktualisieren“ oben führt die aktuell angehakten Tools zusätzlich einmalig sofort aus.",
+    "No Additional Tools Found": "Keine weiteren Tools gefunden",
+    "None of the supported external tools (rustup, cargo, pip/pipx, npm, "
+    "gh extensions, Claude Code, Lensfun, uv, Ollama, JetBrains) were detected.":
+        "Keines der unterstützten externen Tools (rustup, cargo, pip/pipx, npm, "
+        "gh-Erweiterungen, Claude Code, Lensfun, uv, Ollama, JetBrains) wurde gefunden.",
+
+    "Firmware (fwupdmgr)": "Firmware (fwupdmgr)",
+    "Firmware updates for the mainboard, SSDs, and other devices via fwupd.":
+        "Firmware-Updates für Mainboard, SSDs und andere Geräte über fwupd.",
+    "Rust Toolchains (rustup)": "Rust-Toolchains (rustup)",
+    "pip (--user packages)": "pip (--user-Pakete)",
+    "Upgrades every outdated package installed with --user.":
+        "Aktualisiert alle veralteten, mit --user installierten Pakete.",
+    "pipx": "pipx",
+    "npm (global packages)": "npm (globale Pakete)",
+    "Claude Code": "Claude Code",
+    "Lensfun Camera/Lens Database": "Lensfun Kamera-/Objektiv-Datenbank",
+    "Fetches the latest camera/lens calibration data used by darktable, digiKam, and similar apps.":
+        "Lädt die neuesten Kamera-/Objektiv-Kalibrierungsdaten für darktable, digiKam und ähnliche Programme.",
+    "uv (Python package/tool manager)": "uv (Python-Paket-/Tool-Manager)",
+    "Only works for the standalone uv installer — a pacman/AUR install is updated there instead.":
+        "Funktioniert nur bei der eigenständigen uv-Installation — bei pacman/AUR wird uv dort aktualisiert.",
+    "Cargo (crates.io binaries)": "Cargo (crates.io-Programme)",
+    "Installs the 'cargo-update' helper crate first, then upgrades all cargo-installed binaries.":
+        "Installiert zunächst das Hilfs-Crate „cargo-update“ und aktualisiert danach alle mit Cargo installierten Programme.",
+    "GitHub CLI Extensions": "GitHub-CLI-Erweiterungen",
+    "Ollama": "Ollama",
+    "Re-runs the official installer script to fetch the latest release.":
+        "Führt das offizielle Installationsskript erneut aus, um die neueste Version zu laden.",
+    "JetBrains PyCharm Plugins": "JetBrains-PyCharm-Plugins",
+    "Re-installs every detected plugin at its latest compatible version "
+    "(the same trick topgrade uses) \u2014 close PyCharm first.":
+        "Installiert jedes erkannte Plugin neu in der aktuellsten kompatiblen Version "
+        "(derselbe Trick wie bei topgrade) \u2014 PyCharm muss dafür geschlossen sein.",
+    "Couldn't determine the CLI launcher or installed plugin IDs automatically \u2014 "
+    "this opens Toolbox/PyCharm so you can use Settings \u2192 Plugins \u2192 Update All instead.":
+        "Kommandozeilen-Starter oder installierte Plugin-IDs konnten nicht automatisch ermittelt werden \u2014 "
+        "dies öffnet stattdessen Toolbox/PyCharm, damit du Einstellungen \u2192 Plugins \u2192 Alle aktualisieren nutzen kannst.",
+
+    "fnm (Fast Node Manager)": "fnm (Fast Node Manager)",
+    "Installs the latest Node.js LTS release via fnm.":
+        "Installiert die neueste Node.js-LTS-Version über fnm.",
+    "nvm (Node Version Manager)": "nvm (Node Version Manager)",
+    "Installs the latest Node.js LTS release and sets it as the default.":
+        "Installiert die neueste Node.js-LTS-Version und setzt sie als Standard.",
+    "pyenv (Python Version Manager)": "pyenv (Python Version Manager)",
+    "Updates pyenv itself — install new Python versions separately with 'pyenv install'.":
+        "Aktualisiert pyenv selbst — neue Python-Versionen werden separat mit „pyenv install“ installiert.",
+    "SDKMAN (Java/Kotlin/Gradle/Maven)": "SDKMAN (Java/Kotlin/Gradle/Maven)",
+    "Updates SDKMAN itself and its candidate index — not each installed SDK version.":
+        "Aktualisiert SDKMAN selbst und dessen Kandidaten-Index — nicht jede installierte SDK-Version.",
+    "Mamba (base environment)": "Mamba (Basisumgebung)",
+    "Conda (base environment)": "Conda (Basisumgebung)",
+    "Updates the base environment only — other environments need updating separately.":
+        "Aktualisiert nur die Basisumgebung — andere Umgebungen müssen separat aktualisiert werden.",
+    "TeX Live (tlmgr)": "TeX Live (tlmgr)",
+    "VS Code Extensions": "VS-Code-Erweiterungen",
+    "VSCodium Extensions": "VSCodium-Erweiterungen",
+    "Reinstalls every extension at its latest Marketplace version.":
+        "Installiert jede Erweiterung neu in der aktuellsten Marketplace-Version.",
+    "ClamAV Virus Definitions": "ClamAV-Virendefinitionen",
+    "Downloads the latest ClamAV signature database.":
+        "Lädt die neueste ClamAV-Signaturdatenbank herunter.",
+    "Docker Images": "Docker-Images",
+    "Podman Images": "Podman-Images",
+    "Pulls the latest version of every locally tagged image.":
+        "Lädt die neueste Version jedes lokal getaggten Images herunter.",
+    "Flatpak: Unused Runtimes": "Flatpak: Ungenutzte Runtimes",
+    "Removes runtimes and extensions no installed app depends on anymore.":
+        "Entfernt Runtimes und Erweiterungen, die keine installierte App mehr benötigt.",
+
+    "Neovim Plugins (lazy.nvim)": "Neovim-Plugins (lazy.nvim)",
+    "Neovim Plugins (packer.nvim)": "Neovim-Plugins (packer.nvim)",
+    "Neovim Plugins (vim-plug)": "Neovim-Plugins (vim-plug)",
+    "Vim Plugins (vim-plug)": "Vim-Plugins (vim-plug)",
+    "tmux Plugins (TPM)": "tmux-Plugins (TPM)",
+    "Oh My Zsh": "Oh My Zsh",
+    "Zinit (zsh plugin manager)": "Zinit (Zsh-Plugin-Manager)",
+    "Antigen (zsh plugin manager)": "Antigen (Zsh-Plugin-Manager)",
+    "Sheldon (shell plugin manager)": "Sheldon (Shell-Plugin-Manager)",
+    "Fisher (fish plugin manager)": "Fisher (Fish-Plugin-Manager)",
+    "Nerd Fonts (getnf)": "Nerd Fonts (getnf)",
+    "Updates already-installed Nerd Fonts to their latest release.":
+        "Aktualisiert bereits installierte Nerd Fonts auf die neueste Version.",
+    "tldr Pages": "tldr-Seiten",
+    "Nix Packages (nix-env)": "Nix-Pakete (nix-env)",
+    "Classic nix-env profile only \u2014 flake-based setups update differently.":
+        "Nur klassisches nix-env-Profil \u2014 Flake-basierte Setups werden anders aktualisiert.",
+    "home-manager": "home-manager",
+
+    "What can be updated here?": "Was kann hier aktualisiert werden?",
+    "Full list of supported sources \u2014 shown once installed and detected.":
+        "Vollständige Liste der unterstützten Quellen \u2014 wird angezeigt, sobald installiert und erkannt.",
+    "Updates installed Rust toolchains.": "Aktualisiert installierte Rust-Toolchains.",
+    "Updates binaries installed via cargo install.":
+        "Aktualisiert Programme, die mit cargo install installiert wurden.",
+    "Upgrades every pipx-installed application.":
+        "Aktualisiert jede mit pipx installierte Anwendung.",
+    "Updates globally installed npm packages.":
+        "Aktualisiert global installierte npm-Pakete.",
+    "Updates TeX Live packages.": "Aktualisiert TeX-Live-Pakete.",
+    "Updates all installed gh extensions.": "Aktualisiert alle installierten gh-Erweiterungen.",
+    "Updates the Claude Code CLI.": "Aktualisiert die Claude-Code-CLI.",
+    "Conda/Mamba (base environment)": "Conda/Mamba (Basisumgebung)",
+    "Updates installed plugins via the command line (installPlugins) \u2014 "
+    "falls back to opening Toolbox/PyCharm.":
+        "Aktualisiert installierte Plugins über die Kommandozeile (installPlugins) \u2014 "
+        "öffnet als Rückfallebene Toolbox/PyCharm.",
+    "Vim/Neovim Plugins": "Vim-/Neovim-Plugins",
+    "Updates plugins managed by lazy.nvim, packer.nvim, or vim-plug.":
+        "Aktualisiert Plugins, die von lazy.nvim, packer.nvim oder vim-plug verwaltet werden.",
+    "Updates everything managed through the tmux Plugin Manager.":
+        "Aktualisiert alles, was über den tmux Plugin Manager verwaltet wird.",
+    "Zsh/Fish Frameworks": "Zsh-/Fish-Frameworks",
+    "Oh My Zsh, Zinit, Antigen, Sheldon, Fisher.": "Oh My Zsh, Zinit, Antigen, Sheldon, Fisher.",
+    "Dotfiles Git Repos": "Dotfiles-Git-Repos",
+    "Runs 'git pull' on detected config repos with a remote configured.":
+        "Führt „git pull“ für erkannte Konfigurations-Repos mit eingerichtetem Remote aus.",
+    "Nix / home-manager": "Nix / home-manager",
+    "Updates Nix packages (nix-env) or applies your home-manager configuration.":
+        "Aktualisiert Nix-Pakete (nix-env) oder wendet deine home-manager-Konfiguration an.",
 }
 
 

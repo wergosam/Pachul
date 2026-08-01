@@ -17,9 +17,10 @@ from backend import (
     get_packages, get_package_info, get_package_files,
     check_updates, search_packages_cmd, run_command,
     invalidate_cache, invalidate_syncdb_cache, get_explicit_packages,
-    get_ignored_packages, set_package_ignored, get_setting,
+    get_ignored_packages, set_package_ignored, set_packages_ignored, get_setting, save_settings,
     build_snapshot_cmd, flatpak_available, snap_available,
     is_pachul_installed, build_install_command,
+    get_enabled_auto_update_commands, check_aur_ahead_of_repo,
 )
 from models import (
     PackageItem, NavRow, REPO_BADGE_CLASS, pkg_icon, make_package_listview,
@@ -66,6 +67,8 @@ from dialogs import (
     show_downgrade_dialog,
     show_pkgbuild_dialog,
     show_pacdiff_dialog,
+    show_tool_updates_dialog,
+    show_ignored_packages_dialog,
     show_preferences,
     show_news_dialog,
     show_shortcuts_dialog,
@@ -93,15 +96,15 @@ class DetailPanel:
     # Fields rendered as expandable clickable-chip flows rather than plain rows
     DEP_KEYS = ("Depends On", "Optional Deps", "Required By")
 
-    def __init__(self, action_btn, on_install, on_remove, on_reinstall, on_downgrade):
+    def __init__(self, action_btn, on_install, on_remove, on_reinstall, on_downgrade, on_hold=None):
         self.dep_callback = None   # set by the window: takes a dependency name
         self.info_rows = {}        # key -> ActionRow / ExpanderRow
         self.dep_rows = {}         # key -> (ExpanderRow, FlowBox)
         self._files_query = ""     # current Files-tab filter text (lowercased)
         self._files_loading = False
-        self._build(action_btn, on_install, on_remove, on_reinstall, on_downgrade)
+        self._build(action_btn, on_install, on_remove, on_reinstall, on_downgrade, on_hold)
 
-    def _build(self, action_btn, on_install, on_remove, on_reinstall, on_downgrade):
+    def _build(self, action_btn, on_install, on_remove, on_reinstall, on_downgrade, on_hold=None):
         self.stack = Gtk.Stack()
         self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         self.stack.set_transition_duration(120)
@@ -156,6 +159,16 @@ class DetailPanel:
         detail_box.set_margin_top(16);   detail_box.set_margin_bottom(24)
         detail_box.set_margin_start(20); detail_box.set_margin_end(20)
 
+        # Banner shown when this (repo-tracked) package also exists on the
+        # true AUR at a newer version than what's installed — the
+        # "arch-update" case: a repo mirror (e.g. chaotic-aur) can lag
+        # behind the AUR's own rebuild cadence, which pacman/checkupdates
+        # alone have no way to notice. Hidden until check_aur_ahead_of_repo
+        # actually finds something.
+        self.aur_ahead_banner = Adw.Banner()
+        self.aur_ahead_banner.set_revealed(False)
+        detail_box.append(self.aur_ahead_banner)
+
         # Hero
         hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         hero.add_css_class("pkg-hero")
@@ -197,27 +210,47 @@ class DetailPanel:
         meta_row.append(self.arch_badge)
         hero.append(meta_row)
 
-        hero_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        # FlowBox instead of a fixed horizontal Box: with 5 buttons and no
+        # icons, a plain Box could force horizontal scrolling in a narrow
+        # window. FlowBox wraps the overflow onto a new line automatically,
+        # at whatever width the window actually has, instead of us having
+        # to guess a fixed breakpoint.
+        hero_actions = Gtk.FlowBox()
+        hero_actions.set_selection_mode(Gtk.SelectionMode.NONE)
+        hero_actions.set_max_children_per_line(5)
+        hero_actions.set_min_children_per_line(1)
+        hero_actions.set_row_spacing(6)
+        hero_actions.set_column_spacing(6)
+        hero_actions.set_homogeneous(False)
+        hero_actions.set_halign(Gtk.Align.START)
         self.btn_install = action_btn(
-            "package-x-generic-symbolic", tr("Install"),
+            None, tr("Install"),
             "suggested-action", "install-btn", callback=on_install)
         self.btn_install.set_sensitive(False)
         self.btn_remove = action_btn(
-            "user-trash-symbolic", tr("Uninstall"),
+            None, tr("Uninstall"),
             "destructive-action", "remove-btn", callback=on_remove)
         self.btn_remove.set_sensitive(False)
         self.btn_reinstall = action_btn(
-            "view-refresh-symbolic", tr("Reinstall"), callback=on_reinstall)
+            None, tr("Reinstall"), callback=on_reinstall)
         self.btn_reinstall.set_sensitive(False)
         self.btn_reinstall.add_css_class("flat")
         self.btn_downgrade = action_btn(
-            "go-down-symbolic", tr("Downgrade"), callback=on_downgrade)
+            None, tr("Downgrade"), callback=on_downgrade)
         self.btn_downgrade.set_sensitive(False)
         self.btn_downgrade.add_css_class("flat")
-        hero_actions.append(self.btn_install)
-        hero_actions.append(self.btn_remove)
-        hero_actions.append(self.btn_reinstall)
-        hero_actions.append(self.btn_downgrade)
+        self.btn_hold = action_btn(
+            None, tr("Ignore Updates"),
+            callback=on_hold)
+        self.btn_hold.set_sensitive(False)
+        self.btn_hold.add_css_class("flat")
+        for btn in (self.btn_install, self.btn_remove, self.btn_reinstall,
+                    self.btn_downgrade, self.btn_hold):
+            flow_child = Gtk.FlowBoxChild()
+            flow_child.set_focusable(False)
+            flow_child.add_css_class("hero-action-cell")
+            flow_child.set_child(btn)
+            hero_actions.append(flow_child)
         hero.append(hero_actions)
         detail_box.append(hero)
 
@@ -509,6 +542,8 @@ class pachulWindow(Adw.ApplicationWindow):
         menu.append(tr("Find Orphans"),         "app.orphans")
         menu.append(tr("Find Package by File…"), "app.file_search")
         menu.append(tr("Config Files (.pacnew)…"), "app.pacdiff")
+        menu.append(tr("More Update Sources…"),  "app.tool_updates")
+        menu.append(tr("Ignored Packages…"),    "app.ignored")
         menu.append(tr("Package History…"),     "app.history")
         menu.append(tr("System Info"),          "app.sysinfo")
         menu.append(tr("Cache Cleaner"),        "app.cache")
@@ -808,6 +843,12 @@ class pachulWindow(Adw.ApplicationWindow):
         self.btn_remove.set_sensitive(False)
         end_box.append(self.btn_remove)
 
+        self.btn_hold = self._action_btn(
+            None, tr("Ignore Updates"), callback=self._on_batch_hold)
+        self.btn_hold.set_sensitive(False)
+        self.btn_hold.add_css_class("flat")
+        end_box.append(self.btn_hold)
+
         self.btn_upgrade_all = self._action_btn(
             None, tr("Upgrade All"),
             "suggested-action", callback=self._on_upgrade)
@@ -857,8 +898,12 @@ class pachulWindow(Adw.ApplicationWindow):
     def _build_detail_panel(self):
         self.detail_panel = DetailPanel(
             self._action_btn, self._on_install, self._on_remove,
-            self._on_reinstall, self._on_downgrade)
+            self._on_reinstall, self._on_downgrade, on_hold=self._on_toggle_hold)
         self.detail_panel.dep_callback = self._lookup_dep_in_list
+        self.detail_panel.aur_ahead_banner.connect(
+            "button-clicked", self._on_aur_ahead_install_clicked)
+        self._aur_ahead_pkg_name = None
+        self._aur_ahead_token = 0
         return self.detail_panel.stack
 
     # ── Data loading ──────────────────────────────────────────────────────────
@@ -1166,6 +1211,7 @@ class pachulWindow(Adw.ApplicationWindow):
         show_batch_buttons = has_selection or not is_updates
         self.btn_install.set_visible(show_batch_buttons)
         self.btn_remove.set_visible(show_batch_buttons)
+        self.btn_hold.set_visible(has_selection)
         self.btn_upgrade_all.set_visible(is_updates and not has_selection)
         self.btn_check_updates.set_visible(is_updates and not has_selection)
         if is_updates and not has_selection:
@@ -1190,6 +1236,17 @@ class pachulWindow(Adw.ApplicationWindow):
         self.detail_panel.btn_remove.set_sensitive(installed)
         self.detail_panel.btn_reinstall.set_sensitive(installed)
         self.detail_panel.btn_downgrade.set_sensitive(installed)
+        # Hold/ignore (IgnorePkg) only makes sense for pacman/AUR packages —
+        # Flatpak/Snap have their own update mechanisms outside pacman.conf.
+        if pkg.pkg_repo in ("flatpak", "snap"):
+            self.detail_panel.btn_hold.set_sensitive(False)
+            self._set_btn_label(self.detail_panel.btn_hold, tr("Ignore Updates"))
+        else:
+            held = pkg.pkg_name in get_ignored_packages()
+            self._set_btn_label(
+                self.detail_panel.btn_hold,
+                tr("Unignore") if held else tr("Ignore Updates"))
+            self.detail_panel.btn_hold.set_sensitive(True)
         # A row click always opens that package's detail view — even with
         # a checkbox selection active elsewhere, so a person can still peek
         # at a package before deciding whether to check it too. But the
@@ -1201,6 +1258,60 @@ class pachulWindow(Adw.ApplicationWindow):
             self.btn_install.set_sensitive(can_install)
             self.btn_remove.set_sensitive(installed)
         self._show_detail(self.detail_panel, pkg)
+        self._check_aur_ahead(pkg)
+
+    def _check_aur_ahead(self, pkg):
+        """Kick off a background check of whether this (plain-repo)
+        package also exists on the true AUR at a newer version — the
+        "arch-update" case. Only meaningful for pacman-tracked packages
+        that are actually installed; foreign/AUR-only packages already go
+        through the AUR helper directly, and Flatpak/Snap aren't relevant
+        here at all."""
+        self.detail_panel.aur_ahead_banner.set_revealed(False)
+        self._aur_ahead_token += 1
+        token = self._aur_ahead_token
+        if (pkg.pkg_repo in ("flatpak", "snap") or pkg.pkg_foreign
+                or pkg.pkg_status not in ("installed", "update") or not pkg.pkg_version):
+            return
+        name, version = pkg.pkg_name, pkg.pkg_version
+
+        def worker():
+            newer = check_aur_ahead_of_repo(name, version)
+            GLib.idle_add(self._on_aur_ahead_result, name, newer, token)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_aur_ahead_result(self, name, newer_version, token):
+        # Stale result from a package the person has since clicked away
+        # from (or a newer check for the same package already superseded
+        # this one) — drop it silently.
+        if token != self._aur_ahead_token or not self._selected_pkg \
+                or self._selected_pkg.pkg_name != name:
+            return False
+        if newer_version:
+            self._aur_ahead_pkg_name = name
+            banner = self.detail_panel.aur_ahead_banner
+            banner.set_title(tr("Newer version {v} available on the AUR")
+                             .format(v=newer_version))
+            banner.set_button_label(tr("Install from AUR"))
+            banner.set_revealed(True)
+        return False
+
+    def _on_aur_ahead_install_clicked(self, *_):
+        name = self._aur_ahead_pkg_name
+        if not name:
+            return
+        helper = self._get_aur_helper()
+        if not helper:
+            self._toast(tr("No AUR helper found"))
+            return
+        self.detail_panel.aur_ahead_banner.set_revealed(False)
+        # No --noconfirm: see _install_cmd_for — the repo-vs-AUR prompt
+        # this deliberately triggers (the person is explicitly choosing
+        # the AUR build over the repo's own version) needs real input.
+        self._run_terminal(f"{helper} -S {shlex.quote(name)}",
+                           tr("Install {n} from AUR").format(n=name),
+                           on_success=self._refresh_selected_pkg)
 
     def _set_status_pill(self, panel, status, foreign):
         for cls in ("status-installed", "status-available", "status-update", "status-foreign"):
@@ -1508,9 +1619,14 @@ class pachulWindow(Adw.ApplicationWindow):
         # (flatpak_enabled/snap_enabled), matching how the rest of the app
         # treats these two optional sources.
         if get_setting("flatpak_enabled") and flatpak_available():
-            cmd = f"{cmd} && flatpak update -y"
+            cmd = f"{cmd} && flatpak install -y"
         if get_setting("snap_enabled") and snap_available():
             cmd = f"{cmd} && sudo -S snap refresh"
+        # Extra sources opted into via "More Update Sources" (rustup, npm,
+        # pipx, …) — each gets its own header line in the terminal output,
+        # same convention as show_tool_updates_dialog's own "Update Selected".
+        for name, extra_cmd in get_enabled_auto_update_commands():
+            cmd = f'{cmd} && echo; echo "=== {name} ==="; echo; {extra_cmd}'
         self._run_terminal(cmd, tr("System Upgrade"), on_success=_after)
 
     def _on_clean_cache(self, *_):
@@ -1577,6 +1693,12 @@ class pachulWindow(Adw.ApplicationWindow):
     def _on_show_pacdiff(self, *_):
         show_pacdiff_dialog(self, self._run_terminal)
 
+    def _on_show_tool_updates(self, *_):
+        show_tool_updates_dialog(self, self._run_terminal)
+
+    def _on_show_ignored(self, *_):
+        show_ignored_packages_dialog(self, self._run_terminal)
+
     def _on_view_pkgbuild(self, *_):
         pkg = self._selected_pkg
         if not pkg:
@@ -1610,7 +1732,19 @@ class pachulWindow(Adw.ApplicationWindow):
         show_hold_dialog(self, pkg.pkg_name, currently, _do_toggle)
 
     def _on_preferences(self, *_):
-        show_preferences(self, self._on_settings_changed, app_dir=APP_DIR)
+        show_preferences(self, self._on_settings_changed, app_dir=APP_DIR,
+                          run_terminal_fn=self._run_terminal_reset_aur_helper)
+
+    def _run_terminal_reset_aur_helper(self, cmd, title):
+        # After installing an AUR helper (e.g. paru) from Preferences, drop
+        # both cached lookups (window's own, and backend's — used by
+        # check_updates() and friends) so the very next AUR action picks
+        # it up instead of still reporting "no helper" for the rest of
+        # this session.
+        def _after():
+            self._aur_helper_cache = None
+            save_settings({})   # side effect: also resets backend's own cache
+        self._run_terminal(cmd, title, on_success=_after)
 
     def _on_settings_changed(self):
         new_lang = get_language()
@@ -1808,34 +1942,51 @@ class pachulWindow(Adw.ApplicationWindow):
             else:
                 self._set_btn_label(self.btn_install, tr("Install"))
                 self._set_btn_label(self.btn_remove, tr("Uninstall"))
+                self._set_btn_label(self.btn_hold, tr("Ignore Updates"))
                 self.btn_install.set_sensitive(False)
                 self.btn_remove.set_sensitive(False)
+                self.btn_hold.set_sensitive(False)
                 self.detail_panel.stack.set_visible_child_name("empty")
             self._update_action_bar_mode()
             return
 
         seen = set()
-        to_install, to_remove = [], []
+        to_install, to_remove, to_hold = [], [], []
         selected_names = []
         for item in self._iter_known_packages():
             if item.pkg_name in state.selected and item.pkg_name not in seen:
                 seen.add(item.pkg_name)
                 selected_names.append(item.pkg_name)
+                # An "update" package is both installed (can be removed) and
+                # upgradable (can be installed/updated) — it used to only
+                # land in to_remove, which meant selecting update-available
+                # packages showed no way to actually install/update them,
+                # only "Remove". Mirrors the single-package logic in
+                # _on_pkg_activated: can_install = status != "installed",
+                # installed = status in ("installed", "update").
+                if item.pkg_status != "installed":
+                    to_install.append(item)
                 if item.pkg_status in ("installed", "update"):
                     to_remove.append(item)
-                else:
-                    to_install.append(item)
+                    # Hold/ignore (IgnorePkg) only applies to pacman/AUR —
+                    # Flatpak/Snap have their own update mechanisms.
+                    if item.pkg_repo not in ("flatpak", "snap"):
+                        to_hold.append(item)
         self._batch_install_items = to_install
         self._batch_remove_items = to_remove
+        self._batch_hold_items = to_hold
         count_text = tr("{n} selected").format(n=n)
         install_label = tr("Install ({n})").format(n=len(to_install))
         remove_label = tr("Remove ({n})").format(n=len(to_remove))
+        hold_label = tr("Ignore ({n})").format(n=len(to_hold))
 
         self.pkg_count_label.set_label(count_text)
         self._set_btn_label(self.btn_install, install_label)
         self._set_btn_label(self.btn_remove, remove_label)
+        self._set_btn_label(self.btn_hold, hold_label)
         self.btn_install.set_sensitive(len(to_install) > 0)
         self.btn_remove.set_sensitive(len(to_remove) > 0)
+        self.btn_hold.set_sensitive(len(to_hold) > 0)
 
         # Show selected packages in the detail panel
         self.detail_panel.show_batch(selected_names)
@@ -1876,14 +2027,8 @@ class pachulWindow(Adw.ApplicationWindow):
         self._rebind_all_rows()
 
     def _flatpak_uninstall_cmd(self, app_id):
-        """Uninstall a Flatpak ref, trying the --user scope first and
-        falling back to --system (needs sudo) if it's not found there.
-        Flatpaks are commonly installed system-wide — that's Flatpak's own
-        default scope, and what tools like Pamac or Discover typically
-        use — so a fixed --user-only uninstall would silently fail on
-        those, same root cause as the earlier Upgrade-All issue."""
         q = shlex.quote(app_id)
-        return (f"{{ flatpak uninstall -y --user {q} 2>/dev/null "
+        return (f"{{ flatpak uninstall -y {q} 2>/dev/null "
                 f"|| sudo -S flatpak uninstall -y --system {q}; }}")
 
     def _install_cmd_for(self, pkg):
@@ -1891,16 +2036,42 @@ class pachulWindow(Adw.ApplicationWindow):
         which source it came from."""
         if pkg.pkg_repo == "flatpak":
             app_id = pkg.pkg_source_id or pkg.pkg_name
-            return f"flatpak install -y --user flathub {shlex.quote(app_id)}"
+            return f"flatpak install -y {shlex.quote(app_id)}"
         if pkg.pkg_repo == "snap":
             name = pkg.pkg_source_id or pkg.pkg_name
             return f"sudo -S snap install {shlex.quote(name)}"
         name = shlex.quote(pkg.pkg_name)
+        # Only go through the AUR helper for packages that aren't known to
+        # any configured repo at all (pkg_foreign) — e.g. a package also
+        # mirrored as a binary in a repo like chaotic-aur installs via
+        # plain pacman, even if a *newer* version might exist on the true
+        # AUR; only genuinely AUR-only packages need the helper's build
+        # step. (Trade-off: for a package straddling both — in a repo AND
+        # ahead on the true AUR — this means the repo's own version is
+        # what gets installed, not the newer AUR one; that ambiguity is
+        # exactly what needed the helper, but --noconfirm made the helper
+        # resolve it unreliably, so plain pacman for repo packages is the
+        # safer default here.)
         if pkg.pkg_foreign:
             helper = self._get_aur_helper()
-            return f"{helper} -S --noconfirm {name}" if helper \
-                   else f"sudo -S pacman -S --noconfirm {name}"
-        return f"sudo -S pacman -S --noconfirm {name}"
+            if helper:
+                # No --noconfirm here: yay/paru's repo-vs-AUR disambiguation
+                # prompt (shown for a package known both to a repo and the
+                # true AUR) doesn't resolve reliably under --noconfirm —
+                # confirmed by testing both helpers. Pachul's terminal
+                # dialog is already interactive (e.g. sudo password entry),
+                # so the person answers the [Y/n] / numbered-choice prompt
+                # directly there instead.
+                return f"{helper} -S --noconfirm {name}"
+        # -Sy (not plain -S): checkupdates always syncs its own fresh copy
+        # of the repo databases, so it can correctly flag a pending update
+        # (e.g. from a repo like chaotic-aur) that the *local* sync db
+        # hasn't caught up with yet — a plain "pacman -S" only consults
+        # that local db and would just report "already up to date" without
+        # ever seeing the new version, leaving the package stuck showing
+        # as an update forever. Refreshing first (-y) here is standard
+        # practice for updating a single package outside a full -Syu.
+        return f"sudo -S pacman -Sy --noconfirm {name}"
 
     def _remove_cmd_for(self, pkg):
         """Build the right remove command for a single package, based on
@@ -1925,19 +2096,30 @@ class pachulWindow(Adw.ApplicationWindow):
         if pac_items:
             helper = self._get_aur_helper()
             names = [i.pkg_name for i in pac_items]
-            if not helper:
-                foreign = [n for n in names if self._pkg_is_foreign(n)]
-                if foreign:
-                    names = [n for n in names if n not in foreign]
+            # Same split as _install_cmd_for: only genuinely AUR-only
+            # packages go through the helper — anything known to a
+            # configured repo (chaotic-aur included) installs via plain
+            # pacman, even if a newer version might exist on the true AUR.
+            foreign_names = [n for n in names if self._pkg_is_foreign(n)]
+            repo_names = [n for n in names if n not in foreign_names]
+            if foreign_names:
+                if helper:
+                    quoted = " ".join(shlex.quote(n) for n in foreign_names)
+                    # No --noconfirm: see _install_cmd_for.
+                    cmds.append(f"{helper} -S --noconfirm {quoted}")
+                else:
                     self._toast(tr("No AUR helper found — skipped {n} AUR package(s).")
-                               .format(n=len(foreign)))
-            if names:
-                quoted = " ".join(shlex.quote(n) for n in names)
-                cmds.append(f"{helper} -S --noconfirm {quoted}" if helper
-                            else f"sudo -S pacman -S --noconfirm {quoted}")
+                               .format(n=len(foreign_names)))
+            if repo_names:
+                quoted = " ".join(shlex.quote(n) for n in repo_names)
+                # -Sy for the same reason as _install_cmd_for: a plain -S
+                # only consults the last-synced local db and can miss a
+                # pending update that checkupdates (always fresh) already
+                # sees, leaving the package stuck reporting as an update.
+                cmds.append(f"sudo -S pacman -Sy --noconfirm {quoted}")
         if fp_items:
             ids = " ".join(shlex.quote(i.pkg_source_id or i.pkg_name) for i in fp_items)
-            cmds.append(f"flatpak install -y --user flathub {ids}")
+            cmds.append(f"flatpak update -y {ids}")
         if sn_items:
             names = " ".join(shlex.quote(i.pkg_source_id or i.pkg_name) for i in sn_items)
             cmds.append(f"sudo -S snap install {names}")
@@ -1945,8 +2127,48 @@ class pachulWindow(Adw.ApplicationWindow):
         if not cmds:
             return
         cmd = " && ".join(cmds)
+        match_keys = {i.pkg_source_id or i.pkg_name for i in items}
+
+        def _after():
+            self._exit_selection_mode()
+            self._prune_updates(match_keys)
+
         self._run_terminal(cmd, tr("Install {n} packages").format(n=len(items)),
-                           on_success=self._exit_selection_mode)
+                           on_success=_after)
+
+    def _on_batch_hold(self):
+        items = list(getattr(self, "_batch_hold_items", []))
+        if not items:
+            return
+        names = [i.pkg_name for i in items]
+        already_held = get_ignored_packages()
+        to_add = [n for n in names if n not in already_held]
+        if not to_add:
+            self._toast(tr("All selected packages are already ignored"))
+            return
+
+        def do_hold():
+            tmp = set_packages_ignored(to_add, True)
+            if not tmp:
+                return
+            self._run_terminal(
+                f"sudo -S install -m644 {shlex.quote(tmp)} /etc/pacman.conf",
+                tr("Ignore {n} packages").format(n=len(to_add)),
+                on_success=self._exit_selection_mode)
+
+        d = Adw.AlertDialog()
+        d.set_heading(tr("Ignore {n} packages?").format(n=len(to_add)))
+        d.set_body(tr(
+            "Adds {n} package(s) to IgnorePkg in /etc/pacman.conf. They'll be "
+            "skipped by system upgrades until you unignore them individually."
+        ).format(n=len(to_add)))
+        d.add_response("cancel", tr("Cancel"))
+        d.add_response("ignore", tr("Ignore Updates"))
+        d.set_response_appearance("ignore", Adw.ResponseAppearance.SUGGESTED)
+        d.set_default_response("cancel")
+        d.set_close_response("cancel")
+        d.connect("response", lambda _d, r: do_hold() if r == "ignore" else None)
+        d.present(self)
 
     def _on_batch_remove(self):
         items = list(getattr(self, "_batch_remove_items", []))
@@ -2038,6 +2260,31 @@ class pachulWindow(Adw.ApplicationWindow):
         self._run_terminal(cmd, tr("Reinstall {name}").format(name=pkg.pkg_name),
                            on_success=self._refresh_selected_pkg)
 
+    def _prune_updates(self, match_keys):
+        """Optimistically drop package(s) that were just installed/updated
+        from the pending-updates list right away, instead of waiting for
+        the slower authoritative background re-check (checkupdates/AUR
+        -Qua can take up to a minute or more) — so the Updates list and
+        its count reflect reality immediately rather than looking stale
+        until that background check eventually completes. The background
+        check still runs afterward and corrects anything this missed.
+        `match_keys` are source_id (Flatpak/Snap) or plain package names,
+        the same key check_updates() and _reapply_update_markers() use."""
+        match_keys = set(match_keys)
+        if not match_keys or not self._updates:
+            return
+        if not any(u["name"] in match_keys for u in self._updates):
+            return
+        self._updates = [u for u in self._updates if u["name"] not in match_keys]
+        n = len(self._updates)
+        self.stat_updates._num.set_label(str(n))
+        self._nav_rows["updates"].set_count(n)
+        for p in self._all_packages:
+            if (p.get("source_id") or p["name"]) in match_keys:
+                p["status"] = "installed"
+                p.pop("new_version", None)
+        self._apply_filter()
+
     def _refresh_selected_pkg(self):
         if not self._selected_pkg:
             return
@@ -2069,19 +2316,8 @@ class pachulWindow(Adw.ApplicationWindow):
         # Flatpak/Snap entries key off pkg_source_id (their app-id/package
         # name), which is what check_updates() actually reports for them —
         # pkg_name there is only the friendly display name.
-        match_key = pkg.pkg_source_id or pkg.pkg_name
-        if installed and self._updates and any(
-                u["name"] == match_key for u in self._updates):
-            self._updates = [u for u in self._updates
-                             if u["name"] != match_key]
-            n = len(self._updates)
-            self.stat_updates._num.set_label(str(n))
-            self._nav_rows["updates"].set_count(n)
-            for p in self._all_packages:
-                if (p.get("source_id") or p["name"]) == match_key:
-                    p["status"] = "installed"
-                    p.pop("new_version", None)
-            self._apply_filter()
+        if installed:
+            self._prune_updates({pkg.pkg_source_id or pkg.pkg_name})
         if installed:
             def worker():
                 if pkg.pkg_repo in ("flatpak", "snap"):
@@ -2113,7 +2349,7 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _get_aur_helper(self):
         if self._aur_helper_cache is None:
-            for h in ("paru", "yay", "pikaur", "trizen"):
+            for h in ("yay", "paru", "pikaur", "trizen"):
                 _, c = run_command(f"which {h} 2>/dev/null")
                 if c == 0:
                     self._aur_helper_cache = h
