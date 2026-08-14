@@ -27,6 +27,9 @@ import concurrent.futures
 from pathlib import Path
 from gi.repository import GLib
 
+import distro
+import pkgmanager
+
 
 # ─── Cache paths ──────────────────────────────────────────────────────────────
 
@@ -153,14 +156,19 @@ def run_command_stream(cmd, on_line, on_done, timeout=180):
 
 
 def _is_demo():
-    _, code = run_command("which pacman 2>/dev/null")
-    return code != 0
+    """Demo mode kicks in only when no supported package manager
+    (pacman/apt/dnf/zypper) can be found at all."""
+    return distro.get_family() is None
 
 
 _aur_helper_cache = "__unset__"
 
 def _find_aur_helper():
-    """Return the AUR helper to use, honouring the user's preference. Cached."""
+    """Return the AUR helper to use, honouring the user's preference. Cached.
+    The AUR only exists on Arch — on Debian/Fedora/openSUSE this always
+    returns None immediately, without even trying the `which` lookups."""
+    if not distro.is_arch():
+        return None
     pref = get_setting("aur_helper")
     if pref == "none":
         return None
@@ -200,6 +208,8 @@ def get_aur_rpc_version(pkg_name):
     Best-effort only: returns None on any failure (offline, package not on
     the AUR, API hiccup, …) rather than raising — this is a supplementary
     check and must never disrupt anything else if it doesn't work."""
+    if not distro.is_arch():
+        return None
     import urllib.request
     import urllib.parse
     try:
@@ -414,19 +424,23 @@ POPULAR_AUR_PACKAGES = [
 # ─── Installed-package fingerprint ────────────────────────────────────────────
 
 def _installed_fingerprint():
-    """Fast fingerprint of installed packages using local DB mtime + count."""
-    local_db = Path("/var/lib/pacman/local")
-    out, code = run_command("pacman -Q 2>/dev/null")
-    if code != 0:
-        return None
-    # Combine package count + local db mtime for a fast, reliable fingerprint
-    try:
-        mtime = str(int(local_db.stat().st_mtime))
-    except Exception:
-        mtime = "0"
-    pkg_count = str(out.count("\n"))
-    fingerprint = hashlib.md5(f"{mtime}:{pkg_count}".encode()).hexdigest()
-    return fingerprint, out
+    """Fast fingerprint of installed packages, used to decide whether the
+    cached package list needs rebuilding."""
+    if distro.is_arch():
+        local_db = Path("/var/lib/pacman/local")
+        out, code = run_command("pacman -Q 2>/dev/null")
+        if code != 0:
+            return None
+        # Combine package count + local db mtime for a fast, reliable fingerprint
+        try:
+            mtime = str(int(local_db.stat().st_mtime))
+        except Exception:
+            mtime = "0"
+        pkg_count = str(out.count("\n"))
+        fingerprint = hashlib.md5(f"{mtime}:{pkg_count}".encode()).hexdigest()
+        return fingerprint, out
+
+    return pkgmanager.get_installed_fingerprint()
 
 
 # ─── Sync-DB cache (pacman -Sl) ───────────────────────────────────────────────
@@ -475,7 +489,16 @@ def _parse_db_file(db_path):
 
 
 def _build_syncdb(installed_set):
-    """Build sync DB from local pacman .db files (fast, no subprocess needed)."""
+    """Build the 'available packages' index — from local pacman .db files
+    on Arch (fast, no subprocess needed), or via the matching native tool
+    (apt/dnf/zypper) on other distros. Either way the result is cached
+    with the same TTL, since apt/dnf/zypper are noticeably slower here
+    than pacman's offline tarball parsing."""
+    if not distro.is_arch():
+        pkgs = pkgmanager.build_available_packages()
+        _write_json(SYNCDB_CACHE, pkgs)
+        return pkgs
+
     from concurrent.futures import ThreadPoolExecutor
     sync_dir = Path("/var/lib/pacman/sync")
     pkgs = {}
@@ -511,7 +534,7 @@ def _merge_into_list(installed_pkgs, syncdb, aur_set):
     for pkgname, info in syncdb.items():
         desc = info.get("description", "")
         if pkgname in all_pkgs:
-            if not all_pkgs[pkgname]["foreign"]:
+            if info["repo"] and not all_pkgs[pkgname]["foreign"]:
                 all_pkgs[pkgname]["repo"] = info["repo"]
             # Always fill description from syncdb if missing
             if not all_pkgs[pkgname].get("description"):
@@ -526,15 +549,17 @@ def _merge_into_list(installed_pkgs, syncdb, aur_set):
                 "foreign": False,
             }
 
-    # Popular AUR packages are injected only for discoverability. Their real
-    # version is unknown without querying the AUR, so leave it blank rather than
-    # show the hardcoded (and quickly stale) value from POPULAR_AUR_PACKAGES.
-    for name, _version, desc in POPULAR_AUR_PACKAGES:
-        if name not in all_pkgs:
-            all_pkgs[name] = {
-                "name": name, "version": "", "repo": "aur",
-                "status": "available", "description": desc, "foreign": True,
-            }
+    # Popular AUR packages are injected only for discoverability, and only
+    # on Arch — the AUR doesn't exist on Debian/Fedora/openSUSE. Their real
+    # version is unknown without querying the AUR, so leave it blank rather
+    # than show the hardcoded (and quickly stale) value from POPULAR_AUR_PACKAGES.
+    if distro.is_arch():
+        for name, _version, desc in POPULAR_AUR_PACKAGES:
+            if name not in all_pkgs:
+                all_pkgs[name] = {
+                    "name": name, "version": "", "repo": "aur",
+                    "status": "available", "description": desc, "foreign": True,
+                }
 
     return list(all_pkgs.values())
 
@@ -577,13 +602,25 @@ def get_packages():
                     "description": "", "foreign": False,
                 }
 
-        # Step 2 — mark AUR/foreign
-        foreign_out, _ = run_command("pacman -Qm 2>/dev/null")
-        for line in (foreign_out or "").splitlines():
-            parts = line.strip().split(None, 1)
-            if parts and parts[0] in installed_pkgs:
-                installed_pkgs[parts[0]]["foreign"] = True
-                installed_pkgs[parts[0]]["repo"] = "aur"
+        # Step 2 — mark AUR/foreign (Arch/AUR-only concept; nothing to do
+        # on Debian/Fedora/openSUSE, where every installed package always
+        # comes from a configured repo)
+        if distro.is_arch():
+            foreign_out, _ = run_command("pacman -Qm 2>/dev/null")
+            for line in (foreign_out or "").splitlines():
+                parts = line.strip().split(None, 1)
+                if parts and parts[0] in installed_pkgs:
+                    installed_pkgs[parts[0]]["foreign"] = True
+                    installed_pkgs[parts[0]]["repo"] = "aur"
+        elif distro.is_debian():
+            # Real repo/origin per installed package (e.g. "Ubuntu" vs a
+            # PPA's label), so the sidebar's repo categories aren't empty
+            # for installed packages the way they'd be if "local" (the
+            # placeholder set above) were left as-is. Purely additive —
+            # packages with no resolvable origin just keep "local".
+            for pkgname, origin in pkgmanager.installed_repos().items():
+                if pkgname in installed_pkgs:
+                    installed_pkgs[pkgname]["repo"] = origin.lower()
 
         # Step 3 — sync DB (use cache if fresh, else rebuild)
         syncdb = _load_syncdb_cache()
@@ -611,6 +648,10 @@ def invalidate_cache():
         PKG_CACHE.unlink(missing_ok=True)
     except Exception:
         pass
+    if pkgmanager.native.apt_available():
+        pkgmanager.native.invalidate_apt_cache()
+    if pkgmanager.native.dnf5_available():
+        pkgmanager.native.invalidate_dnf5_base()
 
 
 def invalidate_syncdb_cache():
@@ -619,11 +660,32 @@ def invalidate_syncdb_cache():
         SYNCDB_CACHE.unlink(missing_ok=True)
     except Exception:
         pass
+    if pkgmanager.native.apt_available():
+        pkgmanager.native.invalidate_apt_cache()
+    if pkgmanager.native.dnf5_available():
+        pkgmanager.native.invalidate_dnf5_base()
 
 
 # ─── Package info / files ─────────────────────────────────────────────────────
 
 def get_package_info(pkg_name):
+    if not distro.is_arch():
+        text = pkgmanager.get_package_info_text(pkg_name)
+        if text:
+            return text
+        if _is_demo():
+            return (f"Name           : {pkg_name}\nVersion        : 1.0.0-1\n"
+                    f"Description    : Demo package (no supported package manager found)\n"
+                    f"Architecture   : x86_64\nURL            : https://example.com/{pkg_name}\n"
+                    f"Licenses       : GPL\nGroups         : None\nProvides       : None\n"
+                    f"Depends On     : glibc\nOptional Deps  : None\nConflicts With : None\n"
+                    f"Replaces       : None\nInstalled Size : 1.20 MiB\nPackager       : None\n"
+                    f"Build Date     : Thu 01 Jan 2026\nInstall Date   : Thu 01 Jan 2026\n"
+                    f"Install Reason : Explicitly installed\n")
+        return (f"Name           : {pkg_name}\n"
+                f"Description    : No detailed information available — this package "
+                f"is not installed and was not found in the configured repositories.\n")
+
     q = shlex.quote(pkg_name)
     out, code = run_command(f"pacman -Qi {q} 2>/dev/null")
     if out and code == 0:
@@ -657,6 +719,11 @@ def get_package_info(pkg_name):
 
 
 def get_package_files(pkg_name):
+    if not distro.is_arch():
+        files = pkgmanager.get_package_files(pkg_name)
+        if files:
+            return files
+        return [f"{pkg_name} /usr/bin/{pkg_name}", f"{pkg_name} /usr/share/man/man1/{pkg_name}.1"]
     out, code = run_command(f"pacman -Ql {shlex.quote(pkg_name)} 2>/dev/null")
     if out and code == 0:
         return out.splitlines()
@@ -667,6 +734,8 @@ def get_package_files(pkg_name):
 
 def files_db_available():
     """Whether a synced pacman files database exists for `pacman -F` to use."""
+    if not distro.is_arch():
+        return pkgmanager.files_db_available()
     out, code = run_command("ls /var/lib/pacman/sync/*.files 2>/dev/null | head -1")
     return bool(out.strip()) and code == 0
 
@@ -681,6 +750,16 @@ def search_file_owner(query):
     query = query.strip()
     if not query:
         return []
+    if not distro.is_arch():
+        results = pkgmanager.search_file_owner(query)
+        if not results and _is_demo():
+            needle = query.strip("/").lower()
+            lib_name = needle if needle.startswith("lib") else (f"lib{needle}" if needle else "libssl.so.3")
+            results = [
+                {"pkg": "openssl", "version": "3.3.1-1", "files": [f"usr/lib/{lib_name}"]},
+                {"pkg": "systemd", "version": "256.4-1", "files": [f"usr/lib/systemd/{needle or 'systemd'}"]},
+            ]
+        return results
     out, code = run_command(f"pacman -Fx {shlex.quote(query)} 2>/dev/null", timeout=30)
     results = []
     if out and code == 0:
@@ -716,6 +795,8 @@ def check_updates():
     could take several minutes in the worst case; in parallel the whole
     check takes about as long as the single slowest one."""
     def _repo_check():
+        if not distro.is_arch():
+            return pkgmanager.check_updates()
         results = []
         out, code = run_command("checkupdates 2>/dev/null || pacman -Qu 2>/dev/null", timeout=60)
         if out and code == 0:
@@ -812,6 +893,15 @@ def get_snap_updates():
 
 
 def get_orphans():
+    if not distro.is_arch():
+        orphans = pkgmanager.get_orphans()
+        if not orphans and _is_demo():
+            orphans = [
+                {"name": "lib32-libpng12", "version": "1.2.56-2"},
+                {"name": "perl-encode-locale", "version": "1.05-7"},
+                {"name": "python2", "version": "2.7.18-3"},
+            ]
+        return orphans
     out, _ = run_command("pacman -Qdt 2>/dev/null")
     orphans = []
     if out:
@@ -860,7 +950,9 @@ PKG_CACHE_DIR = "/var/cache/pacman/pkg"
 
 
 def get_package_cache_size():
-    """Human-readable current size of the pacman package cache."""
+    """Human-readable current size of the system package cache."""
+    if not distro.is_arch():
+        return pkgmanager.get_package_cache_size()
     return _human_size(_dir_size(PKG_CACHE_DIR)) if os.path.isdir(PKG_CACHE_DIR) else "N/A"
 
 
@@ -998,12 +1090,19 @@ def get_system_info():
     info["OS"] = os_name
     info["Desktop"] = _get_desktop_info()
 
-    out, code = run_command("pacman -V 2>/dev/null")
-    m = re.search(r"Pacman v?([\w.\-]+)", out) if (out and code == 0) else None
-    info["Pacman"] = m.group(1) if m else "Unknown"
+    if distro.is_arch():
+        out, code = run_command("pacman -V 2>/dev/null")
+        m = re.search(r"Pacman v?([\w.\-]+)", out) if (out and code == 0) else None
+        info["Pacman"] = m.group(1) if m else "Unknown"
+    else:
+        pm = distro.get_package_manager()
+        out, code = run_command(f"{pm} --version 2>/dev/null", timeout=10) if pm else ("", 1)
+        first_line = out.splitlines()[0] if (out and code == 0) else "Unknown"
+        info["Package Manager"] = f"{pm} ({first_line})" if pm else "Unknown"
 
-    aur_helpers = _get_installed_aur_helpers()
-    info["AUR Helper"] = ", ".join(aur_helpers) if aur_helpers else "None installed"
+    if distro.is_arch():
+        aur_helpers = _get_installed_aur_helpers()
+        info["AUR Helper"] = ", ".join(aur_helpers) if aur_helpers else "None installed"
 
     info["Processor"] = _get_cpu_info()
 
@@ -1031,39 +1130,44 @@ def get_system_info():
     except Exception:
         info["RAM"] = "N/A"
 
-    # Installed count = subdirs of the local pacman DB (no subprocess needed)
-    try:
-        with os.scandir("/var/lib/pacman/local") as it:
-            info["Installed Packages"] = str(sum(1 for e in it if e.is_dir()))
-    except OSError:
-        out, code = run_command("pacman -Q 2>/dev/null")
+    if distro.is_arch():
+        # Installed count = subdirs of the local pacman DB (no subprocess needed)
+        try:
+            with os.scandir("/var/lib/pacman/local") as it:
+                info["Installed Packages"] = str(sum(1 for e in it if e.is_dir()))
+        except OSError:
+            out, code = run_command("pacman -Q 2>/dev/null")
+            info["Installed Packages"] = str(len(out.splitlines())) if (out and code == 0) else "N/A"
+
+        out, code = run_command("pacman -Qm 2>/dev/null")
+        foreign_count = len(out.splitlines()) if (out and code == 0) else 0
+        info["Foreign (AUR) Packages"] = str(foreign_count)
+
+        # Per-repository breakdown of installed packages. `pacman -Sl` lists
+        # every package in every enabled sync repo and marks the ones that are
+        # currently installed with "[installed" (pacman appends the installed
+        # version too if it differs) — one pass gives an installed-count per
+        # repo without needing a separate cross-reference query.
+        repo_counts = {}
+        out, code = run_command("pacman -Sl 2>/dev/null")
+        if out and code == 0:
+            for line in out.splitlines():
+                parts = line.split(None, 2)
+                if len(parts) < 3:
+                    continue
+                repo, rest = parts[0], parts[2]
+                if "[installed" in rest:
+                    repo_counts[repo] = repo_counts.get(repo, 0) + 1
+        if foreign_count:
+            repo_counts["aur / foreign"] = foreign_count
+        info["Repo Counts"] = repo_counts
+    else:
+        cmd = pkgmanager._installed_fingerprint_cmd()
+        out, code = (run_command(cmd) if cmd else ("", 1))
         info["Installed Packages"] = str(len(out.splitlines())) if (out and code == 0) else "N/A"
+        info["Repo Counts"] = {}
 
-    out, code = run_command("pacman -Qm 2>/dev/null")
-    foreign_count = len(out.splitlines()) if (out and code == 0) else 0
-    info["Foreign (AUR) Packages"] = str(foreign_count)
-
-    # Per-repository breakdown of installed packages. `pacman -Sl` lists
-    # every package in every enabled sync repo and marks the ones that are
-    # currently installed with "[installed" (pacman appends the installed
-    # version too if it differs) — one pass gives an installed-count per
-    # repo without needing a separate cross-reference query.
-    repo_counts = {}
-    out, code = run_command("pacman -Sl 2>/dev/null")
-    if out and code == 0:
-        for line in out.splitlines():
-            parts = line.split(None, 2)
-            if len(parts) < 3:
-                continue
-            repo, rest = parts[0], parts[2]
-            if "[installed" in rest:
-                repo_counts[repo] = repo_counts.get(repo, 0) + 1
-    if foreign_count:
-        repo_counts["aur / foreign"] = foreign_count
-    info["Repo Counts"] = repo_counts
-
-    cache_dir = "/var/cache/pacman/pkg"
-    info["Package Cache Size"] = _human_size(_dir_size(cache_dir)) if os.path.isdir(cache_dir) else "N/A"
+    info["Package Cache Size"] = get_package_cache_size()
 
     return info
 
@@ -1077,7 +1181,11 @@ _LOG_RE = re.compile(
 
 
 def get_pacman_history(limit=500):
-    """Parse recent ALPM transactions from /var/log/pacman.log, newest first."""
+    """Parse recent package transactions, newest first. Despite the name
+    (kept for compatibility with existing callers), this now covers
+    apt/dnf/zypper's own transaction logs too when not on Arch."""
+    if not distro.is_arch():
+        return pkgmanager.get_package_history(limit)
     try:
         lines = PACMAN_LOG.read_text(errors="replace").splitlines()
     except Exception:
@@ -1126,7 +1234,8 @@ def _translate_text(text, target_lang, source_lang="en"):
 def get_arch_news(limit=6, lang="en"):
     """Fetch recent Arch Linux news headlines. Returns a list, or None on
     failure (so callers can tell 'no news' apart from 'couldn't reach the
-    server').
+    server') — also None on non-Arch systems, since this feed is Arch-
+    specific and wouldn't be relevant there.
 
     Arch Linux only publishes this feed in English — there's no official
     translated source — so when `lang` isn't English, each headline is
@@ -1135,6 +1244,8 @@ def get_arch_news(limit=6, lang="en"):
     translation of technical wording can occasionally be imprecise and a
     caller may want to show or link back to the original.
     """
+    if not distro.is_arch():
+        return None
     import urllib.request
     import xml.etree.ElementTree as ET
     try:
@@ -1225,7 +1336,10 @@ def build_snapshot_cmd(comment="Pachul: before system upgrade"):
 # ─── Explicit-package export ──────────────────────────────────────────────────
 
 def get_explicit_packages():
-    """Names of explicitly-installed packages (pacman -Qqe), repo + AUR."""
+    """Names of explicitly-installed packages, repo + AUR (or apt/dnf/
+    zypper's equivalent "manually installed" concept elsewhere)."""
+    if not distro.is_arch():
+        return pkgmanager.get_explicit_packages()
     out, code = run_command("pacman -Qqe 2>/dev/null")
     return out.splitlines() if (out and code == 0) else []
 
@@ -1233,7 +1347,11 @@ def get_explicit_packages():
 # ─── Downgrade: cached package versions ───────────────────────────────────────
 
 def get_pkgbuild(pkg_name):
-    """Fetch the PKGBUILD text for an AUR package (helper first, then the AUR web)."""
+    """Fetch the PKGBUILD text for an AUR package (helper first, then the AUR web).
+    PKGBUILDs are an Arch/AUR-specific concept; on other distros this is
+    unreachable in practice since no package there is ever pkg_foreign."""
+    if not distro.is_arch():
+        return f"# PKGBUILDs only exist on Arch Linux (AUR) — not applicable here.\n"
     helper = _find_aur_helper()
     if helper:
         out, code = run_command(f"{helper} -Gp {shlex.quote(pkg_name)}", timeout=30)
@@ -1251,7 +1369,11 @@ def get_pkgbuild(pkg_name):
 # ─── .pacnew / .pacsave config files ──────────────────────────────────────────
 
 def get_pacnew_files():
-    """Find .pacnew/.pacsave files that need merging/reviewing."""
+    """Find config-file-conflict markers that need merging/reviewing:
+    .pacnew/.pacsave on Arch, .dpkg-dist/.dpkg-old/.ucf-dist on Debian,
+    .rpmnew/.rpmsave on Fedora/openSUSE."""
+    if not distro.is_arch():
+        return pkgmanager.get_config_conflict_files()
     out, _ = run_command(
         "find /etc /usr /boot /opt -xdev "
         "\\( -name '*.pacnew' -o -name '*.pacsave' \\) 2>/dev/null", timeout=30)
@@ -1996,7 +2118,11 @@ PACMAN_CONF = Path("/etc/pacman.conf")
 
 
 def get_ignored_packages():
-    """Set of packages currently held back via IgnorePkg in pacman.conf."""
+    """Set of packages currently held back from upgrades — via IgnorePkg
+    in pacman.conf on Arch, or the matching native hold/lock mechanism
+    on apt/openSUSE (dnf has no reliable built-in equivalent)."""
+    if not distro.is_arch():
+        return pkgmanager.get_held_packages()
     ignored = set()
     try:
         for line in PACMAN_CONF.read_text(errors="replace").splitlines():
@@ -2116,6 +2242,54 @@ def set_packages_ignored(pkg_names, ignore):
     return tmp
 
 
+def build_hold_cmd(pkg_name, hold):
+    """Ready-to-run shell command that holds/unholds a single package from
+    upgrades, regardless of distro — the terminal-dialog callers in
+    window.py just run whatever this returns, without needing to know
+    whether that means editing pacman.conf or calling apt-mark/zypper
+    directly. Returns None if holding isn't supported/needed here (e.g.
+    already in the requested state, or no equivalent exists at all — dnf
+    has no reliable built-in hold mechanism)."""
+    if not distro.is_arch():
+        return pkgmanager.hold_cmd(pkg_name, hold)
+    tmp = set_package_ignored(pkg_name, hold)
+    if tmp is None:
+        return None
+    return f"sudo -S install -m644 {shlex.quote(tmp)} /etc/pacman.conf"
+
+
+def build_hold_cmd_bulk(pkg_names, hold):
+    """Same as build_hold_cmd(), for several packages in one shot."""
+    if not distro.is_arch():
+        return pkgmanager.hold_cmd_bulk(pkg_names, hold)
+    tmp = set_packages_ignored(pkg_names, hold)
+    if tmp is None:
+        return None
+    return f"sudo -S install -m644 {shlex.quote(tmp)} /etc/pacman.conf"
+
+
+def get_downgrade_candidates(pkg_name):
+    """Older versions of pkg_name available to install instead of the
+    current one, as [{"version","source","kind"}, ...] — "kind" is "file"
+    (a real cached package file) or "repo" (the package manager can still
+    resolve that exact build itself, no local file needed). Distro-
+    agnostic wrapper: Arch uses the local pacman cache (see
+    get_cached_versions() below); everything else goes through
+    pkgmanager.get_downgrade_candidates()."""
+    if not distro.is_arch():
+        return pkgmanager.get_downgrade_candidates(pkg_name)
+    return [{"version": v, "source": fp, "kind": "file"}
+            for v, fp in get_cached_versions(pkg_name)]
+
+
+def build_downgrade_cmd(pkg_name, candidate):
+    """Ready-to-run install command for one entry from
+    get_downgrade_candidates()."""
+    if not distro.is_arch():
+        return pkgmanager.downgrade_cmd(pkg_name, candidate)
+    return f"sudo -S pacman -U --noconfirm {shlex.quote(candidate['source'])}"
+
+
 def get_cached_versions(pkg_name):
     """Return [(version, filepath), …] of cached .pkg files for pkg_name, newest first."""
     cache_dir = Path("/var/cache/pacman/pkg")
@@ -2162,6 +2336,25 @@ def search_packages_cmd(query):
 
     packages = []
     seen = set()
+
+    if not distro.is_arch():
+        cmd = pkgmanager.search_cmd(query)
+        if cmd:
+            out, code = run_command(cmd, timeout=30)
+            if out and code == 0:
+                for p in pkgmanager.parse_search(out):
+                    if p["name"] not in seen:
+                        seen.add(p["name"])
+                        packages.append(p)
+        for p in search_flatpak(query):
+            if p["name"] not in seen:
+                seen.add(p["name"])
+                packages.append(p)
+        for p in search_snap(query):
+            if p["name"] not in seen:
+                seen.add(p["name"])
+                packages.append(p)
+        return packages
 
     qq = shlex.quote(query)
     out, code = run_command(f"pacman -Ss {qq} 2>/dev/null")

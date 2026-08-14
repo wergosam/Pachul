@@ -141,7 +141,7 @@ CSS = """
     font-size: 0.78rem;
     font-weight: 800;
     letter-spacing: 0.08em;
-    color: alpha(@window_fg_color, 0.50);
+    color: alpha(@window_fg_color, 0.62);
     margin-top: 6px;
     margin-bottom: 4px;
 }
@@ -173,7 +173,7 @@ CSS = """
     font-size: 0.64rem;
     font-weight: 700;
     letter-spacing: 0.05em;
-    color: alpha(@window_fg_color, 0.48);
+    color: alpha(@window_fg_color, 0.60);
 }
 
 /* ── Count badges ── */
@@ -223,6 +223,27 @@ progressbar trough progress { border-radius: 999px; }
 }
 .search-page-entry:focus {
     outline: none;
+}
+
+/* ── Dim/secondary text app-wide: Adwaita's stock ".dim-label" dims via
+   the "opacity" property, not "color". Adding only a color-alpha on top
+   (as the previous rule did) doesn't replace that opacity — it multiplies
+   with it, which made the text end up just as light (or lighter) than
+   before. Resetting opacity to 1 here and controlling the darkness purely
+   through color-alpha fixes that, and darkens dim/secondary text
+   everywhere in the app (sidebar labels, subtitles, captions, the Help
+   and About dialogs, etc.), not just the Help window. ── */
+.dim-label {
+    opacity: 1;
+    color: alpha(@window_fg_color, 0.72);
+}
+
+/* Help dialog: function-description subtitle text — same opacity-reset
+   fix, kept a touch darker still since these are the primary readable
+   content of that dialog, not a secondary hint. */
+.help-row .subtitle {
+    opacity: 1;
+    color: alpha(@window_fg_color, 0.85);
 }
 """
 

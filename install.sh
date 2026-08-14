@@ -28,7 +28,8 @@ DESKTOP_FILE="${DESKTOP_DIR}/${ICON_ID}.desktop"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Application Python modules (relative to SRC_DIR)
-PY_MODULES=(app.py backend.py dialogs.py i18n.py models.py styles.py window.py notifier.py tray.py)
+PY_MODULES=(app.py backend.py dialogs.py distro.py i18n.py icons.py models.py
+            pkgmanager.py pkgmanager_native.py styles.py window.py notifier.py tray.py)
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 echo -e "
@@ -41,9 +42,36 @@ if [[ $EUID -ne 0 ]]; then
     exec sudo bash "$0" "$@"
 fi
 
-# ── Arch Linux check ──────────────────────────────────────────────────────────
-if ! command -v pacman &>/dev/null; then
-    die "Pachul requires Arch Linux (pacman not found)."
+# ── Distro / package-manager detection ───────────────────────────────────────
+# Pachul now also supports Debian/Ubuntu (apt), Fedora (dnf) and openSUSE
+# (zypper) — see distro.py/pkgmanager.py. This installer only needs to know
+# which package manager to use for its OWN dependency install below; it
+# mirrors distro.py's own detection logic (os-release ID/ID_LIKE, falling
+# back to whichever binary is on PATH) so both stay in sync.
+detect_family() {
+    if [[ -r /etc/os-release ]]; then
+        . /etc/os-release
+        local ids="${ID:-} ${ID_LIKE:-}"
+        case " ${ids} " in
+            *" arch "*|*" archlinux "*|*" manjaro "*|*" endeavouros "*) echo arch; return ;;
+            *" debian "*|*" ubuntu "*) echo debian; return ;;
+            *" fedora "*|*" rhel "*|*" centos "*) echo fedora; return ;;
+            *" suse "*|*" opensuse "*|*" sles "*) echo suse; return ;;
+        esac
+    fi
+    if command -v pacman &>/dev/null; then echo arch
+    elif command -v apt-get &>/dev/null; then echo debian
+    elif command -v dnf &>/dev/null; then echo fedora
+    elif command -v zypper &>/dev/null; then echo suse
+    else echo unknown
+    fi
+}
+
+DISTRO_FAMILY="$(detect_family)"
+info "Detected package manager family: ${DISTRO_FAMILY}"
+
+if [[ "$DISTRO_FAMILY" == "unknown" ]]; then
+    die "Pachul requires Arch (pacman), Debian/Ubuntu (apt), Fedora (dnf) or openSUSE (zypper) — none found."
 fi
 
 # ── Source file check ─────────────────────────────────────────────────────────
@@ -64,15 +92,42 @@ success "All source files present."
 # ─────────────────────────────────────────────────────────────────────────────
 info "Checking dependencies…"
 
-REQUIRED_PKGS=(python gtk4 libadwaita python-gobject pacman-contrib libnotify)
+# Package names differ per distro. Arch and Fedora are verified against
+# real systems; Debian/Ubuntu and openSUSE names are best-effort (same
+# "written carefully, not live-tested" caveat as the rest of the
+# multi-distro work — see DISTRO_SUPPORT_CHANGES.md) and worth double-
+# checking on a real system if dependency install fails there.
+case "$DISTRO_FAMILY" in
+    arch)
+        REQUIRED_PKGS=(python gtk4 libadwaita python-gobject pacman-contrib libnotify)
+        is_installed() { pacman -Qi "$1" &>/dev/null; }
+        install_pkgs() { pacman -Sy --noconfirm --needed "$@"; }
+        ;;
+    fedora)
+        REQUIRED_PKGS=(python3 gtk4 libadwaita python3-gobject libnotify)
+        is_installed() { rpm -q "$1" &>/dev/null; }
+        install_pkgs() { dnf install -y "$@"; }
+        ;;
+    debian)
+        REQUIRED_PKGS=(python3 gir1.2-gtk-4.0 gir1.2-adw-1 python3-gi libnotify-bin)
+        is_installed() { dpkg -s "$1" &>/dev/null; }
+        install_pkgs() { apt-get update && apt-get install -y "$@"; }
+        ;;
+    suse)
+        REQUIRED_PKGS=(python3 typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 python3-gobject libnotify-tools)
+        is_installed() { rpm -q "$1" &>/dev/null; }
+        install_pkgs() { zypper --non-interactive install "$@"; }
+        ;;
+esac
+
 MISSING_PKGS=()
 for pkg in "${REQUIRED_PKGS[@]}"; do
-    pacman -Qi "$pkg" &>/dev/null || MISSING_PKGS+=("$pkg")
+    is_installed "$pkg" || MISSING_PKGS+=("$pkg")
 done
 
 if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
     warn "Installing missing packages: ${MISSING_PKGS[*]}"
-    pacman -Sy --noconfirm --needed "${MISSING_PKGS[@]}" || die "Failed to install dependencies."
+    install_pkgs "${MISSING_PKGS[@]}" || die "Failed to install dependencies."
     success "Dependencies installed."
 else
     success "All dependencies satisfied."
@@ -117,10 +172,32 @@ EOF
 chmod 755 "${INSTALL_DIR}/${APP_NAME}-tray"
 success "Tray launcher created."
 
-if ! pacman -Qi libayatana-appindicator &>/dev/null && ! pacman -Qi libappindicator-gtk3 &>/dev/null; then
-    warn "libayatana-appindicator not found — the tray icon needs it to show up."
-    warn "Install with: sudo pacman -S libayatana-appindicator"
-fi
+case "$DISTRO_FAMILY" in
+    arch)
+        if ! pacman -Qi libayatana-appindicator &>/dev/null && ! pacman -Qi libappindicator-gtk3 &>/dev/null; then
+            warn "libayatana-appindicator not found — the tray icon needs it to show up."
+            warn "Install with: sudo pacman -S libayatana-appindicator"
+        fi
+        ;;
+    fedora)
+        if ! rpm -q libappindicator-gtk3 &>/dev/null; then
+            warn "libappindicator-gtk3 not found — the tray icon needs it to show up."
+            warn "Install with: sudo dnf install libappindicator-gtk3"
+        fi
+        ;;
+    debian)
+        if ! dpkg -s gir1.2-ayatanaappindicator3-0.1 &>/dev/null; then
+            warn "libayatana-appindicator (GObject introspection bindings) not found — the tray icon needs it."
+            warn "Install with: sudo apt-get install gir1.2-ayatanaappindicator3-0.1"
+        fi
+        ;;
+    suse)
+        if ! rpm -q typelib-1_0-AyatanaAppIndicator3-0_1 &>/dev/null; then
+            warn "AyatanaAppIndicator3 typelib not found — the tray icon needs it to show up."
+            warn "Install with: sudo zypper install typelib-1_0-AyatanaAppIndicator3-0_1"
+        fi
+        ;;
+esac
 
 # Autostart for the tray icon is no longer set up here — Pachul manages its
 # own per-user autostart entry (~/.config/autostart), toggleable from

@@ -129,6 +129,8 @@ STRINGS_DE = {
     "Manage Repositories…": "Repositorien verwalten…",
     "Rate Mirrors…": "Spiegelserver bewerten…",
     "Config Files (.pacnew)…": "Konfigurationsdateien (.pacnew)…",
+    "Config File Conflicts…": "Konfigurationsdatei-Konflikte…",
+    "Config File Conflicts": "Konfigurationsdatei-Konflikte",
     "Package History…": "Paketverlauf…",
     "System Info": "Systeminformationen",
     "Cache Cleaner": "Cache-Reiniger",
@@ -141,6 +143,80 @@ STRINGS_DE = {
     "Preferences": "Einstellungen",
     "Keyboard Shortcuts": "Tastenkombinationen",
     "About Pachul": "Über Pachul",
+    "Pachul is a graphical package manager for Arch, Debian/Ubuntu, Fedora and openSUSE. Search, install, update and remove packages, review config file conflicts, keep external tools (rustup, npm, pip, Flatpak, …) up to date, and more — all from one native GTK4/libadwaita app.":
+        "Pachul ist ein grafischer Paketmanager für Arch, Debian/Ubuntu, Fedora und openSUSE. Pakete suchen, installieren, aktualisieren und entfernen, Konfigurationsdatei-Konflikte prüfen, externe Tools (rustup, npm, pip, Flatpak, …) aktuell halten und mehr — alles in einer nativen GTK4/libadwaita-App.",
+    "Version {v}": "Version {v}",
+    "Developer": "Entwickler",
+    "License": "Lizenz",
+    "Distro": "Distribution",
+    "Package Manager": "Paketmanager",
+    "Website": "Webseite",
+    "Report an Issue": "Fehler melden",
+    "Copy Debug Info": "Debug-Infos kopieren",
+    "Copied!": "Kopiert!",
+
+    # Help dialog
+    "Help": "Hilfe",
+    "Browsing & Search": "Navigation & Suche",
+    "New Packages / All Packages / Installed / Updates": "Neue Pakete / Alle Pakete / Installiert / Updates",
+    "Sidebar filters for the package list — what's newly available, everything, only what's installed, or only what has an update pending.":
+        "Filter in der Seitenleiste für die Paketliste — neu verfügbare, alle, nur installierte oder nur Pakete mit ausstehendem Update.",
+    "Type in the search bar (or press Ctrl+F) to filter the current list by name or description.":
+        "In die Suchleiste tippen (oder Strg+F drücken), um die aktuelle Liste nach Name oder Beschreibung zu filtern.",
+    "Package details": "Paketdetails",
+    "Click any package to see its description, version, size, dependencies and files on the right, with Install/Remove/Update actions.":
+        "Auf ein Paket klicken, um rechts Beschreibung, Version, Größe, Abhängigkeiten und Dateien zu sehen, inkl. Installieren/Entfernen/Aktualisieren.",
+    "Updating": "Aktualisieren",
+    "Refresh the local package index from the repositories, without installing anything yet.":
+        "Den lokalen Paketindex von den Repositories aktualisieren, ohne dabei schon etwas zu installieren.",
+    "Sync, then rebuild the Updates list — same as pressing Ctrl+U.":
+        "Synchronisiert und baut danach die Updates-Liste neu auf — entspricht Strg+U.",
+    "Reload the current view from what's already known locally, without contacting the repositories.":
+        "Die aktuelle Ansicht aus den lokal bereits bekannten Daten neu laden, ohne die Repositories zu kontaktieren.",
+    "Install every pending update in one go — shown as a button whenever the Updates list isn't empty.":
+        "Installiert alle ausstehenden Updates auf einmal — als Button sichtbar, sobald die Updates-Liste nicht leer ist.",
+    "Batch mode": "Mehrfachauswahl",
+    "Select several packages at once (checkboxes in the list) to install or remove them together; Ctrl+A / Ctrl+Shift+A select or deselect everything currently visible.":
+        "Mehrere Pakete gleichzeitig auswählen (Kontrollkästchen in der Liste), um sie gemeinsam zu installieren oder zu entfernen; Strg+A / Strg+Umschalt+A wählt alle sichtbaren Pakete aus bzw. ab.",
+    "Repositories": "Repositories",
+    "View and edit which package repositories are enabled.":
+        "Anzeigen und bearbeiten, welche Paket-Repositories aktiviert sind.",
+    "Benchmark configured mirrors and switch to the fastest ones. Arch-only — Fedora and openSUSE already pick the fastest mirror automatically.":
+        "Konfigurierte Mirrors testen und auf die schnellsten wechseln. Nur unter Arch — Fedora und openSUSE wählen den schnellsten Mirror bereits automatisch.",
+    "Tools": "Werkzeuge",
+    "List packages that were pulled in as dependencies but are no longer needed by anything, so you can clean them up.":
+        "Listet Pakete auf, die als Abhängigkeit installiert wurden, aber von nichts mehr benötigt werden, damit du sie aufräumen kannst.",
+    "Look up which installed package owns a given file path.":
+        "Ermitteln, zu welchem installierten Paket ein bestimmter Dateipfad gehört.",
+    "Review and merge configuration files a package update left behind instead of overwriting your local changes.":
+        "Konfigurationsdateien prüfen und zusammenführen, die ein Paket-Update hinterlassen hat, statt deine lokalen Änderungen zu überschreiben.",
+    "Check for updates outside the system package manager — rustup, npm, pip, Flatpak, and similar tools.":
+        "Nach Updates außerhalb des System-Paketmanagers suchen — rustup, npm, pip, Flatpak und ähnliche Tools.",
+    "Hold specific packages back from updates.":
+        "Bestimmte Pakete von Updates ausnehmen.",
+    "Browse a log of past installs, removals and updates.":
+        "Ein Protokoll früherer Installationen, Entfernungen und Updates durchsuchen.",
+    "Overview of the system, hardware and installed packages.":
+        "Übersicht über System, Hardware und installierte Pakete.",
+    "Free up disk space by clearing old cached package files.":
+        "Speicherplatz freigeben, indem alte zwischengespeicherte Paketdateien gelöscht werden.",
+    "Package Lists": "Paketlisten",
+    "Save the list of explicitly installed packages to a file — handy for setting up another machine the same way.":
+        "Die Liste der explizit installierten Pakete in eine Datei speichern — praktisch, um einen anderen Rechner gleich einzurichten.",
+    "Install every package from a previously exported list.":
+        "Alle Pakete aus einer zuvor exportierten Liste installieren.",
+    "AUR / Advanced": "AUR / Erweitert",
+    "Inspect the build script of an AUR package before installing it.":
+        "Das Build-Skript eines AUR-Pakets vor der Installation prüfen.",
+    "Toggle whether the selected packages are excluded from updates.":
+        "Umschalten, ob die ausgewählten Pakete von Updates ausgenommen sind.",
+    "Mark Selected as Explicit / as Dependency": "Auswahl als explizit / als Abhängigkeit markieren",
+    "Change how a package is tracked, so orphan-cleanup treats it correctly.":
+        "Ändert, wie ein Paket geführt wird, damit die Verwaisten-Bereinigung es korrekt behandelt.",
+    "App-wide settings: language, theme, and other options.":
+        "App-weite Einstellungen: Sprache, Theme und weitere Optionen.",
+    "Version, license and system info for bug reports.":
+        "Version, Lizenz und Systeminfos für Fehlerberichte.",
     "Upgrade Now": "Jetzt aktualisieren",
 
     # Search page
@@ -435,8 +511,10 @@ STRINGS_DE = {
     # Pacdiff
     "Config Files (.pacnew / .pacsave)": "Konfigurationsdateien (.pacnew / .pacsave)",
     "Scanning for .pacnew/.pacsave files…": "Suche nach .pacnew-/.pacsave-Dateien…",
+    "Scanning for config file conflicts…": "Suche nach Konfigurationsdatei-Konflikten…",
     "Nothing to Merge": "Nichts zusammenzuführen",
     "No .pacnew or .pacsave files were found.": "Es wurden keine .pacnew- oder .pacsave-Dateien gefunden.",
+    "No config file conflicts were found.": "Es wurden keine Konfigurationsdatei-Konflikte gefunden.",
     "{n} file(s) left behind by package updates. Review the diff, then keep the new version or discard it.":
         "{n} Datei(en) wurden von Paketupdates zurückgelassen. Prüfe den Unterschied und behalte die neue Version oder verwirf sie.",
     "Loading diff…": "Lade Vergleich…",
@@ -691,6 +769,413 @@ STRINGS_DE = {
     "Nix / home-manager": "Nix / home-manager",
     "Updates Nix packages (nix-env) or applies your home-manager configuration.":
         "Aktualisiert Nix-Pakete (nix-env) oder wendet deine home-manager-Konfiguration an.",
+
+    # ── Repair System (apt/dpkg), Debian-only ───────────────────────────────
+    "Repair System (apt/dpkg)…": "System reparieren (apt/dpkg)…",
+    "Repair System": "System reparieren",
+    "These run real apt/dpkg maintenance commands with sudo — read what each "
+    "one does before running it, especially the last one.":
+        "Dies sind echte apt-/dpkg-Wartungsbefehle mit sudo — lies vor dem Ausführen, "
+        "was jeder einzelne tut, besonders den letzten.",
+    "Update, Upgrade & Autoremove": "Update, Upgrade & Autoremove",
+    "Refreshes the package index, upgrades everything, then removes packages "
+    "no longer needed by anything else.":
+        "Aktualisiert den Paketindex, upgradet alles und entfernt anschließend "
+        "Pakete, die von nichts mehr benötigt werden.",
+    "Fix Broken Dependencies": "Kaputte Abhängigkeiten reparieren",
+    "Runs 'apt --fix-broken install' to resolve broken or half-installed "
+    "dependencies.":
+        "Führt „apt --fix-broken install“ aus, um kaputte oder halb installierte "
+        "Abhängigkeiten zu beheben.",
+    "Reconfigure All Packages": "Alle Pakete neu konfigurieren",
+    "Runs 'dpkg --configure -a' to finish any package configuration that was "
+    "interrupted.":
+        "Führt „dpkg --configure -a“ aus, um eine unterbrochene Paketkonfiguration "
+        "abzuschließen.",
+    "Fix Missing/Corrupt Package Files": "Fehlende/beschädigte Paketdateien beheben",
+    "Refreshes the package index, then retries installing anything with "
+    "missing or corrupt downloaded files.":
+        "Aktualisiert den Paketindex und versucht anschließend erneut, alles mit "
+        "fehlenden oder beschädigten heruntergeladenen Dateien zu installieren.",
+    "Clean Package Cache": "Paket-Cache leeren",
+    "Removes outdated .deb files from the local cache, then clears it "
+    "completely.":
+        "Entfernt veraltete .deb-Dateien aus dem lokalen Cache und leert ihn "
+        "anschließend vollständig.",
+    "Show Broken/Incomplete Packages": "Kaputte/unvollständige Pakete anzeigen",
+    "Read-only: lists packages dpkg considers not fully installed (e.g. "
+    "flagged 'reinstall required').":
+        "Nur lesend: listet Pakete auf, die dpkg als nicht vollständig installiert "
+        "einstuft (z. B. mit „Neuinstallation erforderlich“ markiert).",
+    "Show": "Anzeigen",
+    "Force-Remove Broken Package": "Kaputtes Paket erzwungen entfernen",
+    "Last resort for a single package dpkg refuses to touch normally — "
+    "removes it while ignoring the 'reinstall required' flag. Only use this "
+    "if the steps above didn't help, and only on the one package causing "
+    "the problem.":
+        "Letzter Ausweg für ein einzelnes Paket, das dpkg normal nicht anfasst — "
+        "entfernt es unter Ignorieren der Markierung „Neuinstallation erforderlich“. "
+        "Nur verwenden, wenn die obigen Schritte nicht geholfen haben, und nur für "
+        "das eine Paket, das das Problem verursacht.",
+    "Package name": "Paketname",
+    "Remove": "Entfernen",
+    "No broken/incomplete packages found.": "Keine kaputten/unvollständigen Pakete gefunden.",
+
+    # ── python3-apt install prompt (Preferences, Debian-only) ──────────────
+    "Performance": "Leistung",
+    "python3-apt not installed": "python3-apt nicht installiert",
+    "Speeds up package info, listing and update checks, and lets "
+    "the sidebar show repo categories for installed packages. "
+    "Pachul works without it, just a bit slower. Restart Pachul "
+    "after installing for it to take effect.":
+        "Beschleunigt Paketinfos, Auflistung und Update-Prüfungen und lässt "
+        "die Seitenleiste Repo-Kategorien für installierte Pakete anzeigen. "
+        "Pachul funktioniert auch ohne, nur etwas langsamer. Nach der "
+        "Installation Pachul neu starten, damit es wirksam wird.",
+    "Install python3-apt": "python3-apt installieren",
+
+    # ── Repair System (dnf/rpm), Fedora-only ────────────────────────────────
+    "Repair System (dnf/rpm)…": "System reparieren (dnf/rpm)…",
+    "These run real dnf/rpm maintenance commands with sudo — read what each "
+    "one does before running it, especially the last one.":
+        "Dies sind echte dnf-/rpm-Wartungsbefehle mit sudo — lies vor dem Ausführen, "
+        "was jeder einzelne tut, besonders den letzten.",
+    "Refreshes repo metadata, upgrades everything, then removes packages "
+    "no longer needed by anything else.":
+        "Aktualisiert die Repo-Metadaten, upgradet alles und entfernt anschließend "
+        "Pakete, die von nichts mehr benötigt werden.",
+    "Fix Inconsistent Package Versions": "Inkonsistente Paketversionen beheben",
+    "Runs 'dnf distro-sync' to bring installed packages back in line "
+    "with what the repos currently offer, after an interrupted or "
+    "partial upgrade left some at mismatched versions.":
+        "Führt „dnf distro-sync“ aus, um installierte Pakete wieder in Einklang "
+        "mit dem aktuellen Repo-Stand zu bringen, nachdem ein unterbrochenes "
+        "oder unvollständiges Upgrade manche auf abweichenden Versionen zurückließ.",
+    "Rebuild RPM Database": "RPM-Datenbank neu aufbauen",
+    "Runs 'rpm --rebuilddb' to rebuild a corrupted local RPM database.":
+        "Führt „rpm --rebuilddb“ aus, um eine beschädigte lokale RPM-Datenbank "
+        "neu aufzubauen.",
+    "Runs 'dnf clean all' to clear cached package files and metadata.":
+        "Führt „dnf clean all“ aus, um zwischengespeicherte Paketdateien und "
+        "Metadaten zu löschen.",
+    "Show Broken/Unsatisfied Packages": "Kaputte/unerfüllte Pakete anzeigen",
+    "Read-only: runs 'dnf check' to list dependency, duplicate, or "
+    "obsoleted-package problems in what's currently installed.":
+        "Nur lesend: führt „dnf check“ aus, um Abhängigkeits-, Duplikat- oder "
+        "veraltete-Paket-Probleme im aktuell installierten Bestand aufzulisten.",
+    "Last resort for a single package rpm refuses to touch normally — "
+    "removes it while ignoring dependency checks entirely. Only use this "
+    "if the steps above didn't help, and only on the one package causing "
+    "the problem.":
+        "Letzter Ausweg für ein einzelnes Paket, das rpm normal nicht anfasst — "
+        "entfernt es unter vollständigem Ignorieren der Abhängigkeitsprüfung. "
+        "Nur verwenden, wenn die obigen Schritte nicht geholfen haben, und nur für "
+        "das eine Paket, das das Problem verursacht.",
+
+    # ── python3-libdnf5 install prompt (Preferences, Fedora-only) ──────────
+    "python3-libdnf5 not installed": "python3-libdnf5 nicht installiert",
+    "Speeds up package info, listing and update checks. "
+    "Pachul works without it, just a bit slower. Restart Pachul "
+    "after installing for it to take effect.":
+        "Beschleunigt Paketinfos, Auflistung und Update-Prüfungen. Pachul "
+        "funktioniert auch ohne, nur etwas langsamer. Nach der Installation "
+        "Pachul neu starten, damit es wirksam wird.",
+    "Install python3-libdnf5": "python3-libdnf5 installieren",
+
+    # ── Repair System (zypper/rpm), openSUSE-only ───────────────────────────
+    "Repair System (zypper/rpm)…": "System reparieren (zypper/rpm)…",
+    "These run real zypper/rpm maintenance commands with sudo — read what "
+    "each one does before running it, especially the last one.":
+        "Dies sind echte zypper-/rpm-Wartungsbefehle mit sudo — lies vor dem "
+        "Ausführen, was jeder einzelne tut, besonders den letzten.",
+    "Update & Upgrade": "Update & Upgrade",
+    "Refreshes repo metadata, then installs all available updates.":
+        "Aktualisiert die Repo-Metadaten und installiert dann alle verfügbaren "
+        "Updates.",
+    "Runs 'zypper verify' — openSUSE's own solver run that finds and "
+    "proposes fixes for broken or unsatisfied package dependencies.":
+        "Führt „zypper verify“ aus — openSUSEs eigener Solver-Lauf, der kaputte "
+        "oder unerfüllte Paketabhängigkeiten findet und Lösungen vorschlägt.",
+    "Runs 'zypper clean --all' to clear cached package files and metadata.":
+        "Führt „zypper clean --all“ aus, um zwischengespeicherte Paketdateien "
+        "und Metadaten zu löschen.",
+    "Read-only: runs 'zypper verify --dry-run' to list what it would "
+    "change without actually changing anything.":
+        "Nur lesend: führt „zypper verify --dry-run“ aus, um zu zeigen, was "
+        "geändert würde, ohne tatsächlich etwas zu ändern.",
+
+    # ── Repair System (pacman), Arch-only ───────────────────────────────────
+    "Repair System (pacman)…": "System reparieren (pacman)…",
+    "These run real pacman/pacman-key commands with sudo — read what each "
+    "one does before running it, especially the last one.":
+        "Dies sind echte pacman-/pacman-key-Befehle mit sudo — lies vor dem "
+        "Ausführen, was jeder einzelne tut, besonders den letzten.",
+    "Standard Maintenance": "Standard-Wartung",
+    "Last Resort": "Letzter Ausweg",
+    "Force-Refresh & Full Upgrade": "Erzwungenes Neuladen & Vollupgrade",
+    "Runs 'pacman -Syyu' — forces a fresh download of all repo "
+    "databases (ignoring their last-sync timestamps) before "
+    "upgrading, useful when a mirror served stale or corrupt data.":
+        "Führt „pacman -Syyu“ aus — erzwingt einen frischen Download aller "
+        "Repo-Datenbanken (ignoriert deren letzten Sync-Zeitstempel) vor dem "
+        "Upgrade, nützlich wenn ein Mirror veraltete oder beschädigte Daten "
+        "geliefert hat.",
+    "Check Package Database Consistency": "Paketdatenbank auf Konsistenz prüfen",
+    "Runs 'pacman -Dk' to check the local package database itself "
+    "for internal inconsistencies (separate from checking individual "
+    "installed files).":
+        "Führt „pacman -Dk“ aus, um die lokale Paketdatenbank selbst auf "
+        "interne Inkonsistenzen zu prüfen (unabhängig von der Prüfung "
+        "einzelner installierter Dateien).",
+    "Reinitialize Keyring": "Keyring neu initialisieren",
+    "Runs 'pacman-key --init' and '--populate archlinux' — a deeper "
+    "fix than the automatic keyring banner elsewhere, for when "
+    "signature errors persist after that lighter fix.":
+        "Führt „pacman-key --init“ und „--populate archlinux“ aus — eine "
+        "tiefergehende Reparatur als das automatische Keyring-Banner an "
+        "anderer Stelle, für den Fall, dass Signaturfehler nach dieser "
+        "leichteren Lösung weiter bestehen.",
+    "Search for Packages With Missing/Modified Files": "Pakete mit fehlenden/geänderten Dateien suchen",
+    "Runs 'pacman -Qkk' with sudo (read-only, no changes are made). "
+    "If any packages come back altered, you'll be asked right away "
+    "which ones to repair.":
+        "Führt „pacman -Qkk“ mit sudo aus (nur lesend, es wird nichts "
+        "verändert). Werden Pakete als verändert gemeldet, wirst du "
+        "sofort gefragt, welche davon repariert werden sollen.",
+    "Run": "Ausführen",
+    "Repair Broken Packages": "Kaputte Pakete reparieren",
+    "{n} package(s) with missing or altered files found":
+        "{n} Paket(e) mit fehlenden oder geänderten Dateien gefunden",
+    "Choose which ones to reinstall from your configured "
+    "repositories to restore the original files:":
+        "Wähle aus, welche davon aus deinen konfigurierten Repositories "
+        "neu installiert werden sollen, um die Originaldateien "
+        "wiederherzustellen:",
+    "Repair {n} package(s)": "{n} Paket(e) reparieren",
+    "(+{n} more)": "(+{n} weitere)",
+    "({n} more package(s) with only config/permission "
+    "differences are hidden — reinstalling never touches "
+    "those.)":
+        "({n} weitere(s) Paket(e) mit ausschließlich Config-/"
+        "Rechte-Unterschieden sind ausgeblendet — eine Neuinstallation "
+        "rührt diese nie an.)",
+    "All {n} package(s) only have config/permission "
+    "differences a reinstall can't fix.":
+        "Alle {n} Paket(e) haben nur Config-/Rechte-Unterschiede, "
+        "die eine Neuinstallation nicht beheben kann.",
+    "Select All": "Alle auswählen",
+    "Select None": "Keine auswählen",
+    "Last resort for a single package pacman refuses to touch normally "
+    "— removes it while ignoring dependency checks entirely. Only use "
+    "this if the steps above didn't help, and only on the one package "
+    "causing the problem.":
+        "Letzter Ausweg für ein einzelnes Paket, das pacman normal nicht "
+        "anfasst — entfernt es unter vollständigem Ignorieren der "
+        "Abhängigkeitsprüfung. Nur verwenden, wenn die obigen Schritte "
+        "nicht geholfen haben, und nur für das eine Paket, das das Problem "
+        "verursacht.",
+
+    # ── Certificate Checker (Modul 2, cross-distro) ─────────────────────────
+    "Certificate Checker": "Zertifikatsprüfung",
+    "Check Certificates…": "Zertifikate prüfen…",
+    "CA Certificate Bundle": "CA-Zertifikatspaket",
+    "Reinstall CA Certificates & Rebuild Trust Store": "CA-Zertifikate neu installieren & Trust Store neu aufbauen",
+    "Reinstalls the ca-certificates package and regenerates the "
+    "system's trust store. Useful if HTTPS connections fail with "
+    "certificate-verification errors that aren't the remote site's "
+    "fault.":
+        "Installiert das ca-certificates-Paket neu und baut den System-Trust-Store "
+        "neu auf. Nützlich, wenn HTTPS-Verbindungen mit Zertifikatsprüfungsfehlern "
+        "fehlschlagen, die nicht an der Gegenstelle liegen.",
+    "Domain Certificate Expiry": "Domain-Zertifikatsablauf",
+    "Checks how many days remain before each domain's TLS "
+    "certificate expires — nothing is changed, purely informational.":
+        "Prüft, wie viele Tage bis zum Ablauf des TLS-Zertifikats jeder Domain "
+        "verbleiben — es wird nichts geändert, rein informativ.",
+    "Domains": "Domains",
+    "Comma-separated, e.g. example.com, mail.example.com": "Kommagetrennt, z. B. example.com, mail.example.com",
+    "Domains to check": "Zu prüfende Domains",
+    "Check": "Prüfen",
+    "Could not retrieve certificate (offline or unreachable?)": "Zertifikat konnte nicht abgerufen werden (offline oder nicht erreichbar?)",
+    "EXPIRED {days} days ago": "ABGELAUFEN vor {days} Tagen",
+    "Expires in {days} days (until {date})": "Läuft in {days} Tagen ab (bis {date})",
+    "Valid, {days} days remaining (until {date})": "Gültig, noch {days} Tage (bis {date})",
+    "Local Certificates": "Lokale Zertifikate",
+    "Show Expired Local Certificates": "Abgelaufene lokale Zertifikate anzeigen",
+    "Read-only: scans /etc/ssl/certs for .pem certificates that have "
+    "already expired.":
+        "Nur lesend: durchsucht /etc/ssl/certs nach bereits abgelaufenen "
+        ".pem-Zertifikaten.",
+    "EXPIRED: {cert}": "ABGELAUFEN: {cert}",
+    "All local certificates are valid.": "Alle lokalen Zertifikate sind gültig.",
+
+    # ── System Cleanup (Modul 4-Erweiterung, cross-distro) ──────────────────
+    "System Cleanup": "System-Bereinigung",
+    "Not package-related — general disk cleanup for the systemd "
+    "journal, old thumbnail previews, and the trash.":
+        "Nicht paketbezogen — allgemeine Datenträger-Bereinigung für das "
+        "systemd-Journal, alte Thumbnail-Vorschaubilder und den Papierkorb.",
+    "Clean systemd Journal": "systemd-Journal bereinigen",
+    "Shrinks the journal to 500 MB and removes entries older than 4 weeks.":
+        "Verkleinert das Journal auf 500 MB und entfernt Einträge, die älter "
+        "als 4 Wochen sind.",
+    "Remove Old Thumbnail Previews": "Alte Thumbnail-Vorschaubilder entfernen",
+    "Deletes cached thumbnail images in ~/.cache/thumbnails older than "
+    "30 days. No sudo needed — this only touches your own cache.":
+        "Löscht zwischengespeicherte Thumbnail-Bilder in ~/.cache/thumbnails, "
+        "die älter als 30 Tage sind. Kein sudo nötig — betrifft nur den "
+        "eigenen Cache.",
+    "Done.": "Fertig.",
+    "No thumbnail cache found.": "Kein Thumbnail-Cache gefunden.",
+    "Empty Trash": "Papierkorb leeren",
+    "Permanently empties your desktop trash/recycle bin (via 'gio "
+    "trash --empty'). No sudo needed.":
+        "Leert den Papierkorb der Desktop-Umgebung endgültig (via „gio trash "
+        "--empty“). Kein sudo nötig.",
+    "gio not found — nothing to do.": "gio nicht gefunden — nichts zu tun.",
+
+    # ── Broken Symlink Finder (Modul 5b, cross-distro) ──────────────────────
+    "Broken Symlinks": "Kaputte Symlinks",
+    "Find Broken Symlinks…": "Kaputte Symlinks suchen…",
+    "Searches /usr and /etc for symlinks pointing at files that no "
+    "longer exist — usually harmless leftovers from removed packages, "
+    "but occasionally a sign something didn't uninstall cleanly.":
+        "Durchsucht /usr und /etc nach Symlinks, die auf nicht mehr "
+        "existierende Dateien zeigen — meist harmlose Reste entfernter "
+        "Pakete, gelegentlich aber ein Zeichen für eine unsaubere "
+        "Deinstallation.",
+    "No broken symlinks found.": "Keine kaputten Symlinks gefunden.",
+    "{n} broken symlinks found.": "{n} kaputte Symlinks gefunden.",
+    "SAFE — license leftovers ({n}):": "SICHER — Lizenz-Reste ({n}):",
+    "removed": "entfernt",
+    "SAFE but skipped — archiso build templates ({n}), expected on "
+    "Arch/Manjaro, not deleted:":
+        "SICHER, aber übersprungen — archiso-Bau-Vorlagen ({n}), auf "
+        "Arch/Manjaro erwartet, nicht gelöscht:",
+    "REVIEW — not auto-deleted ({n}):": "PRÜFEN — nicht automatisch gelöscht ({n}):",
+    "For each: 'pacman/dpkg/rpm/zypper -qf <path>' or equivalent tells you "
+    "which package owns it, if any; a reinstall of that package usually "
+    "fixes the link.":
+        "Für jeden: „pacman/dpkg/rpm/zypper -qf <pfad>“ oder ein Äquivalent "
+        "zeigt, welchem Paket er gehört, falls überhaupt; eine "
+        "Neuinstallation dieses Pakets behebt den Symlink meist.",
+    "Scan": "Scan",
+    "Scan Only": "Nur scannen",
+    "Read-only: lists and classifies broken symlinks without deleting "
+    "anything. No sudo needed.":
+        "Nur lesend: listet und klassifiziert kaputte Symlinks, ohne "
+        "irgendetwas zu löschen. Kein sudo nötig.",
+    "Scan & Remove Safe Ones": "Scannen & sichere entfernen",
+    "Same scan, but also deletes the SAFE-category links (license "
+    "leftovers only — archiso templates and anything else are still "
+    "just listed, never touched). Needs sudo.":
+        "Derselbe Scan, löscht aber zusätzlich die SICHER-Kategorie (nur "
+        "Lizenz-Reste — archiso-Vorlagen und alles andere werden weiterhin "
+        "nur aufgelistet, nie angefasst). Benötigt sudo.",
+    "Clean": "Bereinigen",
+
+    # ── Services & Security Check (Modul 7, cross-distro) ───────────────────
+    "Services & Security": "Dienste & Sicherheit",
+    "Services & Security…": "Dienste & Sicherheit…",
+    "Services": "Dienste",
+    "Show Failed Services": "Fehlgeschlagene Dienste anzeigen",
+    "Read-only: lists any systemd services currently in a failed "
+    "state.":
+        "Nur lesend: listet alle systemd-Dienste auf, die sich aktuell "
+        "in einem fehlgeschlagenen Zustand befinden.",
+    "Reset shadow.service": "shadow.service zurücksetzen",
+    "shadow.service has failed — this is usually a harmless "
+    "password/group integrity check tripping after an update. "
+    "Resets it without touching anything else.":
+        "shadow.service ist fehlgeschlagen — meist eine harmlose "
+        "Passwort-/Gruppen-Integritätsprüfung, die nach einem Update "
+        "auslöst. Setzt ihn zurück, ohne sonst etwas zu verändern.",
+    "Reset": "Zurücksetzen",
+    "Security Services": "Sicherheitsdienste",
+    "Check firewalld / fail2ban / apparmor": "firewalld / fail2ban / apparmor prüfen",
+    "Read-only: reports whether each of these — if installed — is "
+    "currently active.":
+        "Nur lesend: meldet, ob jeder dieser Dienste — falls installiert — "
+        "aktuell aktiv ist.",
+    "running": "läuft",
+    "installed but NOT active": "installiert, aber NICHT aktiv",
+    "not installed": "nicht installiert",
+    "Firewall (UFW)": "Firewall (UFW)",
+    "Show Firewall Rules": "Firewall-Regeln anzeigen",
+    "UFW is active. Read-only: shows the current rule set.":
+        "UFW ist aktiv. Nur lesend: zeigt das aktuelle Regelwerk.",
+    "Enable Firewall": "Firewall aktivieren",
+    "UFW is installed but not active — your system currently has "
+    "no active firewall. Enables it with default rules (deny "
+    "incoming, allow outgoing) and rate-limited SSH if sshd is "
+    "running.":
+        "UFW ist installiert, aber nicht aktiv — dein System hat aktuell "
+        "keine aktive Firewall. Aktiviert sie mit Standardregeln (eingehend "
+        "blockieren, ausgehend erlauben) und Rate-Limiting für SSH, falls "
+        "sshd läuft.",
+    "Enable": "Aktivieren",
+    "Install & Enable Firewall": "Firewall installieren & aktivieren",
+    "UFW isn't installed — your system currently has no "
+    "active firewall. Installs it, then enables it with "
+    "default rules (deny incoming, allow outgoing) and "
+    "rate-limited SSH if sshd is running.":
+        "UFW ist nicht installiert — dein System hat aktuell keine aktive "
+        "Firewall. Installiert sie und aktiviert sie anschließend mit "
+        "Standardregeln (eingehend blockieren, ausgehend erlauben) und "
+        "Rate-Limiting für SSH, falls sshd läuft.",
+    "Install & Enable": "Installieren & aktivieren",
+    "SSH": "SSH",
+    "Check SSH Root Login": "SSH-Root-Login prüfen",
+    "Read-only: checks /etc/ssh/sshd_config for PermitRootLogin "
+    "yes, which lets root log in directly over SSH.":
+        "Nur lesend: prüft /etc/ssh/sshd_config auf PermitRootLogin yes, "
+        "was root den direkten SSH-Login erlaubt.",
+    "SSH root login is ENABLED — consider disabling it "
+    "(PermitRootLogin no).":
+        "SSH-Root-Login ist AKTIVIERT — Deaktivierung empfohlen "
+        "(PermitRootLogin no).",
+    "SSH root login is disabled or not explicitly "
+    "configured.":
+        "SSH-Root-Login ist deaktiviert oder nicht explizit konfiguriert.",
+    "No /etc/ssh/sshd_config found — SSH server doesn't "
+    "seem to be installed.":
+        "Keine /etc/ssh/sshd_config gefunden — SSH-Server scheint nicht "
+        "installiert zu sein.",
+
+    # ── Configuration Backup (Modul 6, distro-spezifische Dateiliste) ──────
+    "Configuration Backup": "Konfigurationsbackup",
+    "Configuration Backup…": "Konfigurationsbackup…",
+    "Creates a compressed archive of your system's identity and boot "
+    "configuration (fstab, hostname, bootloader, package-manager "
+    "config, …) plus a plain-text list of explicitly-installed "
+    "packages, so a fresh install can be brought back to a similar "
+    "state. Only the last 5 archives are kept; older ones are removed "
+    "automatically. No sudo needed — these files are normally "
+    "world-readable.":
+        "Erstellt ein komprimiertes Archiv der System-Identitäts- und "
+        "Boot-Konfiguration (fstab, Hostname, Bootloader, "
+        "Paketmanager-Konfiguration, …) sowie eine Textliste der explizit "
+        "installierten Pakete, damit eine Neuinstallation wieder in einen "
+        "ähnlichen Zustand gebracht werden kann. Es werden nur die letzten "
+        "5 Archive behalten; ältere werden automatisch entfernt. Kein "
+        "sudo nötig — diese Dateien sind normalerweise für alle lesbar.",
+    "Backup Folder": "Backup-Ordner",
+    "Included If Present": "Enthalten, falls vorhanden",
+    "Also saves the list of explicitly-installed packages.":
+        "Speichert außerdem die Liste der explizit installierten Pakete.",
+    "Also saves the full list of installed packages (this "
+    "distro has no simple way to tell explicit installs "
+    "from pulled-in dependencies).":
+        "Speichert außerdem die vollständige Liste aller installierten "
+        "Pakete (diese Distro hat keine einfache Möglichkeit, explizit "
+        "installierte von mitgezogenen Abhängigkeiten zu unterscheiden).",
+    "Create Backup": "Backup erstellen",
+    "Package list saved ({n} packages): $PAKETLISTE":
+        "Paketliste gespeichert ({n} Pakete): $PAKETLISTE",
+    "Nothing to back up — none of the expected config paths exist.":
+        "Nichts zu sichern — keiner der erwarteten Konfigurationspfade existiert.",
+    "Backup created ({size}): $ARCHIV": "Backup erstellt ({size}): $ARCHIV",
+    "Removed old backup:": "Altes Backup entfernt:",
 }
 
 
@@ -769,6 +1254,8 @@ STRINGS_FR = {
     "Manage Repositories…": "Gérer les dépôts…",
     "Rate Mirrors…": "Évaluer les miroirs…",
     "Config Files (.pacnew)…": "Fichiers de configuration (.pacnew)…",
+    "Config File Conflicts…": "Conflits de fichiers de configuration…",
+    "Config File Conflicts": "Conflits de fichiers de configuration",
     "Package History…": "Historique des paquets…",
     "System Info": "Informations système",
     "Cache Cleaner": "Nettoyeur de cache",
@@ -781,6 +1268,82 @@ STRINGS_FR = {
     "Preferences": "Préférences",
     "Keyboard Shortcuts": "Raccourcis clavier",
     "About Pachul": "À propos de Pachul",
+    "Pachul is a graphical package manager for Arch, Debian/Ubuntu, Fedora and openSUSE. Search, install, update and remove packages, review config file conflicts, keep external tools (rustup, npm, pip, Flatpak, …) up to date, and more — all from one native GTK4/libadwaita app.":
+        "Pachul est un gestionnaire de paquets graphique pour Arch, Debian/Ubuntu, Fedora et openSUSE. Recherchez, installez, mettez à jour et supprimez des paquets, examinez les conflits de fichiers de configuration, tenez à jour des outils externes (rustup, npm, pip, Flatpak, …), et bien plus — le tout dans une application native GTK4/libadwaita.",
+    "Version {v}": "Version {v}",
+    "Developer": "Développeur",
+    "License": "Licence",
+    "Distro": "Distribution",
+    "Package Manager": "Gestionnaire de paquets",
+    "Website": "Site web",
+    "Report an Issue": "Signaler un problème",
+    "Copy Debug Info": "Copier les infos de débogage",
+    "Copied!": "Copié !",
+
+    # Help dialog
+    "Help": "Aide",
+    "More Update Sources…": "Autres sources de mise à jour…",
+    "Ignored Packages…": "Paquets ignorés…",
+    "Browsing & Search": "Navigation et recherche",
+    "New Packages / All Packages / Installed / Updates": "Nouveaux paquets / Tous les paquets / Installés / Mises à jour",
+    "Sidebar filters for the package list — what's newly available, everything, only what's installed, or only what has an update pending.":
+        "Filtres de la barre latérale pour la liste des paquets — nouveautés, tout, uniquement installés, ou uniquement ceux ayant une mise à jour en attente.",
+    "Type in the search bar (or press Ctrl+F) to filter the current list by name or description.":
+        "Saisissez dans la barre de recherche (ou appuyez sur Ctrl+F) pour filtrer la liste actuelle par nom ou description.",
+    "Package details": "Détails du paquet",
+    "Click any package to see its description, version, size, dependencies and files on the right, with Install/Remove/Update actions.":
+        "Cliquez sur un paquet pour voir sa description, sa version, sa taille, ses dépendances et ses fichiers à droite, avec les actions Installer/Supprimer/Mettre à jour.",
+    "Updating": "Mise à jour",
+    "Refresh the local package index from the repositories, without installing anything yet.":
+        "Actualise l'index local des paquets depuis les dépôts, sans encore rien installer.",
+    "Sync, then rebuild the Updates list — same as pressing Ctrl+U.":
+        "Synchronise puis reconstruit la liste des mises à jour — équivaut à Ctrl+U.",
+    "Reload the current view from what's already known locally, without contacting the repositories.":
+        "Recharge la vue actuelle à partir de ce qui est déjà connu localement, sans contacter les dépôts.",
+    "Install every pending update in one go — shown as a button whenever the Updates list isn't empty.":
+        "Installe toutes les mises à jour en attente d'un coup — affiché en bouton dès que la liste des mises à jour n'est pas vide.",
+    "Batch mode": "Mode multi-sélection",
+    "Select several packages at once (checkboxes in the list) to install or remove them together; Ctrl+A / Ctrl+Shift+A select or deselect everything currently visible.":
+        "Sélectionnez plusieurs paquets à la fois (cases à cocher dans la liste) pour les installer ou les supprimer ensemble ; Ctrl+A / Ctrl+Maj+A sélectionne ou désélectionne tout ce qui est visible.",
+    "Repositories": "Dépôts",
+    "View and edit which package repositories are enabled.":
+        "Afficher et modifier les dépôts de paquets activés.",
+    "Benchmark configured mirrors and switch to the fastest ones. Arch-only — Fedora and openSUSE already pick the fastest mirror automatically.":
+        "Teste les miroirs configurés et passe aux plus rapides. Arch uniquement — Fedora et openSUSE choisissent déjà le miroir le plus rapide automatiquement.",
+    "Tools": "Outils",
+    "List packages that were pulled in as dependencies but are no longer needed by anything, so you can clean them up.":
+        "Liste les paquets installés comme dépendances mais qui ne sont plus nécessaires, pour pouvoir les nettoyer.",
+    "Look up which installed package owns a given file path.":
+        "Rechercher quel paquet installé possède un chemin de fichier donné.",
+    "Review and merge configuration files a package update left behind instead of overwriting your local changes.":
+        "Examine et fusionne les fichiers de configuration laissés par une mise à jour au lieu d'écraser vos modifications locales.",
+    "Check for updates outside the system package manager — rustup, npm, pip, Flatpak, and similar tools.":
+        "Vérifie les mises à jour en dehors du gestionnaire de paquets système — rustup, npm, pip, Flatpak et outils similaires.",
+    "Hold specific packages back from updates.":
+        "Exclut certains paquets des mises à jour.",
+    "Browse a log of past installs, removals and updates.":
+        "Parcourir un journal des installations, suppressions et mises à jour passées.",
+    "Overview of the system, hardware and installed packages.":
+        "Aperçu du système, du matériel et des paquets installés.",
+    "Free up disk space by clearing old cached package files.":
+        "Libère de l'espace disque en supprimant les anciens fichiers de paquets mis en cache.",
+    "Package Lists": "Listes de paquets",
+    "Save the list of explicitly installed packages to a file — handy for setting up another machine the same way.":
+        "Enregistre la liste des paquets installés explicitement dans un fichier — pratique pour configurer une autre machine de la même façon.",
+    "Install every package from a previously exported list.":
+        "Installe tous les paquets d'une liste précédemment exportée.",
+    "AUR / Advanced": "AUR / Avancé",
+    "Inspect the build script of an AUR package before installing it.":
+        "Examine le script de compilation d'un paquet AUR avant de l'installer.",
+    "Toggle whether the selected packages are excluded from updates.":
+        "Bascule l'exclusion des paquets sélectionnés des mises à jour.",
+    "Mark Selected as Explicit / as Dependency": "Marquer la sélection comme explicite / comme dépendance",
+    "Change how a package is tracked, so orphan-cleanup treats it correctly.":
+        "Modifie la façon dont un paquet est suivi, pour que le nettoyage des orphelins le traite correctement.",
+    "App-wide settings: language, theme, and other options.":
+        "Paramètres globaux de l'application : langue, thème et autres options.",
+    "Version, license and system info for bug reports.":
+        "Version, licence et infos système pour les rapports de bugs.",
     "Upgrade Now": "Mettre à niveau maintenant",
 
     # Search page
@@ -1067,8 +1630,10 @@ STRINGS_FR = {
     # Pacdiff
     "Config Files (.pacnew / .pacsave)": "Fichiers de configuration (.pacnew / .pacsave)",
     "Scanning for .pacnew/.pacsave files…": "Recherche de fichiers .pacnew/.pacsave…",
+    "Scanning for config file conflicts…": "Recherche de conflits de fichiers de configuration…",
     "Nothing to Merge": "Rien à fusionner",
     "No .pacnew or .pacsave files were found.": "Aucun fichier .pacnew ou .pacsave trouvé.",
+    "No config file conflicts were found.": "Aucun conflit de fichier de configuration trouvé.",
     "{n} file(s) left behind by package updates. Review the diff, then keep the new version or discard it.":
         "{n} fichier(s) laissé(s) par les mises à jour de paquets. Examinez les différences, puis conservez la nouvelle version ou ignorez-la.",
     "Loading diff…": "Chargement des différences…",
@@ -1156,6 +1721,77 @@ STRINGS_FR = {
     # Tray indicator (tray.py)
     "Open Pachul": "Ouvrir Pachul",
     "Checking for updates…": "Vérification des mises à jour…",
+
+    # ── Repair System (pacman), Arch-only ───────────────────────────────────
+    "Repair System (pacman)…": "Réparer le système (pacman)…",
+    "These run real pacman/pacman-key commands with sudo — read what each "
+    "one does before running it, especially the last one.":
+        "Ce sont de vraies commandes pacman/pacman-key exécutées avec sudo — lis "
+        "ce que fait chacune avant de l'exécuter, surtout la dernière.",
+    "Standard Maintenance": "Maintenance standard",
+    "Last Resort": "Dernier recours",
+    "Force-Refresh & Full Upgrade": "Rechargement forcé et mise à niveau complète",
+    "Runs 'pacman -Syyu' — forces a fresh download of all repo "
+    "databases (ignoring their last-sync timestamps) before "
+    "upgrading, useful when a mirror served stale or corrupt data.":
+        "Exécute « pacman -Syyu » — force un nouveau téléchargement de toutes "
+        "les bases de données des dépôts (en ignorant leur horodatage de "
+        "dernière synchronisation) avant la mise à niveau, utile lorsqu'un "
+        "miroir a fourni des données obsolètes ou corrompues.",
+    "Check Package Database Consistency": "Vérifier la cohérence de la base de données des paquets",
+    "Runs 'pacman -Dk' to check the local package database itself "
+    "for internal inconsistencies (separate from checking individual "
+    "installed files).":
+        "Exécute « pacman -Dk » pour vérifier la base de données locale des "
+        "paquets elle-même à la recherche d'incohérences internes "
+        "(indépendamment de la vérification des fichiers installés individuels).",
+    "Reinitialize Keyring": "Réinitialiser le trousseau de clés",
+    "Runs 'pacman-key --init' and '--populate archlinux' — a deeper "
+    "fix than the automatic keyring banner elsewhere, for when "
+    "signature errors persist after that lighter fix.":
+        "Exécute « pacman-key --init » et « --populate archlinux » — une "
+        "réparation plus profonde que la bannière automatique du trousseau de "
+        "clés ailleurs, pour le cas où des erreurs de signature persistent "
+        "après cette solution plus légère.",
+    "Search for Packages With Missing/Modified Files": "Rechercher les paquets avec fichiers manquants/modifiés",
+    "Runs 'pacman -Qkk' with sudo (read-only, no changes are made). "
+    "If any packages come back altered, you'll be asked right away "
+    "which ones to repair.":
+        "Exécute « pacman -Qkk » avec sudo (lecture seule, aucune modification "
+        "n'est apportée). Si des paquets sont signalés comme altérés, tu seras "
+        "immédiatement invité à choisir lesquels réparer.",
+    "Run": "Exécuter",
+    "Repair Broken Packages": "Réparer les paquets défectueux",
+    "{n} package(s) with missing or altered files found":
+        "{n} paquet(s) avec fichiers manquants ou altérés trouvé(s)",
+    "Choose which ones to reinstall from your configured "
+    "repositories to restore the original files:":
+        "Choisis lesquels réinstaller depuis tes dépôts configurés "
+        "pour restaurer les fichiers d'origine :",
+    "Repair {n} package(s)": "Réparer {n} paquet(s)",
+    "(+{n} more)": "(+{n} de plus)",
+    "({n} more package(s) with only config/permission "
+    "differences are hidden — reinstalling never touches "
+    "those.)":
+        "({n} paquet(s) supplémentaire(s) avec uniquement des différences de "
+        "config/permissions sont masqué(s) — une réinstallation ne les touche "
+        "jamais.)",
+    "All {n} package(s) only have config/permission "
+    "differences a reinstall can't fix.":
+        "Les {n} paquet(s) n'ont que des différences de config/permissions "
+        "qu'une réinstallation ne peut pas corriger.",
+    "Select All": "Tout sélectionner",
+    "Select None": "Tout désélectionner",
+    "Last resort for a single package pacman refuses to touch normally "
+    "— removes it while ignoring dependency checks entirely. Only use "
+    "this if the steps above didn't help, and only on the one package "
+    "causing the problem.":
+        "Dernier recours pour un seul paquet que pacman refuse normalement "
+        "de toucher — le supprime en ignorant entièrement les vérifications "
+        "de dépendances. À utiliser uniquement si les étapes ci-dessus n'ont "
+        "pas aidé, et uniquement sur le paquet à l'origine du problème.",
+    "Force-Remove Broken Package": "Forcer la suppression du paquet défectueux",
+    "Package name": "Nom du paquet",
 }
 
 
@@ -1234,6 +1870,8 @@ STRINGS_IT = {
     "Manage Repositories…": "Gestisci repository…",
     "Rate Mirrors…": "Valuta i mirror…",
     "Config Files (.pacnew)…": "File di configurazione (.pacnew)…",
+    "Config File Conflicts…": "Conflitti nei file di configurazione…",
+    "Config File Conflicts": "Conflitti nei file di configurazione",
     "Package History…": "Cronologia pacchetti…",
     "System Info": "Informazioni di sistema",
     "Cache Cleaner": "Pulizia cache",
@@ -1246,6 +1884,82 @@ STRINGS_IT = {
     "Preferences": "Preferenze",
     "Keyboard Shortcuts": "Scorciatoie da tastiera",
     "About Pachul": "Informazioni su Pachul",
+    "Pachul is a graphical package manager for Arch, Debian/Ubuntu, Fedora and openSUSE. Search, install, update and remove packages, review config file conflicts, keep external tools (rustup, npm, pip, Flatpak, …) up to date, and more — all from one native GTK4/libadwaita app.":
+        "Pachul è un gestore di pacchetti grafico per Arch, Debian/Ubuntu, Fedora e openSUSE. Cerca, installa, aggiorna e rimuovi pacchetti, controlla i conflitti nei file di configurazione, mantieni aggiornati strumenti esterni (rustup, npm, pip, Flatpak, …) e molto altro — tutto in un'unica app nativa GTK4/libadwaita.",
+    "Version {v}": "Versione {v}",
+    "Developer": "Sviluppatore",
+    "License": "Licenza",
+    "Distro": "Distribuzione",
+    "Package Manager": "Gestore pacchetti",
+    "Website": "Sito web",
+    "Report an Issue": "Segnala un problema",
+    "Copy Debug Info": "Copia informazioni di debug",
+    "Copied!": "Copiato!",
+
+    # Help dialog
+    "Help": "Aiuto",
+    "More Update Sources…": "Altre fonti di aggiornamento…",
+    "Ignored Packages…": "Pacchetti ignorati…",
+    "Browsing & Search": "Navigazione e ricerca",
+    "New Packages / All Packages / Installed / Updates": "Nuovi pacchetti / Tutti i pacchetti / Installati / Aggiornamenti",
+    "Sidebar filters for the package list — what's newly available, everything, only what's installed, or only what has an update pending.":
+        "Filtri della barra laterale per l'elenco pacchetti — novità, tutto, solo installati, oppure solo quelli con un aggiornamento in sospeso.",
+    "Type in the search bar (or press Ctrl+F) to filter the current list by name or description.":
+        "Digita nella barra di ricerca (o premi Ctrl+F) per filtrare l'elenco attuale per nome o descrizione.",
+    "Package details": "Dettagli del pacchetto",
+    "Click any package to see its description, version, size, dependencies and files on the right, with Install/Remove/Update actions.":
+        "Clicca su un pacchetto per vedere a destra descrizione, versione, dimensione, dipendenze e file, con le azioni Installa/Rimuovi/Aggiorna.",
+    "Updating": "Aggiornamento",
+    "Refresh the local package index from the repositories, without installing anything yet.":
+        "Aggiorna l'indice locale dei pacchetti dai repository, senza installare ancora nulla.",
+    "Sync, then rebuild the Updates list — same as pressing Ctrl+U.":
+        "Sincronizza e poi ricostruisce l'elenco degli aggiornamenti — equivale a Ctrl+U.",
+    "Reload the current view from what's already known locally, without contacting the repositories.":
+        "Ricarica la vista attuale da ciò che è già noto localmente, senza contattare i repository.",
+    "Install every pending update in one go — shown as a button whenever the Updates list isn't empty.":
+        "Installa tutti gli aggiornamenti in sospeso in un colpo solo — mostrato come pulsante quando l'elenco aggiornamenti non è vuoto.",
+    "Batch mode": "Modalità multi-selezione",
+    "Select several packages at once (checkboxes in the list) to install or remove them together; Ctrl+A / Ctrl+Shift+A select or deselect everything currently visible.":
+        "Seleziona più pacchetti insieme (caselle di controllo nell'elenco) per installarli o rimuoverli insieme; Ctrl+A / Ctrl+Maiusc+A seleziona o deseleziona tutto ciò che è visibile.",
+    "Repositories": "Repository",
+    "View and edit which package repositories are enabled.":
+        "Visualizza e modifica quali repository di pacchetti sono attivi.",
+    "Benchmark configured mirrors and switch to the fastest ones. Arch-only — Fedora and openSUSE already pick the fastest mirror automatically.":
+        "Verifica i mirror configurati e passa a quelli più veloci. Solo Arch — Fedora e openSUSE scelgono già automaticamente il mirror più veloce.",
+    "Tools": "Strumenti",
+    "List packages that were pulled in as dependencies but are no longer needed by anything, so you can clean them up.":
+        "Elenca i pacchetti installati come dipendenze ma non più necessari, così puoi rimuoverli.",
+    "Look up which installed package owns a given file path.":
+        "Verifica a quale pacchetto installato appartiene un determinato percorso di file.",
+    "Review and merge configuration files a package update left behind instead of overwriting your local changes.":
+        "Controlla e unisce i file di configurazione lasciati da un aggiornamento invece di sovrascrivere le tue modifiche locali.",
+    "Check for updates outside the system package manager — rustup, npm, pip, Flatpak, and similar tools.":
+        "Controlla gli aggiornamenti al di fuori del gestore pacchetti di sistema — rustup, npm, pip, Flatpak e strumenti simili.",
+    "Hold specific packages back from updates.":
+        "Esclude specifici pacchetti dagli aggiornamenti.",
+    "Browse a log of past installs, removals and updates.":
+        "Sfoglia un registro delle installazioni, rimozioni e aggiornamenti passati.",
+    "Overview of the system, hardware and installed packages.":
+        "Panoramica del sistema, dell'hardware e dei pacchetti installati.",
+    "Free up disk space by clearing old cached package files.":
+        "Libera spazio su disco eliminando i vecchi file dei pacchetti nella cache.",
+    "Package Lists": "Elenchi pacchetti",
+    "Save the list of explicitly installed packages to a file — handy for setting up another machine the same way.":
+        "Salva l'elenco dei pacchetti installati esplicitamente in un file — utile per configurare allo stesso modo un'altra macchina.",
+    "Install every package from a previously exported list.":
+        "Installa tutti i pacchetti da un elenco esportato in precedenza.",
+    "AUR / Advanced": "AUR / Avanzate",
+    "Inspect the build script of an AUR package before installing it.":
+        "Esamina lo script di compilazione di un pacchetto AUR prima di installarlo.",
+    "Toggle whether the selected packages are excluded from updates.":
+        "Attiva/disattiva l'esclusione dei pacchetti selezionati dagli aggiornamenti.",
+    "Mark Selected as Explicit / as Dependency": "Segna selezione come esplicita / come dipendenza",
+    "Change how a package is tracked, so orphan-cleanup treats it correctly.":
+        "Modifica il modo in cui un pacchetto viene tracciato, così la pulizia degli orfani lo gestisce correttamente.",
+    "App-wide settings: language, theme, and other options.":
+        "Impostazioni dell'intera app: lingua, tema e altre opzioni.",
+    "Version, license and system info for bug reports.":
+        "Versione, licenza e informazioni di sistema per le segnalazioni di bug.",
     "Upgrade Now": "Aggiorna ora",
 
     # Search page
@@ -1532,8 +2246,10 @@ STRINGS_IT = {
     # Pacdiff
     "Config Files (.pacnew / .pacsave)": "File di configurazione (.pacnew / .pacsave)",
     "Scanning for .pacnew/.pacsave files…": "Ricerca file .pacnew/.pacsave…",
+    "Scanning for config file conflicts…": "Ricerca di conflitti nei file di configurazione…",
     "Nothing to Merge": "Niente da unire",
     "No .pacnew or .pacsave files were found.": "Non è stato trovato alcun file .pacnew o .pacsave.",
+    "No config file conflicts were found.": "Non è stato trovato alcun conflitto nei file di configurazione.",
     "{n} file(s) left behind by package updates. Review the diff, then keep the new version or discard it.":
         "{n} file lasciato/i dagli aggiornamenti dei pacchetti. Controlla le differenze, poi mantieni la nuova versione oppure scartala.",
     "Loading diff…": "Caricamento differenze…",
@@ -1621,6 +2337,77 @@ STRINGS_IT = {
     # Tray indicator (tray.py)
     "Open Pachul": "Apri Pachul",
     "Checking for updates…": "Verifica aggiornamenti…",
+
+    # ── Repair System (pacman), Arch-only ───────────────────────────────────
+    "Repair System (pacman)…": "Ripara sistema (pacman)…",
+    "These run real pacman/pacman-key commands with sudo — read what each "
+    "one does before running it, especially the last one.":
+        "Questi eseguono veri comandi pacman/pacman-key con sudo — leggi "
+        "cosa fa ciascuno prima di eseguirlo, in particolare l'ultimo.",
+    "Standard Maintenance": "Manutenzione standard",
+    "Last Resort": "Ultima risorsa",
+    "Force-Refresh & Full Upgrade": "Aggiornamento forzato e upgrade completo",
+    "Runs 'pacman -Syyu' — forces a fresh download of all repo "
+    "databases (ignoring their last-sync timestamps) before "
+    "upgrading, useful when a mirror served stale or corrupt data.":
+        "Esegue «pacman -Syyu» — forza un nuovo download di tutti i database "
+        "dei repository (ignorando la data dell'ultima sincronizzazione) prima "
+        "dell'upgrade, utile quando un mirror ha fornito dati obsoleti o "
+        "corrotti.",
+    "Check Package Database Consistency": "Verifica coerenza del database dei pacchetti",
+    "Runs 'pacman -Dk' to check the local package database itself "
+    "for internal inconsistencies (separate from checking individual "
+    "installed files).":
+        "Esegue «pacman -Dk» per verificare che il database locale dei "
+        "pacchetti non presenti incoerenze interne (indipendentemente dalla "
+        "verifica dei singoli file installati).",
+    "Reinitialize Keyring": "Reinizializza il portachiavi",
+    "Runs 'pacman-key --init' and '--populate archlinux' — a deeper "
+    "fix than the automatic keyring banner elsewhere, for when "
+    "signature errors persist after that lighter fix.":
+        "Esegue «pacman-key --init» e «--populate archlinux» — una riparazione "
+        "più profonda rispetto al banner automatico del portachiavi altrove, "
+        "per quando gli errori di firma persistono dopo quella soluzione più "
+        "leggera.",
+    "Search for Packages With Missing/Modified Files": "Cerca pacchetti con file mancanti/modificati",
+    "Runs 'pacman -Qkk' with sudo (read-only, no changes are made). "
+    "If any packages come back altered, you'll be asked right away "
+    "which ones to repair.":
+        "Esegue «pacman -Qkk» con sudo (sola lettura, nessuna modifica viene "
+        "apportata). Se vengono segnalati pacchetti alterati, ti verrà "
+        "chiesto subito quali riparare.",
+    "Run": "Esegui",
+    "Repair Broken Packages": "Ripara pacchetti danneggiati",
+    "{n} package(s) with missing or altered files found":
+        "{n} pacchetto/i con file mancanti o alterati trovato/i",
+    "Choose which ones to reinstall from your configured "
+    "repositories to restore the original files:":
+        "Scegli quali reinstallare dai tuoi repository configurati "
+        "per ripristinare i file originali:",
+    "Repair {n} package(s)": "Ripara {n} pacchetto/i",
+    "(+{n} more)": "(+{n} altri)",
+    "({n} more package(s) with only config/permission "
+    "differences are hidden — reinstalling never touches "
+    "those.)":
+        "({n} altro/i pacchetto/i con solo differenze di config/permessi "
+        "sono nascosti — la reinstallazione non li tocca mai.)",
+    "All {n} package(s) only have config/permission "
+    "differences a reinstall can't fix.":
+        "Tutti i {n} pacchetto/i hanno solo differenze di config/permessi "
+        "che una reinstallazione non può correggere.",
+    "Select All": "Seleziona tutto",
+    "Select None": "Deseleziona tutto",
+    "Last resort for a single package pacman refuses to touch normally "
+    "— removes it while ignoring dependency checks entirely. Only use "
+    "this if the steps above didn't help, and only on the one package "
+    "causing the problem.":
+        "Ultima risorsa per un singolo pacchetto che pacman normalmente "
+        "rifiuta di toccare — lo rimuove ignorando completamente il "
+        "controllo delle dipendenze. Usa questa opzione solo se i passaggi "
+        "precedenti non hanno aiutato, e solo per il pacchetto che causa il "
+        "problema.",
+    "Force-Remove Broken Package": "Forza rimozione pacchetto danneggiato",
+    "Package name": "Nome del pacchetto",
 }
 
 

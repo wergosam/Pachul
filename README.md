@@ -4,11 +4,11 @@
 
 # Pachul
 
-**A modern, graphical package manager for Arch Linux and Manjaro**
-**Ein moderner, grafischer Paketmanager für Arch Linux und Manjaro**
+**A modern, graphical package manager for Arch Linux, Manjaro, Debian/Ubuntu, Fedora and openSUSE**
+**Ein moderner, grafischer Paketmanager für Arch Linux, Manjaro, Debian/Ubuntu, Fedora und openSUSE**
 
 [![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0)
-[![Platform](https://img.shields.io/badge/Platform-Arch%20%7C%20Manjaro-1793D1)](https://archlinux.org)
+[![Platform](https://img.shields.io/badge/Platform-Arch%20%7C%20Debian%2FUbuntu%20%7C%20Fedora%20%7C%20openSUSE-1793D1)](https://archlinux.org)
 [![AUR](https://img.shields.io/badge/AUR-available-5277C3)](https://aur.archlinux.org)
 [![GTK4](https://img.shields.io/badge/GTK-4-4A90D9)](https://gtk.org)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://www.python.org)
@@ -42,7 +42,9 @@
 
 ## Overview
 
-Pachul is a clean, fast GTK4 / libadwaita frontend for `pacman` and the AUR. It lets you search, install, update and manage packages without touching the terminal — while still giving you full, transparent control: every privileged action runs through a visible terminal panel, so you always see exactly what command is being executed.
+Pachul is a clean, fast GTK4 / libadwaita frontend for `pacman` and the AUR — and, since the multi-distro backend was added, for `apt` (Debian/Ubuntu), `dnf`/`dnf5` (Fedora) and `zypper` (openSUSE) as well. The distro family is detected automatically, so the same app searches, installs, updates and manages packages without touching the terminal — while still giving you full, transparent control: every privileged action runs through a visible terminal panel, so you always see exactly what command is being executed.
+
+Arch-only tools (Mirror Rater, PKGBUILD viewer, Arch news check, the `pacman.conf` repo editor) only appear on Arch/Manjaro; on other distros their native equivalents are used instead (see [What's New](#whats-new)), or they're simply hidden rather than shown greyed-out.
 
 Pachul follows the GNOME Human Interface Guidelines and adapts automatically to your system's light or dark style.
 
@@ -52,6 +54,11 @@ Pachul follows the GNOME Human Interface Guidelines and adapts automatically to 
 
 ## What's New
 
+- **Multi-distro support** — Pachul now runs natively on **Debian/Ubuntu (`apt`)**, **Fedora (`dnf`/`dnf5`)** and **openSUSE (`zypper`)**, in addition to Arch/Manjaro. The distro family is auto-detected from `/etc/os-release`, and Arch-exclusive tools stay hidden on other distros so the UI only ever shows what's actually supported there.
+- **Native package-manager bindings** — optional `python-apt` / `python3-dnf` / `python3-libdnf5` bindings are used automatically when available for a large speed boost (package-info lookups up to ~30× faster on Debian/Ubuntu), with a transparent fallback to the previous CLI-based path if anything goes wrong.
+- **Downgrade on every distro** — reinstall an older cached `.deb`/`.rpm`, or on Debian/Ubuntu any version still resolvable via `apt-cache madison`, installed through each distro's native downgrade command (`apt-get install --allow-downgrades`, `dnf downgrade`, `zypper install --oldpackage`).
+- **Third-party repository management** — the Repository Manager now also handles **PPAs** (Debian/Ubuntu, incl. modern deb822 `.sources` files), **COPR** (Fedora) and **OBS** repositories (openSUSE), alongside the existing `pacman.conf` editor for Arch.
+- **Generalized GPG & database-lock recovery** — the one-click **Import & Retry** / **Remove Lock & Retry** fixes now recognize and repair signature and lock errors across `apt`, `dnf` and `zypper`, not just `pacman`.
 - **Multi-select batch actions** — tick packages via checkbox (the selection survives search and filter changes) and install, remove, hold, or mark them all as explicit/dependency in one batch instead of one at a time.
 - **File → Package search** — find out which package owns a given file path via `pacman -Fx`, with a one-click prompt to sync the files database (`pacman -Fy`) first if it's missing.
 - **GPG signature-failure recovery** — Pachul recognizes unknown-key and outdated-keyring signature errors in the terminal output and offers a one-click **Import & Retry** or **Update Keyring & Retry** fix, the same way it already handles stale database locks.
@@ -94,6 +101,7 @@ See [Troubleshooting](#troubleshooting) below for the database-lock and GPG-sign
 ## Features
 
 ### Package management
+- **Multi-distro backend** — Arch/Manjaro (`pacman`/AUR), Debian/Ubuntu (`apt`), Fedora (`dnf`/`dnf5`) and openSUSE (`zypper`), auto-detected; optional native bindings (`python-apt`, `python3-dnf`, `python3-libdnf5`) speed things up further where available
 - **Search** official repositories and the AUR simultaneously, with live result counts
 - **Browse** packages by repository: `core`, `extra`, `multilib`, `aur`, `chaotic-aur`, and any other repo configured in `pacman.conf` — each gets its own sidebar filter and badge automatically
 - **Installed packages** — view, filter and manage everything on your system
@@ -111,7 +119,7 @@ See [Troubleshooting](#troubleshooting) below for the database-lock and GPG-sign
 - **Rate Mirrors** — geo-aware ranking via `rate-mirrors`, with sort order, HTTPS-only filter, automatic backup and configurable mirror count
 - Find Orphans — bulk-remove packages that are no longer required by anything
 - Clean Cache
-- Manage Repositories — inspect enabled repos and edit `pacman.conf` directly
+- Manage Repositories — inspect and toggle enabled repos; edit `pacman.conf` directly on Arch, or add/remove **PPAs** (Debian/Ubuntu), **COPR** (Fedora) and **OBS repositories** (openSUSE) on other distros
 - View / Merge Config Files (`.pacnew` / `.pacsave`) with a side-by-side diff view
 - Package History
 - System Info — OS, kernel, hardware, package counts and cache size at a glance
@@ -137,18 +145,20 @@ See [Troubleshooting](#troubleshooting) below for the database-lock and GPG-sign
 
 ## Installation
 
-### From the AUR
+### From the AUR (Arch / Manjaro)
 
 ```bash
 yay -S pachul
 ```
 
-### Manual (from source)
+### Manual (from source, any supported distro)
+
+Works the same way on Arch/Manjaro, Debian/Ubuntu, Fedora and openSUSE — Pachul detects the distro family automatically at startup:
 
 ```bash
 git clone https://github.com/wergosam/Pachul.git
 cd Pachul
-python app.py
+python3 app.py
 ```
 
 **Dependencies:**
@@ -159,9 +169,10 @@ python app.py
 | `python-gobject` | GTK4 / Adwaita Python bindings |
 | `gtk4` | GUI toolkit |
 | `libadwaita` | GNOME-style widgets and theming |
-| `pacman` | Package backend |
-| `yay`, `paru` or `pikaur` | AUR support (optional, auto-detected) |
-| `rate-mirrors` | Mirror ranking (optional) |
+| `pacman` (Arch) / `apt` (Debian, Ubuntu) / `dnf` (Fedora) / `zypper` (openSUSE) | Package backend, whichever matches your distro |
+| `yay`, `paru` or `pikaur` | AUR support on Arch (optional, auto-detected) |
+| `python-apt` / `python3-dnf` or `python3-libdnf5` | Optional native bindings for faster package operations on Debian/Ubuntu or Fedora (falls back to CLI automatically if absent) |
+| `rate-mirrors` | Mirror ranking on Arch (optional) |
 | `timeshift` or `snapper` | Pre-upgrade snapshot safety net (optional, either one) |
 | `systemd` | Background update-check timer (optional) |
 
@@ -213,8 +224,12 @@ pachul/
 │                    #   downgrade, PKGBUILD, pacdiff, preferences, shortcuts, news)
 ├── models.py       # GObject package model, virtualized ListView, sidebar rows
 ├── backend.py      # pacman / AUR integration, settings, systemd timer helpers
+├── distro.py       # Distro-family detection (Arch / Debian / Fedora / openSUSE)
+├── pkgmanager.py   # CLI-based apt / dnf / zypper command & parser layer
+├── pkgmanager_native.py  # Optional native bindings (python-apt, python3-dnf/dnf5) with CLI fallback
 ├── notifier.py     # Headless entry point for the systemd background timer
 ├── styles.py       # Application-wide CSS
+├── icons.py        # Icon theme handling
 ├── i18n.py         # Dictionary-based translations (EN / DE / FR / IT)
 ├── screenshots/    # README assets
 └── requirements.txt
@@ -300,6 +315,11 @@ Pachul folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch a
 
 ## Neuigkeiten
 
+- **Multi-Distro-Unterstützung** — Pachul läuft jetzt nativ auch auf **Debian/Ubuntu (`apt`)**, **Fedora (`dnf`/`dnf5`)** und **openSUSE (`zypper`)**, zusätzlich zu Arch/Manjaro. Die Distro-Familie wird automatisch anhand von `/etc/os-release` erkannt; rein Arch-spezifische Werkzeuge bleiben auf anderen Distros verborgen, sodass die Oberfläche immer nur das zeigt, was dort tatsächlich unterstützt wird.
+- **Native Paketmanager-Anbindung** — optionale `python-apt`- / `python3-dnf`- / `python3-libdnf5`-Bindings werden automatisch genutzt, wenn vorhanden, und bringen einen deutlichen Geschwindigkeitsschub (Paketinfo-Abfragen auf Debian/Ubuntu bis zu ~30× schneller), mit transparentem Rückfall auf den bisherigen CLI-Pfad, falls etwas schiefgeht.
+- **Downgrade auf jeder Distro** — eine ältere zwischengespeicherte `.deb`/`.rpm`-Version neu installieren, auf Debian/Ubuntu zusätzlich jede über `apt-cache madison` noch auflösbare Version, jeweils über den nativen Downgrade-Befehl der jeweiligen Distro (`apt-get install --allow-downgrades`, `dnf downgrade`, `zypper install --oldpackage`).
+- **Drittanbieter-Repository-Verwaltung** — der Repository-Manager beherrscht jetzt auch **PPAs** (Debian/Ubuntu, inkl. moderner deb822-`.sources`-Dateien), **COPR** (Fedora) und **OBS-Repositories** (openSUSE), zusätzlich zum bestehenden `pacman.conf`-Editor für Arch.
+- **Verallgemeinerte GPG- und Datenbank-Sperre-Behebung** — die Ein-Klick-Fixes „Importieren & erneut versuchen" / „Sperre entfernen & erneut versuchen" erkennen und beheben Signatur- und Sperrfehler jetzt auch bei `apt`, `dnf` und `zypper`, nicht nur bei `pacman`.
 - **Mehrfachauswahl-Sammelaktionen** — Pakete per Checkbox ankreuzen (die Auswahl bleibt auch bei Such-/Filteränderungen erhalten) und alle zusammen installieren, entfernen, sperren oder als explizit/Abhängigkeit markieren, statt einzeln.
 - **Datei-→-Paket-Suche** — herausfinden, welches Paket einen bestimmten Dateipfad besitzt (über `pacman -Fx`), mit Ein-Klick-Angebot zum Synchronisieren der Dateien-Datenbank (`pacman -Fy`), falls diese fehlt.
 - **GPG-Signaturfehler-Behebung** — Pachul erkennt unbekannte Schlüssel und veraltete Keyring-Signaturfehler in der Terminal-Ausgabe und bietet einen Ein-Klick-Fix **„Importieren & erneut versuchen"** oder **„Keyring aktualisieren & erneut versuchen"** an — genauso wie bereits bei veralteten Datenbank-Sperren.
@@ -332,6 +352,7 @@ Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten für Details zu den Datenba
 ## Funktionen
 
 ### Paketverwaltung
+- **Multi-Distro-Backend** — Arch/Manjaro (`pacman`/AUR), Debian/Ubuntu (`apt`), Fedora (`dnf`/`dnf5`) und openSUSE (`zypper`), automatisch erkannt; optionale native Bindings (`python-apt`, `python3-dnf`, `python3-libdnf5`) beschleunigen zusätzlich, wo verfügbar
 - **Suche** gleichzeitig in offiziellen Repositorien und im AUR, mit Live-Trefferzahl
 - **Durchsuchen** nach Repository: `core`, `extra`, `multilib`, `aur`, `chaotic-aur` sowie jedem weiteren, in `pacman.conf` konfigurierten Repository — jedes erhält automatisch einen eigenen Filter und ein eigenes Badge in der Seitenleiste
 - **Installierte Pakete** — alles auf deinem System ansehen, filtern und verwalten
@@ -349,7 +370,7 @@ Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten für Details zu den Datenba
 - **Spiegelserver bewerten** — standortbasiertes Ranking über `rate-mirrors`, mit Sortieroptionen, Nur-HTTPS-Filter, automatischer Sicherung und einstellbarer Anzahl der Spiegelserver
 - Waisen finden — nicht mehr benötigte Pakete gesammelt entfernen
 - Cache leeren
-- Repositorien verwalten — aktivierte Repos einsehen und `pacman.conf` direkt bearbeiten
+- Repositorien verwalten — aktivierte Repos einsehen und umschalten; unter Arch `pacman.conf` direkt bearbeiten, auf anderen Distros **PPAs** (Debian/Ubuntu), **COPR** (Fedora) und **OBS-Repositories** (openSUSE) hinzufügen/entfernen
 - Konfigurationsdateien anzeigen/zusammenführen (`.pacnew` / `.pacsave`) mit Diff-Ansicht nebeneinander
 - Paketverlauf
 - Systeminformationen — Betriebssystem, Kernel, Hardware, Paketanzahl und Cache-Größe auf einen Blick
@@ -375,18 +396,20 @@ Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten für Details zu den Datenba
 
 ## Installation
 
-### Aus dem AUR
+### Aus dem AUR (Arch / Manjaro)
 
 ```bash
 yay -S pachul
 ```
 
-### Manuell (aus dem Quellcode)
+### Manuell (aus dem Quellcode, auf jeder unterstützten Distro)
+
+Funktioniert gleichermassen auf Arch/Manjaro, Debian/Ubuntu, Fedora und openSUSE — Pachul erkennt die Distro-Familie beim Start automatisch:
 
 ```bash
 git clone https://github.com/wergosam/Pachul.git
 cd Pachul
-python app.py
+python3 app.py
 ```
 
 **Abhängigkeiten:**
@@ -397,9 +420,10 @@ python app.py
 | `python-gobject` | GTK4-/Adwaita-Python-Bindings |
 | `gtk4` | GUI-Toolkit |
 | `libadwaita` | GNOME-typische Widgets und Theming |
-| `pacman` | Paket-Backend |
-| `yay`, `paru` oder `pikaur` | AUR-Unterstützung (optional, automatisch erkannt) |
-| `rate-mirrors` | Spiegelserver-Bewertung (optional) |
+| `pacman` (Arch) / `apt` (Debian, Ubuntu) / `dnf` (Fedora) / `zypper` (openSUSE) | Paket-Backend, je nach Distro |
+| `yay`, `paru` oder `pikaur` | AUR-Unterstützung auf Arch (optional, automatisch erkannt) |
+| `python-apt` / `python3-dnf` bzw. `python3-libdnf5` | Optionale native Bindings für schnellere Paketoperationen auf Debian/Ubuntu bzw. Fedora (fällt automatisch auf CLI zurück, falls nicht vorhanden) |
+| `rate-mirrors` | Spiegelserver-Bewertung auf Arch (optional) |
 | `timeshift` oder `snapper` | Snapshot-Sicherheitsnetz vor Upgrades (optional, eines von beiden) |
 | `systemd` | Timer für Hintergrund-Update-Prüfung (optional) |
 
@@ -451,8 +475,12 @@ pachul/
 │                    #   Downgrade, PKGBUILD, Pacdiff, Einstellungen, Kurzbefehle, News)
 ├── models.py       # GObject-Paketmodell, virtualisierte ListView, Seitenleisten-Zeilen
 ├── backend.py      # pacman-/AUR-Integration, Einstellungen, systemd-Timer-Hilfsfunktionen
+├── distro.py       # Distro-Familien-Erkennung (Arch / Debian / Fedora / openSUSE)
+├── pkgmanager.py   # CLI-basierte Befehls-/Parser-Schicht für apt / dnf / zypper
+├── pkgmanager_native.py  # Optionale native Bindings (python-apt, python3-dnf/dnf5) mit CLI-Fallback
 ├── notifier.py     # Headless-Einstiegspunkt für den systemd-Hintergrund-Timer
 ├── styles.py       # Anwendungsweites CSS
+├── icons.py        # Icon-Theme-Verwaltung
 ├── i18n.py         # Wörterbuch-basierte Übersetzungen (EN / DE / FR / IT)
 ├── screenshots/    # README-Grafiken
 └── requirements.txt

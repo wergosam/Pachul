@@ -20,18 +20,22 @@ import tempfile
 import threading
 import urllib.parse
 from datetime import datetime
+from pathlib import Path
 
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, GLib, Pango
+from gi.repository import Gtk, Adw, GLib, Pango, Gdk
 
+import distro
+import pkgmanager
 from backend import (run_command, get_orphans, get_system_info,
-                     get_pacman_history, get_cached_versions,
+                     get_pacman_history,
+                     get_downgrade_candidates, build_downgrade_cmd,
                      get_pkgbuild, get_pacnew_files, get_file_diff, get_setting, save_settings,
                      files_db_available, search_file_owner, get_package_cache_size,
                      get_tool_updates, paru_installed, get_paru_bootstrap_cmd,
-                     get_ignored_packages, set_packages_ignored)
+                     get_ignored_packages, build_hold_cmd_bulk)
 from i18n import tr, get_language, set_language
 from icons import themed_image, themed_paintable
 
@@ -68,6 +72,8 @@ _DB_LOCK_RE = _re.compile(
 
 def _detect_gpg_issue(text):
     """Return a hex key ID, "" (generic — no ID found), or None (no GPG issue)."""
+    if not distro.is_arch():
+        return pkgmanager.detect_gpg_issue(text)
     m = _GPG_KEY_ID_RE.search(text)
     if m:
         return m.group(1).upper()
@@ -76,20 +82,146 @@ def _detect_gpg_issue(text):
     return None
 
 
-def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None):
+def _detect_lock_issue(text):
+    if not distro.is_arch():
+        return pkgmanager.detect_lock_issue(text)
+    return bool(_DB_LOCK_RE.search(text))
+
+
+# Matches both of pacman's per-file mismatch line formats — "backup file:"
+# (older pacman versions, and always used for files in a package's backup=()
+# array) and plain "warning:" (newer versions, and always used for regular,
+# non-backup files):
+#   warning: accountsservice: /var/lib/AccountsService/icons (Permissions mismatch)
+#   backup file: pacman-mirrorlist: /etc/pacman.d/mirrorlist (Modification time mismatch)
+_QKK_WARN_RE = _re.compile(r'^(?:warning|backup file):\s*(.+)$')
+# The per-package summary line pacman -Qkk prints after that package's
+# warnings, e.g. "accountsservice: 286 total files, 1 altered file". In
+# real-world testing this count DOES include backup/config-file mismatches
+# (contrary to what an old upstream bug report — FS#57680 — suggested it
+# shouldn't), so this alone can't be used to tell "genuinely broken" apart
+# from "you edited a config file, which is normal" — see
+# _is_config_backup_path() below for that.
+_QKK_SUMMARY_RE = _re.compile(r'^([^\s:]+):\s*\d+\s*total files,\s*(\d+)\s*altered files?\s*$')
+
+
+def _is_config_backup_path(detail_line):
+    """True if a pacman -Qkk detail line ("/etc/foo.conf (Size mismatch)")
+    is for a file under /etc/ — by long-standing Arch packaging convention,
+    the only place a package's backup=() (config) files ever live. Pacman
+    deliberately never overwrites a locally-modified config file on
+    reinstall (it writes a .pacnew alongside instead), so these will keep
+    showing up as "altered" forever no matter how many times the owning
+    package gets reinstalled — that's not corruption, it's the file doing
+    exactly what it's supposed to do."""
+    return detail_line.startswith("/etc/")
+
+
+_DETAIL_LINE_RE = _re.compile(r'^(.*) \(([^)]+)\)$')
+_DIR_METADATA_ONLY_REASONS = ("Permissions mismatch", "UID mismatch", "GID mismatch")
+
+
+def _is_unfixable_dir_metadata(detail_line):
+    """True if this is a Permissions/UID/GID mismatch on a directory.
+    Confirmed directly against a real upgrade log: pacman prints
+    "Verzeichnis-Berechtigungen unterscheiden sich" for a directory during
+    a genuine reinstall and leaves it exactly as it was — it never
+    chmods/chowns a directory that already exists, whether or not it's
+    package-owned. A content-based reason (anything other than pure
+    permissions/ownership) is left alone even on a directory, since that
+    would mean something more than metadata changed."""
+    m = _DETAIL_LINE_RE.match(detail_line)
+    if not m:
+        return False
+    path, reason = m.group(1), m.group(2)
+    if reason not in _DIR_METADATA_ONLY_REASONS:
+        return False
+    try:
+        return os.path.isdir(path)
+    except OSError:
+        return False
+
+
+def _is_unfixable_by_reinstall(detail_line):
+    """Union of every "reinstalling this package will never clear this
+    particular warning" case recognized so far."""
+    return (_is_config_backup_path(detail_line)
+            or _is_unfixable_dir_metadata(detail_line))
+
+
+def _parse_qkk_details(raw_text):
+    """Group pacman -Qkk's per-file warning lines by the package whose
+    summary line they precede, keeping only packages pacman itself counted
+    as having >0 altered files. Returns {pkg_name: [detail_line, ...]},
+    where each detail_line is e.g. "/var/lib/AccountsService/icons
+    (Permissions mismatch)" — used to show *why* a package keeps showing
+    up (often a cache file a pacman hook regenerates on every install,
+    which no amount of reinstalling will ever "fix") instead of just its
+    bare name.
+    """
+    details = {}
+    buf = []
+    for line in raw_text.splitlines():
+        line = line.rstrip()
+        m_warn = _QKK_WARN_RE.match(line)
+        if m_warn:
+            buf.append(m_warn.group(1))
+            continue
+        m_sum = _QKK_SUMMARY_RE.match(line)
+        if m_sum:
+            pkg, n_altered = m_sum.group(1), int(m_sum.group(2))
+            if n_altered > 0:
+                # Keep the package even if buf is empty (e.g. its warning
+                # lines used some format this parser doesn't recognize
+                # yet) — better an entry with no detail text than silently
+                # dropping a package pacman itself flagged as altered.
+                prefix = pkg + ":"
+                details[pkg] = [
+                    (d[len(prefix):].strip() if d.startswith(prefix) else d)
+                    for d in buf
+                ]
+            buf = []
+            continue
+        if line and not line.startswith(("warning:", "backup file:")):
+            buf = []  # unrelated pacman output — don't misattribute stale entries
+    return details
+
+
+def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
+                         target_window=None, on_success_with_window=None):
     """
     Open a PTY-backed terminal dialog that runs *cmd*.
     Calls on_success() (on the main thread) if the command exits with code 0.
+    If on_success_with_window is given, it's called instead as
+    on_success_with_window(dialog) — same trigger, but also handed this
+    dialog's own window so the caller can keep reusing it (e.g. via
+    target_window on a follow-up call) instead of opening a new one.
 
     If the command fails with a recognizable GPG/signature error, offers an
     inline one-click fix (import the missing key, or refresh the keyring)
     followed by an automatic retry of *cmd* in a fresh dialog.
+
+    If target_window is given (an already-presented Adw.Window), its
+    content is replaced with this freshly-built terminal UI and the
+    command runs there instead of opening a brand new window on top of
+    it — used so a short multi-step flow (scan → pick packages → repair)
+    stays in one window instead of stacking a new one at every step.
     """
-    dialog = Adw.Dialog()
-    dialog.set_title(title)
-    dialog.set_content_width(780)
-    dialog.set_content_height(780)
-    dialog.set_follows_content_size(False)
+    # A real top-level Adw.Window instead of Adw.Dialog: Adw.Dialog is
+    # deliberately a fixed-size "sheet" centered over the parent — it can't
+    # be dragged or resized by the user. Adw.Window is a genuine window, so
+    # the window manager gives it normal move/resize behaviour (drag the
+    # header bar to move, drag an edge/corner to resize).
+    if target_window is not None:
+        dialog = target_window
+        dialog.set_title(title)
+    else:
+        dialog = Adw.Window()
+        dialog.set_title(title)
+        dialog.set_default_size(780, 780)
+        dialog.set_resizable(True)
+        dialog.set_transient_for(parent)
+        dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -116,15 +248,6 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     hdr.pack_start(cancel_btn)
     tv.add_top_bar(hdr)
 
-    cmd_lbl = Gtk.Label(label=f"$ {cmd}")
-    cmd_lbl.add_css_class("caption")
-    cmd_lbl.add_css_class("dim-label")
-    cmd_lbl.set_halign(Gtk.Align.START)
-    cmd_lbl.set_ellipsize(Pango.EllipsizeMode.END)
-    cmd_lbl.set_margin_start(14); cmd_lbl.set_margin_end(14)
-    cmd_lbl.set_margin_top(6);    cmd_lbl.set_margin_bottom(4)
-    tv.add_top_bar(cmd_lbl)
-
     gpg_banner = Adw.Banner()
     gpg_banner.set_revealed(False)
     tv.add_top_bar(gpg_banner)
@@ -133,9 +256,19 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     outer.set_margin_top(8);    outer.set_margin_bottom(12)
     outer.set_margin_start(12); outer.set_margin_end(12)
 
-    # Real progress bar, parsed live from pacman's own "[####----] NN%" lines
-    # (download progress and "(i/n) installing pkg [...] NN%" alike). Hidden
-    # until the first such line arrives; hidden again once the command ends.
+    # Real progress bars, parsed live from pacman's own "[####----] NN%"
+    # lines. Two stacked bars:
+    #   - progress_bar:         the package currently being downloaded or
+    #                            installed right now (e.g. "firefox 68%").
+    #   - overall_progress_bar: how far through the whole transaction we
+    #                           are, from pacman's own "(i/n) installing
+    #                           pkg [...] NN%" counter — only shown once a
+    #                           line with that counter has actually been
+    #                           seen, since plain download lines don't
+    #                           carry an (i/n) prefix and some tools never
+    #                           emit one at all.
+    # Both hidden until their first matching line arrives; hidden again
+    # once the command ends.
     progress_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
     progress_box.set_visible(False)
     progress_label = Gtk.Label(label="")
@@ -147,7 +280,33 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     progress_bar.set_hexpand(True)
     progress_bar.set_show_text(True)
     progress_box.append(progress_bar)
+
+    overall_progress_label = Gtk.Label(label="")
+    overall_progress_label.add_css_class("caption")
+    overall_progress_label.add_css_class("dim-label")
+    overall_progress_label.set_xalign(0.0)
+    overall_progress_label.set_margin_top(4)
+    overall_progress_label.set_visible(False)
+    progress_box.append(overall_progress_label)
+    overall_progress_bar = Gtk.ProgressBar()
+    overall_progress_bar.set_hexpand(True)
+    overall_progress_bar.set_show_text(True)
+    overall_progress_bar.set_visible(False)
+    progress_box.append(overall_progress_bar)
     outer.append(progress_box)
+
+    # Overall-progress state for the whole transaction, not just whichever
+    # single package Bar 1 currently shows. A pacman transaction is really
+    # two back-to-back phases across the same package list — download,
+    # then install — and only the install phase carries pacman's own
+    # authoritative "(i/n)" counter; download lines never have one. Track
+    # each phase's own fraction (download via counting distinct package
+    # items against the transaction total, install via the (i/n) counter)
+    # and blend them 50/50 into one continuous bar, rather than switching
+    # trackers mid-transaction and having it visibly jump backwards from
+    # "100%" (end of downloads) to e.g. "33%" (install just starting).
+    _dl_total = [0]
+    _dl_seen = set()
 
     scroll = Gtk.ScrolledWindow()
     scroll.set_vexpand(True); scroll.set_hexpand(True)
@@ -179,7 +338,7 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
 
     pw_entry = Gtk.Entry()
     pw_entry.set_hexpand(True)
-    pw_entry.set_visibility(False)
+    pw_entry.set_visibility(True)
     pw_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
     pw_entry.set_placeholder_text(tr("Password or input — press Enter to send"))
     input_box.append(pw_entry)
@@ -188,22 +347,26 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     send_btn.add_css_class("suggested-action")
     input_box.append(send_btn)
 
-    toggle_vis_btn = Gtk.ToggleButton()
-    toggle_vis_btn.set_child(themed_image("view-reveal-symbolic", 18))
-    toggle_vis_btn.add_css_class("image-button")
-    toggle_vis_btn.add_css_class("flat")
-    toggle_vis_btn.set_tooltip_text(tr("Show/hide input"))
-    toggle_vis_btn.connect("toggled", lambda b, *_: pw_entry.set_visibility(b.get_active()))
-    input_box.append(toggle_vis_btn)
-
     input_frame.set_child(input_box)
     outer.append(input_frame)
 
     tv.set_content(outer)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
 
-    # Fokus direkt ins Passwort-/Eingabefeld setzen, damit man sofort
+    # Now that this is a real window, guard against the window manager's
+    # own close controls (taskbar "×", Alt+F4, etc.) closing it while a
+    # command is still running — that would kill pacman/apt/dnf mid-
+    # transaction without the clean SIGTERM the Cancel button sends.
+    # Our own Close button already stays disabled until the command
+    # finishes; this just closes the same gap for WM-level close requests.
+    def _on_close_request(*_):
+        if _running[0]:
+            cancel_btn.grab_focus()
+            return True   # block the close
+        return False      # allow it
+    dialog.connect("close-request", _on_close_request)
+
+    dialog.present()
     # tippen kann, ohne vorher hineinklicken zu müssen. Direkt nach
     # present() ist das Fenster meist noch nicht vollständig gemappt,
     # daher via idle_add einmalig verzögert ausführen.
@@ -244,15 +407,43 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
     # Matches pacman's own progress-bar lines, e.g.:
     #   firefox-125.0-1-x86_64.pkg.tar.zst  65.2 MiB  15.3 MiB/s 00:03 [###----] 68%
     #   (3/12) installing firefox                        [######------------] 71%
+    # The leading "(i/n)" counter is optional. It's NOT a reliable signal
+    # for "this is an install line, not a download line" on its own —
+    # some pacman versions/configs print one on download lines too — so
+    # phase classification below uses the .pkg.tar.* filename instead
+    # (see _PKG_FILE_RE), and this is only used for its actual i/n values
+    # once a line has already been classified as an install line.
     # The bracket contents are left generic ([^\]]*) since the fill character
     # varies with pacman's Color/ILoveCandy settings.
-    _PROGRESS_RE = _re.compile(r'^\s*(\S.*?)\s+\[[^\]]*\]\s*(\d{1,3})%\s*$')
+    _PROGRESS_RE = _re.compile(
+        r'^\s*(?:\((\d+)/(\d+)\)\s*)?(\S.*?)\s+\[[^\]]*\]\s*(\d{1,3})%\s*$'
+    )
+    # A package archive filename — always ends this way regardless of
+    # pacman's UI locale, unlike matching on translated verbs like
+    # "installing"/"installiere". Used to tell download lines apart from
+    # install lines no matter what (i/n)-prefix behavior this pacman
+    # version/config happens to have.
+    _PKG_FILE_RE = _re.compile(r'\.pkg\.tar\.\w+$')
+    # pacman's transaction-summary line, printed once right before any
+    # progress bars start, e.g. "Pakete (26) audit-4.2.1-1  cups-pdf-3.0.3-1"
+    # (German) or "Packages (26) audit-4.2.1-1 cups-pdf-3.0.3-1" (English) —
+    # gives an upfront estimate of the transaction total. Treated as a
+    # floor rather than gospel below, since e.g. newly-pulled-in optional
+    # dependencies can grow the real count past this initial number.
+    _TOTAL_PKGS_RE = _re.compile(r'^(?:Pakete|Packages)\s*\((\d+)\)')
 
     def _update_progress(line):
+        m_total = _TOTAL_PKGS_RE.match(line.strip())
+        if m_total:
+            _dl_total[0] = int(m_total.group(1))
+            return
         m = _PROGRESS_RE.match(line)
         if not m:
             return
-        desc, pct = m.group(1).strip(), max(0, min(100, int(m.group(2))))
+        idx_str, total_str, desc, pct_str = m.groups()
+        desc, pct = desc.strip(), max(0, min(100, int(pct_str)))
+
+        # Bar 1: the package currently being downloaded/installed.
         progress_bar.set_fraction(pct / 100.0)
         progress_bar.set_text(f"{pct}%")
         item = desc.split()[0] if desc.split() else desc
@@ -260,6 +451,46 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
         progress_label.set_tooltip_text(desc)
         if not progress_box.get_visible():
             progress_box.set_visible(True)
+
+        # Bar 2: overall progress across the whole transaction, blended
+        # 50/50 from the two phases so it's one continuous 0-100% climb
+        # instead of two separate 0-100% cycles (download, then install)
+        # that would otherwise make it visibly jump backwards partway
+        # through. A line only counts as "install phase" if its item
+        # ISN'T a .pkg.tar.* filename — download lines get counted by
+        # distinct package items seen instead, even if this particular
+        # pacman happens to also print an (i/n) prefix on them.
+        is_install_line = (idx_str is not None) and not _PKG_FILE_RE.search(item)
+        if is_install_line:
+            idx, total = int(idx_str), int(total_str)
+            install_frac = (idx - 1 + pct / 100.0) / total if total else 0.0
+            overall_frac = 0.5 + 0.5 * install_frac
+            label_txt = f"{idx}/{total}"
+        else:
+            if pct >= 100:
+                _dl_seen.add(item)
+            completed = len(_dl_seen)
+            # Never let the denominator be smaller than what we've
+            # actually observed — if more packages turn up than the
+            # transaction-summary line originally promised (e.g. newly
+            # pulled-in optional deps), grow the total to match instead
+            # of letting the fraction hit 100% before everything's
+            # actually done.
+            pending = 0 if item in _dl_seen else 1
+            total = max(_dl_total[0], completed + pending)
+            _dl_total[0] = total
+            dl_num = completed if item in _dl_seen else completed + pct / 100.0
+            dl_frac = dl_num / total if total else 0.0
+            overall_frac = 0.5 * dl_frac
+            idx = min(completed + pending, total)
+            label_txt = f"{idx}/{total}"
+        if total > 0:
+            overall_progress_bar.set_fraction(max(0.0, min(1.0, overall_frac)))
+            overall_progress_bar.set_text(label_txt)
+            overall_progress_label.set_label(tr("Overall progress"))
+            if not overall_progress_bar.get_visible():
+                overall_progress_bar.set_visible(True)
+                overall_progress_label.set_visible(True)
 
     def append_output(raw_text):
         # Normalize real newlines first, but keep lone '\r' (carriage return
@@ -351,6 +582,16 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
         close_btn.set_sensitive(True)
         close_btn.grab_focus()
         progress_box.set_visible(False)
+        overall_progress_bar.set_visible(False)
+        overall_progress_label.set_visible(False)
+        # fwupdmgr's own exit-code convention (documented in its man page):
+        # 0 = did something successfully, 1 = genuine failure, 2 = ran fine
+        # but had nothing to do (e.g. "get-updates"/"update" with no
+        # pending firmware). That "2" is not an error — without this, every
+        # firmware check/update with nothing pending shows as failed here
+        # even though it completed exactly as expected.
+        if code == 2 and "fwupdmgr" in cmd:
+            code = 0
         sep = "\n" + "─" * 56 + "\n"
         if code == 0:
             append_output(sep + tr("✓  Completed successfully\n"))
@@ -366,11 +607,16 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
 
                 def _do_gpg_fix(*_):
                     gpg_banner.set_revealed(False)
-                    if key_id:
-                        fix = (f"sudo -S pacman-key --recv-keys {key_id} && "
-                               f"sudo -S pacman-key --lsign-key {key_id}")
+                    if distro.is_arch():
+                        if key_id:
+                            fix = (f"sudo -S pacman-key --recv-keys {key_id} && "
+                                   f"sudo -S pacman-key --lsign-key {key_id}")
+                        else:
+                            fix = "sudo -S pacman -Sy --needed --noconfirm archlinux-keyring"
                     else:
-                        fix = "sudo -S pacman -Sy --needed --noconfirm archlinux-keyring"
+                        fix = pkgmanager.gpg_fix_cmd(key_id or None)
+                    if not fix:
+                        return
                     dialog.close()
                     run_terminal_dialog(parent, f"{fix} && {cmd}", title,
                                         on_success=on_success, on_done_extra=on_done_extra)
@@ -383,54 +629,63 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None)
                     gpg_banner.set_button_label(tr("Update Keyring & Retry"))
                 gpg_banner.connect("button-clicked", _do_gpg_fix)
                 gpg_banner.set_revealed(True)
-            elif _DB_LOCK_RE.search(full_text):
+            elif _detect_lock_issue(full_text):
                 def _do_lock_fix(*_):
                     gpg_banner.set_revealed(False)
-                    # Safety check baked into the fix itself: only remove
-                    # db.lck if something is actually still holding it —
-                    # otherwise we'd risk corrupting a genuinely in-progress
-                    # operation. `fuser` checks the *file itself*, so it also
-                    # catches the most common real-world cause of this
-                    # repeating right after every single transaction:
-                    # PackageKit's packagekitd (used by KDE Discover / some
-                    # Plasma widgets) waking up and briefly re-locking the
-                    # same pacman db right after pacman finishes. A plain
-                    # `pgrep pacman` would miss that entirely, since the
-                    # process holding the lock isn't named "pacman" at all.
-                    # Falls back to a wider process-name check if `fuser`
-                    # (psmisc) isn't installed.
-                    #
-                    # IMPORTANT: build the inner script as one plain string,
-                    # then quote it EXACTLY ONCE with shlex.quote() for
-                    # embedding into the outer command. Manually wrapping it
-                    # in '...' *and* separately shlex.quote()-ing the message
-                    # inside (as an earlier version of this code did) nests
-                    # two independently-generated single-quoted spans — since
-                    # shells can't nest ' inside ', that closes the script
-                    # early and leaves an unterminated `if` behind, causing
-                    # exactly the "unexpected end of file" error seen before.
-                    lock_msg = tr("Something is still holding the database lock — not removing it.")
-                    inner_script = (
-                        "if command -v fuser >/dev/null 2>&1; then "
-                        "  fuser -s /var/lib/pacman/db.lck 2>/dev/null; held=$?; "
-                        "else "
-                        "  (pgrep -x pacman || pgrep -x pacman-key || pgrep -x packagekitd "
-                        "   || pgrep -x pamac-daemon) >/dev/null; held=$?; "
-                        "fi; "
-                        f"if [ \"$held\" = 0 ]; then echo {shlex.quote(lock_msg)} >&2; exit 1; "
-                        "else rm -f /var/lib/pacman/db.lck; fi"
-                    )
-                    fix = "sudo -S bash -c " + shlex.quote(inner_script)
+                    if distro.is_arch():
+                        # Safety check baked into the fix itself: only remove
+                        # db.lck if something is actually still holding it —
+                        # otherwise we'd risk corrupting a genuinely in-progress
+                        # operation. `fuser` checks the *file itself*, so it also
+                        # catches the most common real-world cause of this
+                        # repeating right after every single transaction:
+                        # PackageKit's packagekitd (used by KDE Discover / some
+                        # Plasma widgets) waking up and briefly re-locking the
+                        # same pacman db right after pacman finishes. A plain
+                        # `pgrep pacman` would miss that entirely, since the
+                        # process holding the lock isn't named "pacman" at all.
+                        # Falls back to a wider process-name check if `fuser`
+                        # (psmisc) isn't installed.
+                        #
+                        # IMPORTANT: build the inner script as one plain string,
+                        # then quote it EXACTLY ONCE with shlex.quote() for
+                        # embedding into the outer command. Manually wrapping it
+                        # in '...' *and* separately shlex.quote()-ing the message
+                        # inside (as an earlier version of this code did) nests
+                        # two independently-generated single-quoted spans — since
+                        # shells can't nest ' inside ', that closes the script
+                        # early and leaves an unterminated `if` behind, causing
+                        # exactly the "unexpected end of file" error seen before.
+                        lock_msg = tr("Something is still holding the database lock — not removing it.")
+                        inner_script = (
+                            "if command -v fuser >/dev/null 2>&1; then "
+                            "  fuser -s /var/lib/pacman/db.lck 2>/dev/null; held=$?; "
+                            "else "
+                            "  (pgrep -x pacman || pgrep -x pacman-key || pgrep -x packagekitd "
+                            "   || pgrep -x pamac-daemon) >/dev/null; held=$?; "
+                            "fi; "
+                            f"if [ \"$held\" = 0 ]; then echo {shlex.quote(lock_msg)} >&2; exit 1; "
+                            "else rm -f /var/lib/pacman/db.lck; fi"
+                        )
+                        fix = "sudo -S bash -c " + shlex.quote(inner_script)
+                    else:
+                        fix = pkgmanager.lock_fix_cmd()
+                    if not fix:
+                        return
                     dialog.close()
                     run_terminal_dialog(parent, f"{fix} && {cmd}", title,
                                         on_success=on_success, on_done_extra=on_done_extra)
 
-                gpg_banner.set_title(tr("Pacman database is locked (stale db.lck)"))
+                lock_title = tr("Pacman database is locked (stale db.lck)") if distro.is_arch() \
+                    else tr("Package manager is locked (stale lock file)")
+                gpg_banner.set_title(lock_title)
                 gpg_banner.set_button_label(tr("Remove Lock & Retry"))
                 gpg_banner.connect("button-clicked", _do_lock_fix)
                 gpg_banner.set_revealed(True)
         if code == 0 and on_success:
             on_success()
+        if code == 0 and on_success_with_window:
+            on_success_with_window(dialog)
         if on_done_extra:
             on_done_extra(code)
         return False
@@ -587,14 +842,16 @@ def show_sync_db_dialog(parent, on_confirm):
 # ─── Repository manager dialog ────────────────────────────────────────────────
 
 def show_repo_manager(parent, run_terminal_fn):
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("Manage Repositories"))
     # Was 640×500 — far too cramped for comfortably editing pacman.conf.
-    # Adw.Dialog doesn't support free resizing by dragging an edge, so the
-    # practical fix is simply to open it noticeably bigger by default and
-    # let the editor area expand to fill whatever room it has.
-    dialog.set_content_width(920)
-    dialog.set_content_height(800)
+    # Now a real, resizable Adw.Window instead of Adw.Dialog, so the user
+    # can also just drag it bigger themselves; this default just starts
+    # it out roomy.
+    dialog.set_default_size(920, 800)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -705,17 +962,1594 @@ def show_repo_manager(parent, run_terminal_fn):
     scroller.set_vexpand(True)
     scroller.set_child(outer)
     tv.set_content(scroller)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
+
+
+def show_repo_manager_native(parent, run_terminal_fn):
+    """Repo Manager for apt/dnf/zypper: list configured repos with an
+    enable/disable switch each, plus an "Add {PPA/COPR/OBS}" row. Unlike
+    the Arch version above (a single pacman.conf text editor), each
+    family here spreads repo config across several files or its own
+    dedicated subcommand — so rather than a raw text editor, this reads
+    the current state via pkgmanager.list_repos() and drives every change
+    through pkgmanager's own command builders."""
+    dialog = Adw.Window()
+    dialog.set_title(tr("Manage Repositories"))
+    dialog.set_default_size(640, 680)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    kind_label = pkgmanager.third_party_kind_label()
+
+    repos_group = Adw.PreferencesGroup()
+    repos_group.set_title(tr("Configured Repositories"))
+    repos = pkgmanager.list_repos()
+    if not repos:
+        repos_group.set_description(tr(
+            "No repositories could be read — they may be defined somewhere Pachul "
+            "doesn't know to look yet, or this list needs root to read on your system."))
+    for repo in repos:
+        row = Adw.SwitchRow()
+        row.set_title(GLib.markup_escape_text(repo["label"]))
+        row.set_subtitle(GLib.markup_escape_text(repo.get("file", repo["id"])))
+        row.set_active(repo["enabled"])
+
+        def _on_toggle(r, _pspec, repo=repo):
+            new_state = r.get_active()
+            if new_state == repo["enabled"]:
+                return
+            cmd = pkgmanager.set_repo_enabled_cmd(repo, new_state)
+            if not cmd:
+                r.handler_block_by_func(_on_toggle)
+                r.set_active(repo["enabled"])
+                r.handler_unblock_by_func(_on_toggle)
+                return
+            verb = tr("Enable") if new_state else tr("Disable")
+            run_terminal_fn(cmd, f"{verb} {repo['label']}")
+            repo["enabled"] = new_state
+
+        row.connect("notify::active", _on_toggle)
+        repos_group.add(row)
+    outer.append(repos_group)
+
+    # Third-party repos (PPA / COPR / OBS)
+    third_group = Adw.PreferencesGroup()
+    third_group.set_title(tr("Add / Remove {kind}").format(kind=kind_label))
+    hints = {
+        "PPA": tr('Format: user/ppa-name (as shown on the PPA\'s Launchpad page)'),
+        "COPR": tr('Format: user/project (as shown on the project\'s Copr page)'),
+        "OBS Repository": tr('Format: project/repo (as shown on the project\'s OBS page)'),
+    }
+    third_group.set_description(hints.get(kind_label, ""))
+
+    if not pkgmanager.third_party_helper_available():
+        install_row = Adw.ActionRow()
+        install_row.set_title(tr("Required tool isn't installed yet"))
+        install_btn = Gtk.Button(label=tr("Install"))
+        install_btn.add_css_class("suggested-action")
+        install_btn.set_valign(Gtk.Align.CENTER)
+
+        def _do_install_helper(*_):
+            cmd = pkgmanager.third_party_helper_install_cmd()
+            if cmd:
+                dialog.close()
+                run_terminal_fn(cmd, tr("Install repository tools"))
+        install_btn.connect("clicked", _do_install_helper)
+        install_row.add_suffix(install_btn)
+        third_group.add(install_row)
+    else:
+        entry_row = Adw.ActionRow()
+        entry_row.set_title(kind_label)
+        id_entry = Gtk.Entry()
+        id_entry.set_placeholder_text(
+            "user/ppa-name" if kind_label == "PPA" else
+            "user/project" if kind_label == "COPR" else "project/repo")
+        id_entry.set_hexpand(True)
+        id_entry.set_valign(Gtk.Align.CENTER)
+        id_entry.set_width_chars(24)
+        entry_row.add_suffix(id_entry)
+        third_group.add(entry_row)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_row.set_halign(Gtk.Align.END)
+        btn_row.set_margin_top(8)
+        remove_btn = Gtk.Button(label=tr("Remove"))
+        remove_btn.add_css_class("destructive-action")
+        add_btn = Gtk.Button(label=tr("Add"))
+        add_btn.add_css_class("suggested-action")
+
+        def _do_add(*_):
+            identifier = id_entry.get_text().strip()
+            cmd = pkgmanager.add_third_party_cmd(identifier)
+            if not cmd:
+                return
+            dialog.close()
+            run_terminal_fn(cmd, tr("Add {kind} {id}").format(kind=kind_label, id=identifier))
+
+        def _do_remove(*_):
+            identifier = id_entry.get_text().strip()
+            cmd = pkgmanager.remove_third_party_cmd(identifier)
+            if not cmd:
+                return
+            dialog.close()
+            run_terminal_fn(cmd, tr("Remove {kind} {id}").format(kind=kind_label, id=identifier))
+
+        add_btn.connect("clicked", _do_add)
+        remove_btn.connect("clicked", _do_remove)
+        btn_row.append(remove_btn)
+        btn_row.append(add_btn)
+
+        wrapper = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        wrapper.append(btn_row)
+        third_group.add(wrapper)
+
+    outer.append(third_group)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
+
+
+# ─── Repair System (apt/dpkg), Debian-only ────────────────────────────────────
+
+def show_apt_repair_dialog(parent, run_terminal_fn):
+    """A menu of the standard apt/dpkg troubleshooting commands (update+
+    upgrade+autoremove, --fix-broken, dpkg --configure -a, --fix-missing,
+    autoclean+clean, listing not-fully-installed packages, and a
+    last-resort force-remove for a single package), each just a thin
+    wrapper that hands the real command to run_terminal_fn — no new
+    parsing/backend logic, this dialog only assembles well-known apt/dpkg
+    invocations. Debian-family only; not offered on Arch/Fedora/openSUSE,
+    which each have their own equivalents already."""
+    dialog = Adw.Window()
+    dialog.set_title(tr("Repair System"))
+    dialog.set_default_size(600, 680)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    warn_banner = Adw.Banner()
+    warn_banner.set_title(tr(
+        "These run real apt/dpkg maintenance commands with sudo — read what each "
+        "one does before running it, especially the last one."))
+    warn_banner.set_revealed(True)
+    outer.append(warn_banner)
+
+    def _row(title, subtitle, button_label, cmd, suggested=True):
+        row = Adw.ActionRow()
+        # set_title/set_subtitle parse their text as Pango markup, so a
+        # literal "&" in e.g. "Update & Upgrade" would otherwise crash
+        # ("Failed to set text ... from markup") — escape both first.
+        row.set_title(GLib.markup_escape_text(title))
+        row.set_subtitle(GLib.markup_escape_text(subtitle))
+        row.set_subtitle_lines(0)
+        btn = Gtk.Button(label=button_label)
+        if suggested:
+            btn.add_css_class("suggested-action")
+        btn.set_valign(Gtk.Align.CENTER)
+
+        def _run(*_):
+            dialog.close()
+            run_terminal_fn(cmd, title)
+        btn.connect("clicked", _run)
+        row.add_suffix(btn)
+        return row
+
+    steps_group = Adw.PreferencesGroup()
+    steps_group.set_title(tr("Standard Maintenance"))
+
+    steps_group.add(_row(
+        tr("Update, Upgrade & Autoremove"),
+        tr("Refreshes the package index, upgrades everything, then removes packages "
+           "no longer needed by anything else."),
+        tr("Run"),
+        "sudo -S apt-get update -y && sudo -S apt-get dist-upgrade -y "
+        "&& sudo -S apt-get autoremove -y",
+    ))
+    steps_group.add(_row(
+        tr("Fix Broken Dependencies"),
+        tr("Runs 'apt --fix-broken install' to resolve broken or half-installed "
+           "dependencies."),
+        tr("Run"),
+        "sudo -S apt-get install --fix-broken -y",
+    ))
+    steps_group.add(_row(
+        tr("Reconfigure All Packages"),
+        tr("Runs 'dpkg --configure -a' to finish any package configuration that was "
+           "interrupted."),
+        tr("Run"),
+        "sudo -S dpkg --configure -a",
+    ))
+    steps_group.add(_row(
+        tr("Fix Missing/Corrupt Package Files"),
+        tr("Refreshes the package index, then retries installing anything with "
+           "missing or corrupt downloaded files."),
+        tr("Run"),
+        "sudo -S apt-get update -y && sudo -S apt-get install --fix-missing -y",
+    ))
+    steps_group.add(_row(
+        tr("Clean Package Cache"),
+        tr("Removes outdated .deb files from the local cache, then clears it "
+           "completely."),
+        tr("Run"),
+        "sudo -S apt-get autoclean -y && sudo -S apt-get clean -y",
+    ))
+    outer.append(steps_group)
+
+    diag_group = Adw.PreferencesGroup()
+    diag_group.set_title(tr("Diagnose"))
+    diag_group.add(_row(
+        tr("Show Broken/Incomplete Packages"),
+        tr("Read-only: lists packages dpkg considers not fully installed (e.g. "
+           "flagged 'reinstall required')."),
+        tr("Show"),
+        "dpkg -l | grep -E '^..r' || echo " + shlex.quote(tr("No broken/incomplete packages found.")),
+        suggested=False,
+    ))
+    outer.append(diag_group)
+
+    danger_group = Adw.PreferencesGroup()
+    danger_group.set_title(tr("Last Resort"))
+    danger_row = Adw.ActionRow()
+    danger_row.set_title(tr("Force-Remove Broken Package"))
+    danger_row.set_subtitle(tr(
+        "Last resort for a single package dpkg refuses to touch normally — "
+        "removes it while ignoring the 'reinstall required' flag. Only use this "
+        "if the steps above didn't help, and only on the one package causing "
+        "the problem."))
+    danger_row.set_subtitle_lines(0)
+
+    pkg_entry = Gtk.Entry()
+    pkg_entry.set_placeholder_text(tr("Package name"))
+    pkg_entry.set_valign(Gtk.Align.CENTER)
+    pkg_entry.set_width_chars(18)
+    danger_row.add_suffix(pkg_entry)
+    force_btn = Gtk.Button(label=tr("Remove"))
+    force_btn.add_css_class("destructive-action")
+    force_btn.set_valign(Gtk.Align.CENTER)
+    force_btn.set_sensitive(False)
+    pkg_entry.connect("notify::text",
+                       lambda e, *_: force_btn.set_sensitive(bool(e.get_text().strip())))
+
+    def _do_force_remove(*_):
+        pkg_name = pkg_entry.get_text().strip()
+        if not pkg_name:
+            return
+        dialog.close()
+        run_terminal_fn(
+            f"sudo -S dpkg --remove --force-remove-reinstreq {shlex.quote(pkg_name)}",
+            tr("Force-Remove Broken Package") + f" ({pkg_name})")
+    force_btn.connect("clicked", _do_force_remove)
+    danger_row.add_suffix(force_btn)
+    danger_group.add(danger_row)
+    outer.append(danger_group)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
+
+
+# ─── Repair System (dnf/rpm), Fedora-only ─────────────────────────────────────
+
+def show_dnf_repair_dialog(parent, run_terminal_fn):
+    """dnf/rpm equivalent of show_apt_repair_dialog() above — same idea,
+    same layout, just the Fedora-side commands: dnf upgrade+autoremove,
+    distro-sync (dnf's closest match to apt's --fix-broken — resolves
+    installed packages that ended up at inconsistent versions after an
+    interrupted/partial upgrade), rpm --rebuilddb, dnf clean all, a
+    read-only dnf check for dependency/duplicate problems, and rpm -e
+    --nodeps as the last-resort single-package force-remove."""
+    dialog = Adw.Window()
+    dialog.set_title(tr("Repair System"))
+    dialog.set_default_size(600, 680)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    warn_banner = Adw.Banner()
+    warn_banner.set_title(tr(
+        "These run real dnf/rpm maintenance commands with sudo — read what each "
+        "one does before running it, especially the last one."))
+    warn_banner.set_revealed(True)
+    outer.append(warn_banner)
+
+    def _row(title, subtitle, button_label, cmd, suggested=True):
+        row = Adw.ActionRow()
+        # set_title/set_subtitle parse their text as Pango markup, so a
+        # literal "&" in e.g. "Update & Upgrade" would otherwise crash
+        # ("Failed to set text ... from markup") — escape both first.
+        row.set_title(GLib.markup_escape_text(title))
+        row.set_subtitle(GLib.markup_escape_text(subtitle))
+        row.set_subtitle_lines(0)
+        btn = Gtk.Button(label=button_label)
+        if suggested:
+            btn.add_css_class("suggested-action")
+        btn.set_valign(Gtk.Align.CENTER)
+
+        def _run(*_):
+            dialog.close()
+            run_terminal_fn(cmd, title)
+        btn.connect("clicked", _run)
+        row.add_suffix(btn)
+        return row
+
+    steps_group = Adw.PreferencesGroup()
+    steps_group.set_title(tr("Standard Maintenance"))
+
+    steps_group.add(_row(
+        tr("Update, Upgrade & Autoremove"),
+        tr("Refreshes repo metadata, upgrades everything, then removes packages "
+           "no longer needed by anything else."),
+        tr("Run"),
+        "sudo -S dnf upgrade --refresh -y && sudo -S dnf autoremove -y",
+    ))
+    steps_group.add(_row(
+        tr("Fix Inconsistent Package Versions"),
+        tr("Runs 'dnf distro-sync' to bring installed packages back in line "
+           "with what the repos currently offer, after an interrupted or "
+           "partial upgrade left some at mismatched versions."),
+        tr("Run"),
+        "sudo -S dnf distro-sync -y",
+    ))
+    steps_group.add(_row(
+        tr("Rebuild RPM Database"),
+        tr("Runs 'rpm --rebuilddb' to rebuild a corrupted local RPM database."),
+        tr("Run"),
+        "sudo -S rpm --rebuilddb",
+    ))
+    steps_group.add(_row(
+        tr("Clean Package Cache"),
+        tr("Runs 'dnf clean all' to clear cached package files and metadata."),
+        tr("Run"),
+        "sudo -S dnf clean all",
+    ))
+    outer.append(steps_group)
+
+    diag_group = Adw.PreferencesGroup()
+    diag_group.set_title(tr("Diagnose"))
+    diag_group.add(_row(
+        tr("Show Broken/Unsatisfied Packages"),
+        tr("Read-only: runs 'dnf check' to list dependency, duplicate, or "
+           "obsoleted-package problems in what's currently installed."),
+        tr("Show"),
+        "dnf check || echo " + shlex.quote(tr("No broken/incomplete packages found.")),
+        suggested=False,
+    ))
+    outer.append(diag_group)
+
+    danger_group = Adw.PreferencesGroup()
+    danger_group.set_title(tr("Last Resort"))
+    danger_row = Adw.ActionRow()
+    danger_row.set_title(tr("Force-Remove Broken Package"))
+    danger_row.set_subtitle(tr(
+        "Last resort for a single package rpm refuses to touch normally — "
+        "removes it while ignoring dependency checks entirely. Only use this "
+        "if the steps above didn't help, and only on the one package causing "
+        "the problem."))
+    danger_row.set_subtitle_lines(0)
+
+    pkg_entry = Gtk.Entry()
+    pkg_entry.set_placeholder_text(tr("Package name"))
+    pkg_entry.set_valign(Gtk.Align.CENTER)
+    pkg_entry.set_width_chars(18)
+    danger_row.add_suffix(pkg_entry)
+    force_btn = Gtk.Button(label=tr("Remove"))
+    force_btn.add_css_class("destructive-action")
+    force_btn.set_valign(Gtk.Align.CENTER)
+    force_btn.set_sensitive(False)
+    pkg_entry.connect("notify::text",
+                       lambda e, *_: force_btn.set_sensitive(bool(e.get_text().strip())))
+
+    def _do_force_remove(*_):
+        pkg_name = pkg_entry.get_text().strip()
+        if not pkg_name:
+            return
+        dialog.close()
+        run_terminal_fn(
+            f"sudo -S rpm -e --nodeps {shlex.quote(pkg_name)}",
+            tr("Force-Remove Broken Package") + f" ({pkg_name})")
+    force_btn.connect("clicked", _do_force_remove)
+    danger_row.add_suffix(force_btn)
+    danger_group.add(danger_row)
+    outer.append(danger_group)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
+
+
+# ─── Repair System (zypper/rpm), openSUSE-only ────────────────────────────────
+
+def show_zypper_repair_dialog(parent, run_terminal_fn):
+    """zypper/rpm equivalent of show_apt_repair_dialog()/show_dnf_repair_dialog()
+    above — same layout, openSUSE-side commands: zypper refresh+update,
+    zypper verify (openSUSE's own dependency-repair solver run — the
+    closest match to apt's --fix-broken / dnf's distro-sync), rpm
+    --rebuilddb (shared with the Fedora dialog, since it's plain rpm),
+    zypper clean --all, a read-only verify --dry-run for diagnosis, and
+    rpm -e --nodeps as the last-resort single-package force-remove."""
+    dialog = Adw.Window()
+    dialog.set_title(tr("Repair System"))
+    dialog.set_default_size(600, 680)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    warn_banner = Adw.Banner()
+    warn_banner.set_title(tr(
+        "These run real zypper/rpm maintenance commands with sudo — read what "
+        "each one does before running it, especially the last one."))
+    warn_banner.set_revealed(True)
+    outer.append(warn_banner)
+
+    def _row(title, subtitle, button_label, cmd, suggested=True):
+        row = Adw.ActionRow()
+        # set_title/set_subtitle parse their text as Pango markup, so a
+        # literal "&" in e.g. "Update & Upgrade" would otherwise crash
+        # ("Failed to set text ... from markup") — escape both first.
+        row.set_title(GLib.markup_escape_text(title))
+        row.set_subtitle(GLib.markup_escape_text(subtitle))
+        row.set_subtitle_lines(0)
+        btn = Gtk.Button(label=button_label)
+        if suggested:
+            btn.add_css_class("suggested-action")
+        btn.set_valign(Gtk.Align.CENTER)
+
+        def _run(*_):
+            dialog.close()
+            run_terminal_fn(cmd, title)
+        btn.connect("clicked", _run)
+        row.add_suffix(btn)
+        return row
+
+    steps_group = Adw.PreferencesGroup()
+    steps_group.set_title(tr("Standard Maintenance"))
+
+    steps_group.add(_row(
+        tr("Update & Upgrade"),
+        tr("Refreshes repo metadata, then installs all available updates."),
+        tr("Run"),
+        "sudo -S zypper --non-interactive refresh "
+        "&& sudo -S zypper --non-interactive update",
+    ))
+    steps_group.add(_row(
+        tr("Fix Broken Dependencies"),
+        tr("Runs 'zypper verify' — openSUSE's own solver run that finds and "
+           "proposes fixes for broken or unsatisfied package dependencies."),
+        tr("Run"),
+        "sudo -S zypper --non-interactive verify",
+    ))
+    steps_group.add(_row(
+        tr("Rebuild RPM Database"),
+        tr("Runs 'rpm --rebuilddb' to rebuild a corrupted local RPM database."),
+        tr("Run"),
+        "sudo -S rpm --rebuilddb",
+    ))
+    steps_group.add(_row(
+        tr("Clean Package Cache"),
+        tr("Runs 'zypper clean --all' to clear cached package files and metadata."),
+        tr("Run"),
+        "sudo -S zypper clean --all",
+    ))
+    outer.append(steps_group)
+
+    diag_group = Adw.PreferencesGroup()
+    diag_group.set_title(tr("Diagnose"))
+    diag_group.add(_row(
+        tr("Show Broken/Unsatisfied Packages"),
+        tr("Read-only: runs 'zypper verify --dry-run' to list what it would "
+           "change without actually changing anything."),
+        tr("Show"),
+        "zypper --non-interactive verify --dry-run || echo "
+        + shlex.quote(tr("No broken/incomplete packages found.")),
+        suggested=False,
+    ))
+    outer.append(diag_group)
+
+    danger_group = Adw.PreferencesGroup()
+    danger_group.set_title(tr("Last Resort"))
+    danger_row = Adw.ActionRow()
+    danger_row.set_title(tr("Force-Remove Broken Package"))
+    danger_row.set_subtitle(tr(
+        "Last resort for a single package rpm refuses to touch normally — "
+        "removes it while ignoring dependency checks entirely. Only use this "
+        "if the steps above didn't help, and only on the one package causing "
+        "the problem."))
+    danger_row.set_subtitle_lines(0)
+
+    pkg_entry = Gtk.Entry()
+    pkg_entry.set_placeholder_text(tr("Package name"))
+    pkg_entry.set_valign(Gtk.Align.CENTER)
+    pkg_entry.set_width_chars(18)
+    danger_row.add_suffix(pkg_entry)
+    force_btn = Gtk.Button(label=tr("Remove"))
+    force_btn.add_css_class("destructive-action")
+    force_btn.set_valign(Gtk.Align.CENTER)
+    force_btn.set_sensitive(False)
+    pkg_entry.connect("notify::text",
+                       lambda e, *_: force_btn.set_sensitive(bool(e.get_text().strip())))
+
+    def _do_force_remove(*_):
+        pkg_name = pkg_entry.get_text().strip()
+        if not pkg_name:
+            return
+        dialog.close()
+        run_terminal_fn(
+            f"sudo -S rpm -e --nodeps {shlex.quote(pkg_name)}",
+            tr("Force-Remove Broken Package") + f" ({pkg_name})")
+    force_btn.connect("clicked", _do_force_remove)
+    danger_row.add_suffix(force_btn)
+    danger_group.add(danger_row)
+    outer.append(danger_group)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
+
+
+# ─── Repair System (pacman), Arch-only ─────────────────────────────────────────
+
+def show_pacman_repair_dialog(parent, run_terminal_fn, aur_helper=None):
+    """pacman equivalent of the apt/dnf/zypper repair dialogs above. Arch
+    already surfaces its two most common failure modes proactively —
+    stale GPG keys and a stuck db.lck — as inline fix banners elsewhere
+    (see dialogs.py's GPG/lock-detection code near the top of this file),
+    so this dialog covers what those banners don't: a full force-refresh,
+    a read-only file-integrity check, a deeper keyring reinit for when the
+    lighter banner fix isn't enough, and rpm/dpkg-force-remove's pacman
+    equivalent."""
+    dialog = Adw.Window()
+    dialog.set_title(tr("Repair System"))
+    dialog.set_default_size(600, 680)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    warn_banner = Adw.Banner()
+    warn_banner.set_title(tr(
+        "These run real pacman/pacman-key commands with sudo — read what each "
+        "one does before running it, especially the last one."))
+    warn_banner.set_revealed(True)
+    outer.append(warn_banner)
+
+    def _row(title, subtitle, button_label, cmd, suggested=True, on_success=None,
+             on_success_with_window=None):
+        row = Adw.ActionRow()
+        # set_title/set_subtitle parse their text as Pango markup, so a
+        # literal "&" in e.g. "Update & Upgrade" would otherwise crash
+        # ("Failed to set text ... from markup") — escape both first.
+        row.set_title(GLib.markup_escape_text(title))
+        row.set_subtitle(GLib.markup_escape_text(subtitle))
+        row.set_subtitle_lines(0)
+        btn = Gtk.Button(label=button_label)
+        if suggested:
+            btn.add_css_class("suggested-action")
+        btn.set_valign(Gtk.Align.CENTER)
+
+        def _run(*_):
+            dialog.close()
+            run_terminal_fn(cmd, title, on_success=on_success,
+                             on_success_with_window=on_success_with_window)
+        btn.connect("clicked", _run)
+        row.add_suffix(btn)
+        return row
+
+    steps_group = Adw.PreferencesGroup()
+    steps_group.set_title(tr("Standard Maintenance"))
+
+    steps_group.add(_row(
+        tr("Force-Refresh & Full Upgrade"),
+        tr("Runs 'pacman -Syyu' — forces a fresh download of all repo "
+           "databases (ignoring their last-sync timestamps) before "
+           "upgrading, useful when a mirror served stale or corrupt data."),
+        tr("Run"),
+        "sudo -S pacman -Syyu --noconfirm",
+    ))
+    steps_group.add(_row(
+        tr("Check Package Database Consistency"),
+        tr("Runs 'pacman -Dk' to check the local package database itself "
+           "for internal inconsistencies (separate from checking individual "
+           "installed files)."),
+        tr("Run"),
+        "pacman -Dk",
+    ))
+    steps_group.add(_row(
+        tr("Reinitialize Keyring"),
+        tr("Runs 'pacman-key --init' and '--populate archlinux' — a deeper "
+           "fix than the automatic keyring banner elsewhere, for when "
+           "signature errors persist after that lighter fix."),
+        tr("Run"),
+        "sudo -S pacman-key --init && sudo -S pacman-key --populate archlinux",
+    ))
+    outer.append(steps_group)
+
+    diag_group = Adw.PreferencesGroup()
+    diag_group.set_title(tr("Diagnose"))
+
+    _QKK_RAW_FILE = "/tmp/pachul-qkk-raw.txt"
+
+    def _load_qkk_details():
+        try:
+            with open(_QKK_RAW_FILE) as f:
+                raw = f.read()
+        except OSError:
+            return {}
+        return _parse_qkk_details(raw)
+
+    def _offer_repair_now(dialog):
+        # Fires once "Search for Packages With Missing/Modified Files" finishes
+        # (that command always exits 0 — grep simply finding nothing isn't
+        # a failure). The package list comes ONLY from the strict Python
+        # parser below now, not from a bash grep/cut over the raw pacman
+        # output — that grep matched any line containing the substring
+        # "altered file" (including odd pacman lines that don't actually
+        # name a package), which could plant garbage entries like a
+        # literal "altered files" row. _parse_qkk_details only accepts
+        # lines matching pacman's exact "pkg: N total files, M altered
+        # files" summary format, so there's no such ambiguity here.
+        details = _load_qkk_details()
+        names = sorted(details.keys())
+
+        # Split off packages whose ONLY complaint is a locally-modified
+        # /etc/ config file or a directory-permission diff — reinstalling
+        # can never clear either (pacman won't overwrite a modified
+        # config file, and never chmods/chowns a pre-existing directory),
+        # so listing them as "repair me" is misleading. Keep them out of
+        # the list entirely rather than just unchecking them.
+        real_names, config_only = [], []
+        for name in names:
+            reasons = details.get(name)
+            if reasons and all(_is_unfixable_by_reinstall(r) for r in reasons):
+                config_only.append(name)
+            else:
+                real_names.append(name)
+
+        if real_names:
+            # target_window=dialog: turn the just-finished search window
+            # straight into the picker instead of opening a new one.
+            _show_repair_confirm(real_names, details, len(config_only), target_window=dialog)
+        elif config_only:
+            parent._toast(tr(
+                "All {n} package(s) only have config/permission "
+                "differences a reinstall can't fix.").format(n=len(config_only)))
+
+    def _show_repair_confirm(names, details=None, config_only_count=0, target_window=None):
+        details = details or {}
+        if target_window is not None:
+            # Reuse the same window the repair terminal was just showing
+            # instead of stacking a new one — this is what makes the
+            # scan -> pick -> repair -> (leftovers) -> pick -> repair
+            # loop stay in a single window end to end.
+            confirm = target_window
+            confirm.set_title(tr("Repair Broken Packages"))
+        else:
+            confirm = Adw.Window()
+            confirm.set_title(tr("Repair Broken Packages"))
+            # Match the main window's current height instead of a fixed guess,
+            # so this doesn't look cramped on a maximized/tall window or
+            # oversized on a small one. Falls back to the old fixed height if
+            # the main window hasn't been allocated a size yet for some reason.
+            main_win_height = parent.get_height() or 420
+            confirm.set_default_size(760, max(360, main_win_height))
+            confirm.set_resizable(True)
+            confirm.set_transient_for(parent)
+            confirm.set_modal(True)
+
+        ctv  = Adw.ToolbarView()
+        chdr = Adw.HeaderBar()
+        chdr.set_show_end_title_buttons(False)
+        not_now_btn = Gtk.Button(label=tr("Not Now"))
+        not_now_btn.add_css_class("flat")
+        not_now_btn.connect("clicked", lambda *_: confirm.close())
+        chdr.pack_start(not_now_btn)
+
+        select_all_btn = Gtk.Button(label=tr("Select All"))
+        select_all_btn.add_css_class("flat")
+        select_none_btn = Gtk.Button(label=tr("Select None"))
+        select_none_btn.add_css_class("flat")
+        chdr.pack_end(select_none_btn)
+        chdr.pack_end(select_all_btn)
+        ctv.add_top_bar(chdr)
+
+        couter = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        couter.set_margin_top(16);   couter.set_margin_bottom(24)
+        couter.set_margin_start(16); couter.set_margin_end(16)
+
+        info_group = Adw.PreferencesGroup()
+        info_group.set_title(
+            tr("{n} package(s) with missing or altered files found").format(n=len(names)))
+        desc = tr(
+            "Choose which ones to reinstall from your configured "
+            "repositories to restore the original files:")
+        if config_only_count:
+            desc += " " + tr(
+                "({n} more package(s) with only config/permission "
+                "differences are hidden — reinstalling never touches "
+                "those.)").format(n=config_only_count)
+        info_group.set_description(desc)
+        couter.append(info_group)
+
+        # Two side-by-side boxed lists instead of one long column — with
+        # potentially dozens of broken packages, a single column on a
+        # window this wide (760px, sized to match the main window's
+        # height) leaves half the width empty and forces a lot of
+        # scrolling. Split the (already-sorted, as pacman -Qkk reports
+        # them) name list roughly in half: first half left, second half
+        # right.
+        cols_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        cols_box.set_homogeneous(True)
+        left_group = Adw.PreferencesGroup()
+        right_group = Adw.PreferencesGroup()
+        cols_box.append(left_group)
+        cols_box.append(right_group)
+        couter.append(cols_box)
+
+        checks = []  # [(Gtk.CheckButton, package_name), ...]
+
+        def _update_repair_btn(*_):
+            n = sum(1 for cb, _n in checks if cb.get_active())
+            repair_btn.set_sensitive(n > 0)
+            repair_btn.set_label(tr("Repair {n} package(s)").format(n=n))
+
+        mid = (len(names) + 1) // 2
+        for i, name in enumerate(names):
+            row = Adw.ActionRow(title=GLib.markup_escape_text(name))
+            reasons = details.get(name)
+            # A package can have both a genuine issue AND an unrelated,
+            # expected config-file diff at the same time — only surface
+            # the genuine one(s) here, since that's what "Repair" can
+            # actually address.
+            real_reasons = [r for r in reasons if not _is_unfixable_by_reinstall(r)] if reasons else []
+            if real_reasons:
+                # e.g. "icon-theme.cache (Modification time mismatch)" — lets
+                # the user see at a glance whether this is a file a pacman
+                # hook just regenerates every time (safe to leave unchecked)
+                # or something that looks like genuine corruption.
+                shown = real_reasons[:2]
+                subtitle = "; ".join(shown)
+                if len(real_reasons) > len(shown):
+                    subtitle += " " + tr("(+{n} more)").format(n=len(real_reasons) - len(shown))
+                row.set_subtitle(GLib.markup_escape_text(subtitle))
+                row.set_subtitle_lines(0)
+            cb = Gtk.CheckButton()
+            cb.set_valign(Gtk.Align.CENTER)
+            cb.set_active(True)
+            cb.connect("toggled", _update_repair_btn)
+            row.add_prefix(cb)
+            row.set_activatable_widget(cb)
+            checks.append((cb, name))
+            (left_group if i < mid else right_group).add(row)
+
+        def _select_all(*_):
+            for cb, _n in checks:
+                cb.set_active(True)
+
+        def _select_none(*_):
+            for cb, _n in checks:
+                cb.set_active(False)
+
+        select_all_btn.connect("clicked", _select_all)
+        select_none_btn.connect("clicked", _select_none)
+
+        repair_btn = Gtk.Button()
+        repair_btn.add_css_class("suggested-action")
+        repair_btn.set_halign(Gtk.Align.CENTER)
+        _update_repair_btn()
+
+        def _do_repair(*_):
+            selected = [name for cb, name in checks if cb.get_active()]
+            if not selected:
+                return
+            # Whatever's left unchecked right now is what the reopened
+            # window should show afterwards — a plain "still on the list"
+            # follow-up, no re-scan involved.
+            remaining = [name for cb, name in checks if not cb.get_active()]
+            quoted = " ".join(shlex.quote(n) for n in selected)
+            # Same AUR-helper routing as repair_cmd above — otherwise any
+            # AUR-installed package in the selection just fails silently.
+            if aur_helper:
+                cmd = f"{aur_helper} -S --noconfirm {quoted}"
+            else:
+                cmd = f"sudo -S pacman -S --noconfirm {quoted}"
+
+            def _reopen_remaining():
+                if remaining:
+                    _show_repair_confirm(remaining, details, target_window=confirm)
+
+            # target_window=confirm: run the repair right here instead of
+            # popping open yet another window on top of this one.
+            run_terminal_fn(cmd, tr("Repair Broken Packages"),
+                             on_success=_reopen_remaining if remaining else None,
+                             target_window=confirm)
+        repair_btn.connect("clicked", _do_repair)
+        couter.append(repair_btn)
+
+        cscroll = Gtk.ScrolledWindow()
+        cscroll.set_vexpand(True)
+        cscroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        cscroll.set_child(couter)
+        ctv.set_content(cscroll)
+        confirm.set_content(ctv)
+        confirm.present()
+
+    diag_group.add(_row(
+        tr("Search for Packages With Missing/Modified Files"),
+        tr("Runs 'pacman -Qkk' with sudo (read-only, no changes are made). "
+           "If any packages come back altered, you'll be asked right away "
+           "which ones to repair."),
+        tr("Run"),
+        # stdbuf forces line-buffered output on BOTH streams even though
+        # they're going to a file, not a terminal. Without it, libc
+        # switches stdout to large block-buffering once it detects a
+        # non-tty target while stderr stays unbuffered — the per-package
+        # "N total files, M altered files" summary (stdout) and the
+        # per-file "warning:" lines (stderr) then land in the file wildly
+        # out of order and sometimes mid-line-spliced together, which is
+        # exactly the kind of corruption that made this parser miss (or
+        # misattribute) a chunk of the packages it should have caught.
+        #
+        # sudo matters just as much: plenty of package-owned files
+        # (/etc/shadow, SSL private keys, sudoers, cups/pcp/webmin config,
+        # nwfilter templates, ...) are only readable by root. Run as a
+        # normal user, pacman can't even open them to hash them and
+        # reports "failed to calculate SHA256 checksum" — which looks
+        # exactly like corruption in this list but really just means "I
+        # wasn't allowed to check." No amount of reinstalling ever clears
+        # that specific warning; only checking as root does.
+        #
+        # Authenticate with a throwaway `sudo -S true` FIRST, completely
+        # unredirected, so its "[sudo] password for ...:" prompt lands
+        # straight on the visible terminal right away. The actual scan
+        # runs as a separate `sudo -S` call afterwards — by then sudo's
+        # credential cache is warm, so it proceeds without prompting
+        # again, and its own output (not a hidden password prompt) is all
+        # that ends up in the redirected file. Without this split, the
+        # scan's ">file 2>&1" was also swallowing sudo's own -S prompt
+        # (which sudo -S writes to stderr) into the file instead of
+        # showing it, leaving the terminal looking stuck with nowhere to
+        # type the password until something else eventually flushed it.
+        "sudo -S true && { "
+        "LC_ALL=C sudo pacman -Qk > " + _QKK_RAW_FILE + " 2>&1; "
+        "OUT=$(grep -v '0 altered files' " + _QKK_RAW_FILE + "); "
+        "if [ -n \"$OUT\" ]; then printf '%s\\n' \"$OUT\"; "
+        "else echo " + shlex.quote(tr("No broken/incomplete packages found.")) + "; fi; }",
+        on_success_with_window=_offer_repair_now,
+    ))
+    outer.append(diag_group)
+
+    danger_group = Adw.PreferencesGroup()
+    danger_group.set_title(tr("Last Resort"))
+    danger_row = Adw.ActionRow()
+    danger_row.set_title(tr("Force-Remove Broken Package"))
+    danger_row.set_subtitle(tr(
+        "Last resort for a single package pacman refuses to touch normally "
+        "— removes it while ignoring dependency checks entirely. Only use "
+        "this if the steps above didn't help, and only on the one package "
+        "causing the problem."))
+    danger_row.set_subtitle_lines(0)
+
+    pkg_entry = Gtk.Entry()
+    pkg_entry.set_placeholder_text(tr("Package name"))
+    pkg_entry.set_valign(Gtk.Align.CENTER)
+    pkg_entry.set_width_chars(18)
+    danger_row.add_suffix(pkg_entry)
+    force_btn = Gtk.Button(label=tr("Remove"))
+    force_btn.add_css_class("destructive-action")
+    force_btn.set_valign(Gtk.Align.CENTER)
+    force_btn.set_sensitive(False)
+    pkg_entry.connect("notify::text",
+                       lambda e, *_: force_btn.set_sensitive(bool(e.get_text().strip())))
+
+    def _do_force_remove(*_):
+        pkg_name = pkg_entry.get_text().strip()
+        if not pkg_name:
+            return
+        dialog.close()
+        run_terminal_fn(
+            f"sudo -S pacman -Rdd --noconfirm {shlex.quote(pkg_name)}",
+            tr("Force-Remove Broken Package") + f" ({pkg_name})")
+    force_btn.connect("clicked", _do_force_remove)
+    danger_row.add_suffix(force_btn)
+    danger_group.add(danger_row)
+    outer.append(danger_group)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
+
+
+# ─── Certificate Checker (Modul 2 from the user's manjaro-wartung.sh) ─────────
+
+def show_cert_checker_dialog(parent, run_terminal_fn):
+    """Cross-distro TLS/CA certificate health check, adapted from the
+    "MODUL 2: TLS/SSL-Zertifikate" section of the user's own
+    manjaro-wartung.sh. Three independent pieces, all runnable on any of
+    the 4 supported distro families:
+      1. Reinstall the CA certificate bundle + rebuild the system trust
+         store (distro-specific package/command, see
+         pkgmanager.ca_certificates_refresh_cmd()).
+      2. Check the TLS certificate expiry of any domains the user types
+         in (the original script hard-coded manjaro.org and friends —
+         that's obviously not useful for anyone else, so this asks
+         instead of assuming).
+      3. Read-only scan of /etc/ssl/certs for already-expired local
+         certificates.
+    Pure openssl/find/date shell logic — nothing here touches the package
+    manager except the reinstall step, so unlike the repair dialogs this
+    one dialog covers all distros rather than needing four separate ones."""
+    dialog = Adw.Window()
+    dialog.set_title(tr("Certificate Checker"))
+    dialog.set_default_size(600, 680)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    # ── CA certificate bundle ──
+    ca_group = Adw.PreferencesGroup()
+    ca_group.set_title(tr("CA Certificate Bundle"))
+    ca_cmd = pkgmanager.ca_certificates_refresh_cmd()
+    ca_row = Adw.ActionRow()
+    ca_row.set_title(GLib.markup_escape_text(tr("Reinstall CA Certificates & Rebuild Trust Store")))
+    ca_row.set_subtitle(GLib.markup_escape_text(tr(
+        "Reinstalls the ca-certificates package and regenerates the "
+        "system's trust store. Useful if HTTPS connections fail with "
+        "certificate-verification errors that aren't the remote site's "
+        "fault.")))
+    ca_row.set_subtitle_lines(0)
+    if ca_cmd:
+        ca_btn = Gtk.Button(label=tr("Run"))
+        ca_btn.add_css_class("suggested-action")
+        ca_btn.set_valign(Gtk.Align.CENTER)
+
+        def _do_ca_refresh(*_):
+            dialog.close()
+            run_terminal_fn(ca_cmd, tr("Reinstall CA Certificates & Rebuild Trust Store"))
+        ca_btn.connect("clicked", _do_ca_refresh)
+        ca_row.add_suffix(ca_btn)
+    ca_group.add(ca_row)
+    outer.append(ca_group)
+
+    # ── Domain expiry check ──
+    domain_group = Adw.PreferencesGroup()
+    domain_group.set_title(tr("Domain Certificate Expiry"))
+    domain_group.set_description(tr(
+        "Checks how many days remain before each domain's TLS "
+        "certificate expires — nothing is changed, purely informational."))
+    domain_row = Adw.ActionRow()
+    domain_row.set_title(GLib.markup_escape_text(tr("Domains")))
+    domain_row.set_subtitle(GLib.markup_escape_text(tr("Comma-separated, e.g. example.com, mail.example.com")))
+    domain_entry = Gtk.Entry()
+    domain_entry.set_placeholder_text(tr("Domains to check"))
+    domain_entry.set_valign(Gtk.Align.CENTER)
+    domain_entry.set_width_chars(24)
+    domain_row.add_suffix(domain_entry)
+    domain_btn = Gtk.Button(label=tr("Check"))
+    domain_btn.add_css_class("suggested-action")
+    domain_btn.set_valign(Gtk.Align.CENTER)
+    domain_btn.set_sensitive(False)
+    domain_entry.connect(
+        "notify::text",
+        lambda e, *_: domain_btn.set_sensitive(bool(e.get_text().strip())))
+
+    def _do_domain_check(*_):
+        domains = domain_entry.get_text().strip()
+        if not domains:
+            return
+        script = (
+            'IFS="," read -ra DOMS <<< "$DOMAINS"; '
+            'for d in "${DOMS[@]}"; do '
+            '  d="$(echo "$d" | xargs)"; '
+            '  [ -z "$d" ] && continue; '
+            '  echo "== $d =="; '
+            '  ENDE=$(echo | timeout 5 openssl s_client -connect "$d:443" -servername "$d" 2>/dev/null '
+            '    | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2); '
+            '  if [ -z "$ENDE" ]; then '
+            '    echo "  ' + tr("Could not retrieve certificate (offline or unreachable?)") + '"; '
+            '  else '
+            '    ENDE_EPOCH=$(date -d "$ENDE" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "$ENDE" +%s 2>/dev/null || echo 0); '
+            '    JETZT_EPOCH=$(date +%s); '
+            '    TAGE=$(( (ENDE_EPOCH - JETZT_EPOCH) / 86400 )); '
+            '    if [ "$TAGE" -lt 0 ]; then '
+            '      echo "  ' + tr("EXPIRED {days} days ago").replace("{days}", "$(( -TAGE ))") + '"; '
+            '    elif [ "$TAGE" -lt 30 ]; then '
+            '      echo "  ' + tr("Expires in {days} days (until {date})").replace("{days}", "$TAGE").replace("{date}", "$ENDE") + '"; '
+            '    else '
+            '      echo "  ' + tr("Valid, {days} days remaining (until {date})").replace("{days}", "$TAGE").replace("{date}", "$ENDE") + '"; '
+            '    fi; '
+            '  fi; '
+            'done'
+        )
+        cmd = f"DOMAINS={shlex.quote(domains)} bash -c {shlex.quote(script)}"
+        dialog.close()
+        run_terminal_fn(cmd, tr("Domain Certificate Expiry"))
+    domain_btn.connect("clicked", _do_domain_check)
+    domain_row.add_suffix(domain_btn)
+    domain_group.add(domain_row)
+    outer.append(domain_group)
+
+    # ── Local certificates ──
+    local_group = Adw.PreferencesGroup()
+    local_group.set_title(tr("Local Certificates"))
+    local_row = Adw.ActionRow()
+    local_row.set_title(GLib.markup_escape_text(tr("Show Expired Local Certificates")))
+    local_row.set_subtitle(GLib.markup_escape_text(tr(
+        "Read-only: scans /etc/ssl/certs for .pem certificates that have "
+        "already expired.")))
+    local_row.set_subtitle_lines(0)
+    local_btn = Gtk.Button(label=tr("Show"))
+    local_btn.set_valign(Gtk.Align.CENTER)
+
+    def _do_local_check(*_):
+        script = (
+            'ABGELAUFEN=0; '
+            'while IFS= read -r -d "" CERT; do '
+            '  if ! openssl x509 -checkend 0 -noout -in "$CERT" 2>/dev/null; then '
+            '    echo "' + tr("EXPIRED: {cert}").replace("{cert}", "$CERT") + '"; '
+            '    ABGELAUFEN=$((ABGELAUFEN + 1)); '
+            '  fi; '
+            'done < <(find /etc/ssl/certs/ -name "*.pem" -print0 2>/dev/null); '
+            'if [ "$ABGELAUFEN" -eq 0 ]; then echo "' + tr("All local certificates are valid.") + '"; fi'
+        )
+        dialog.close()
+        run_terminal_fn(f"bash -c {shlex.quote(script)}", tr("Show Expired Local Certificates"))
+    local_btn.connect("clicked", _do_local_check)
+    local_row.add_suffix(local_btn)
+    local_group.add(local_row)
+    outer.append(local_group)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
+
+
+# ─── Broken Symlink Finder (Modul 5b from the user's manjaro-wartung.sh) ──────
+
+def show_broken_symlinks_dialog(parent, run_terminal_fn):
+    """Finds and classifies broken symlinks under /usr and /etc, adapted
+    from "MODUL 5: Verwaiste Pakete und Symlinks" in the user's own
+    manjaro-wartung.sh (the orphaned-package half of that module already
+    exists in Pachul as the Orphan Finder — this covers only the
+    symlink half, which didn't). Classification:
+      SAFE   — /usr/share/licenses/**  (license-file leftovers, never
+               functionally significant)
+      SAFE   — /usr/share/archiso/**   (Arch/Manjaro-only: archiso build
+               templates, not a runtime concern; harmless empty category
+               on other distros where /usr/share/archiso won't exist)
+      REVIEW — everything else, listed only, never auto-deleted
+    'find -xtype l' itself is pure POSIX/GNU find, so this dialog works
+    identically on all 4 supported distro families."""
+    dialog = Adw.Window()
+    dialog.set_title(tr("Broken Symlinks"))
+    dialog.set_default_size(600, 560)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    info_group = Adw.PreferencesGroup()
+    info_group.set_title(tr("What this does"))
+    info_group.set_description(tr(
+        "Searches /usr and /etc for symlinks pointing at files that no "
+        "longer exist — usually harmless leftovers from removed packages, "
+        "but occasionally a sign something didn't uninstall cleanly."))
+    outer.append(info_group)
+
+    # Shared bash core: classify every broken symlink into SAFE (license
+    # leftovers, archiso templates) or REVIEW (anything else — listed only,
+    # never touched). $DO_DELETE switches between a pure scan and actually
+    # removing the SAFE-category links.
+    _classify_core = (
+        'mapfile -t ALLE < <(find /usr /etc -xtype l -print 2>/dev/null); '
+        'if [ ${#ALLE[@]} -eq 0 ]; then echo "' + tr("No broken symlinks found.") + '"; exit 0; fi; '
+        'LIZENZ=(); ARCHISO=(); PRUEFEN=(); '
+        'for L in "${ALLE[@]}"; do '
+        '  case "$L" in '
+        '    /usr/share/licenses/*) LIZENZ+=("$L") ;; '
+        '    /usr/share/archiso/*)  ARCHISO+=("$L") ;; '
+        '    *)                     PRUEFEN+=("$L") ;; '
+        '  esac; '
+        'done; '
+        'echo "' + tr("{n} broken symlinks found.").replace("{n}", "${#ALLE[@]}") + '"; echo; '
+        'if [ ${#LIZENZ[@]} -gt 0 ]; then '
+        '  echo "' + tr("SAFE — license leftovers ({n}):").replace("{n}", "${#LIZENZ[@]}") + '"; '
+        '  printf "  %s\\n" "${LIZENZ[@]}"; '
+        '  if [ "$DO_DELETE" = "1" ]; then '
+        '    for L in "${LIZENZ[@]}"; do rm -f "$L"; done; '
+        '    echo "  -> ' + tr("removed") + '"; '
+        '  fi; echo; '
+        'fi; '
+        'if [ ${#ARCHISO[@]} -gt 0 ]; then '
+        '  echo "' + tr("SAFE but skipped — archiso build templates ({n}), expected on "
+                          "Arch/Manjaro, not deleted:").replace("{n}", "${#ARCHISO[@]}") + '"; '
+        '  printf "  %s\\n" "${ARCHISO[@]}"; echo; '
+        'fi; '
+        'if [ ${#PRUEFEN[@]} -gt 0 ]; then '
+        '  echo "' + tr("REVIEW — not auto-deleted ({n}):").replace("{n}", "${#PRUEFEN[@]}") + '"; '
+        '  printf "  %s\\n" "${PRUEFEN[@]}"; echo; '
+        '  echo "' + tr("For each: 'pacman/dpkg/rpm/zypper -qf <path>' or equivalent tells you "
+                          "which package owns it, if any; a reinstall of that package usually "
+                          "fixes the link.") + '"; '
+        'fi'
+    )
+
+    action_group = Adw.PreferencesGroup()
+    action_group.set_title(tr("Scan"))
+
+    scan_row = Adw.ActionRow()
+    scan_row.set_title(GLib.markup_escape_text(tr("Scan Only")))
+    scan_row.set_subtitle(GLib.markup_escape_text(tr(
+        "Read-only: lists and classifies broken symlinks without deleting "
+        "anything. No sudo needed.")))
+    scan_row.set_subtitle_lines(0)
+    scan_btn = Gtk.Button(label=tr("Scan"))
+    scan_btn.set_valign(Gtk.Align.CENTER)
+
+    def _do_scan(*_):
+        dialog.close()
+        run_terminal_fn(
+            f"DO_DELETE=0 bash -c {shlex.quote(_classify_core)}",
+            tr("Scan Only"))
+    scan_btn.connect("clicked", _do_scan)
+    scan_row.add_suffix(scan_btn)
+    action_group.add(scan_row)
+
+    clean_row = Adw.ActionRow()
+    clean_row.set_title(GLib.markup_escape_text(tr("Scan & Remove Safe Ones")))
+    clean_row.set_subtitle(GLib.markup_escape_text(tr(
+        "Same scan, but also deletes the SAFE-category links (license "
+        "leftovers only — archiso templates and anything else are still "
+        "just listed, never touched). Needs sudo.")))
+    clean_row.set_subtitle_lines(0)
+    clean_btn2 = Gtk.Button(label=tr("Clean"))
+    clean_btn2.add_css_class("suggested-action")
+    clean_btn2.set_valign(Gtk.Align.CENTER)
+
+    def _do_clean_symlinks(*_):
+        dialog.close()
+        run_terminal_fn(
+            f"sudo -S env DO_DELETE=1 bash -c {shlex.quote(_classify_core)}",
+            tr("Scan & Remove Safe Ones"))
+    clean_btn2.connect("clicked", _do_clean_symlinks)
+    clean_row.add_suffix(clean_btn2)
+    action_group.add(clean_row)
+    outer.append(action_group)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
+
+
+# ─── Services & Security Check (Modul 7 from the user's manjaro-wartung.sh) ───
+
+def show_services_security_dialog(parent, run_terminal_fn):
+    """Adapted from "MODUL 7: Systemdienste und Sicherheit" in the user's
+    own manjaro-wartung.sh. Almost entirely distro-agnostic: systemctl,
+    ufw, and sshd_config are the same across all 4 supported families —
+    only the shadow.service auto-reset (a known-harmless, Manjaro-specific
+    quirk) and the UFW *install* command (package name/manager differ)
+    need any distro branching, everything else runs identically.
+    Live-checks each row's current state when the dialog opens (cheap,
+    local-only calls: systemctl is-active/is-failed, `which ufw`, reading
+    sshd_config) so only the buttons that make sense for THIS system are
+    shown active — e.g. no shadow.service row at all unless it's actually
+    failed right now."""
+    dialog = Adw.Window()
+    dialog.set_title(tr("Services & Security"))
+    dialog.set_default_size(600, 680)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    def _row(title, subtitle, button_label, cmd, suggested=False):
+        row = Adw.ActionRow()
+        row.set_title(GLib.markup_escape_text(title))
+        row.set_subtitle(GLib.markup_escape_text(subtitle))
+        row.set_subtitle_lines(0)
+        btn = Gtk.Button(label=button_label)
+        if suggested:
+            btn.add_css_class("suggested-action")
+        btn.set_valign(Gtk.Align.CENTER)
+
+        def _run(*_):
+            dialog.close()
+            run_terminal_fn(cmd, title)
+        btn.connect("clicked", _run)
+        row.add_suffix(btn)
+        return row
+
+    # ── Failed systemd services (always shown — cheap, informative) ──
+    services_group = Adw.PreferencesGroup()
+    services_group.set_title(tr("Services"))
+    services_group.add(_row(
+        tr("Show Failed Services"),
+        tr("Read-only: lists any systemd services currently in a failed "
+           "state."),
+        tr("Show"),
+        'systemctl --failed --no-pager 2>/dev/null',
+    ))
+
+    # shadow.service is a known-harmless, occasionally-failing service on
+    # Manjaro specifically (password/group integrity check tripping after
+    # updates) — only show the row if it's actually failed right now, on
+    # any distro (the check itself is universal, even if the failure mode
+    # is Manjaro-specific in practice).
+    shadow_out, _ = run_command("systemctl is-failed shadow.service 2>/dev/null")
+    if (shadow_out or "").strip() == "failed":
+        services_group.add(_row(
+            tr("Reset shadow.service"),
+            tr("shadow.service has failed — this is usually a harmless "
+               "password/group integrity check tripping after an update. "
+               "Resets it without touching anything else."),
+            tr("Reset"),
+            "systemctl reset-failed shadow.service",
+        ))
+    outer.append(services_group)
+
+    # ── Critical security services (read-only status, always shown) ──
+    sec_group = Adw.PreferencesGroup()
+    sec_group.set_title(tr("Security Services"))
+    sec_group.add(_row(
+        tr("Check firewalld / fail2ban / apparmor"),
+        tr("Read-only: reports whether each of these — if installed — is "
+           "currently active."),
+        tr("Check"),
+        'for D in firewalld fail2ban apparmor; do '
+        '  if systemctl is-active --quiet "$D" 2>/dev/null; then '
+        '    echo "$D: ' + tr("running").replace('"', '') + '"; '
+        '  elif systemctl list-unit-files "${D}.service" >/dev/null 2>&1; then '
+        '    echo "$D: ' + tr("installed but NOT active").replace('"', '') + '"; '
+        '  else '
+        '    echo "$D: ' + tr("not installed").replace('"', '') + '"; '
+        '  fi; '
+        'done',
+    ))
+    outer.append(sec_group)
+
+    # ── UFW firewall — the one row with real distro branching (only the
+    # install command differs; everything else is identical) ──
+    ufw_group = Adw.PreferencesGroup()
+    ufw_group.set_title(tr("Firewall (UFW)"))
+    _, ufw_installed_code = run_command("which ufw 2>/dev/null")
+    ufw_installed = (ufw_installed_code == 0)
+    ufw_active = False
+    if ufw_installed:
+        _, active_code = run_command("systemctl is-active --quiet ufw 2>/dev/null")
+        ufw_active = (active_code == 0)
+
+    ufw_enable_cmd = (
+        "sudo -S ufw default deny incoming && sudo -S ufw default allow outgoing && "
+        '(systemctl is-active --quiet sshd 2>/dev/null || systemctl is-active --quiet ssh 2>/dev/null) '
+        "&& sudo -S ufw limit ssh; "
+        "sudo -S ufw --force enable && sudo -S systemctl enable --now ufw && "
+        "sudo -S ufw status verbose"
+    )
+    if ufw_active:
+        ufw_group.add(_row(
+            tr("Show Firewall Rules"),
+            tr("UFW is active. Read-only: shows the current rule set."),
+            tr("Show"),
+            "sudo -S ufw status verbose",
+        ))
+    elif ufw_installed:
+        ufw_group.add(_row(
+            tr("Enable Firewall"),
+            tr("UFW is installed but not active — your system currently has "
+               "no active firewall. Enables it with default rules (deny "
+               "incoming, allow outgoing) and rate-limited SSH if sshd is "
+               "running."),
+            tr("Enable"),
+            ufw_enable_cmd,
+            suggested=True,
+        ))
+    else:
+        ufw_install_cmd_by_family = {
+            "arch":   "sudo -S pacman -S --noconfirm ufw",
+            "debian": "sudo -S apt-get install -y ufw",
+            "fedora": "sudo -S dnf install -y ufw",
+            "suse":   "sudo -S zypper --non-interactive install ufw",
+        }
+        install_cmd = ufw_install_cmd_by_family.get(pkgmanager.get_family())
+        if install_cmd:
+            ufw_group.add(_row(
+                tr("Install & Enable Firewall"),
+                tr("UFW isn't installed — your system currently has no "
+                   "active firewall. Installs it, then enables it with "
+                   "default rules (deny incoming, allow outgoing) and "
+                   "rate-limited SSH if sshd is running."),
+                tr("Install & Enable"),
+                f"{install_cmd} && {ufw_enable_cmd}",
+                suggested=True,
+            ))
+    outer.append(ufw_group)
+
+    # ── SSH root login (read-only check, always shown if sshd_config exists) ──
+    ssh_group = Adw.PreferencesGroup()
+    ssh_group.set_title(tr("SSH"))
+    ssh_group.add(_row(
+        tr("Check SSH Root Login"),
+        tr("Read-only: checks /etc/ssh/sshd_config for PermitRootLogin "
+           "yes, which lets root log in directly over SSH."),
+        tr("Check"),
+        '[ -f /etc/ssh/sshd_config ] && '
+        '( grep -qE "^PermitRootLogin\\s+yes" /etc/ssh/sshd_config '
+        '  && echo "' + tr("SSH root login is ENABLED — consider disabling it "
+                             "(PermitRootLogin no).").replace('"', '') + '" '
+        '  || echo "' + tr("SSH root login is disabled or not explicitly "
+                             "configured.").replace('"', '') + '" ) '
+        '|| echo "' + tr("No /etc/ssh/sshd_config found — SSH server doesn't "
+                          "seem to be installed.").replace('"', '') + '"',
+    ))
+    outer.append(ssh_group)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
+
+
+# ─── Configuration Backup (Modul 6 from the user's manjaro-wartung.sh) ────────
+
+def show_config_backup_dialog(parent, run_terminal_fn):
+    """Adapted from "MODUL 6: Backup wichtiger Konfigurationen" in the
+    user's own manjaro-wartung.sh. Unlike the other adapted modules, this
+    one genuinely needs distro branching: which config files matter
+    (pacman.conf vs sources.list vs dnf.conf vs zypp.conf, …) and how to
+    export the installed-package list (pacman -Qqe vs apt-mark showmanual
+    vs dnf repoquery vs rpm -qa) differ per family — see
+    pkgmanager.config_backup_sources() / installed_package_list_cmd().
+    Everything else (tar, keeping only the last 5 backups) is identical
+    across all 4 families."""
+    dialog = Adw.Window()
+    dialog.set_title(tr("Configuration Backup"))
+    dialog.set_default_size(600, 500)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    info_group = Adw.PreferencesGroup()
+    info_group.set_title(tr("What this does"))
+    info_group.set_description(tr(
+        "Creates a compressed archive of your system's identity and boot "
+        "configuration (fstab, hostname, bootloader, package-manager "
+        "config, …) plus a plain-text list of explicitly-installed "
+        "packages, so a fresh install can be brought back to a similar "
+        "state. Only the last 5 archives are kept; older ones are removed "
+        "automatically. No sudo needed — these files are normally "
+        "world-readable."))
+    outer.append(info_group)
+
+    dest_group = Adw.PreferencesGroup()
+    dest_row = Adw.ActionRow()
+    dest_row.set_title(tr("Backup Folder"))
+    dest_entry = Gtk.Entry()
+    dest_entry.set_text(str(Path.home() / "pachul-backup"))
+    dest_entry.set_valign(Gtk.Align.CENTER)
+    dest_entry.set_width_chars(28)
+    dest_row.add_suffix(dest_entry)
+    dest_group.add(dest_row)
+    outer.append(dest_group)
+
+    sources = pkgmanager.config_backup_sources()
+    included_group = Adw.PreferencesGroup()
+    included_group.set_title(tr("Included If Present"))
+    included_group.set_description(", ".join(sources))
+    outer.append(included_group)
+
+    pkg_cmd, pkg_explicit = pkgmanager.installed_package_list_cmd()
+    if pkg_cmd:
+        pkg_note_group = Adw.PreferencesGroup()
+        pkg_note_group.set_description(
+            tr("Also saves the list of explicitly-installed packages.") if pkg_explicit
+            else tr("Also saves the full list of installed packages (this "
+                     "distro has no simple way to tell explicit installs "
+                     "from pulled-in dependencies)."))
+        outer.append(pkg_note_group)
+
+    backup_btn = Gtk.Button(label=tr("Create Backup"))
+    backup_btn.add_css_class("suggested-action")
+    backup_btn.set_halign(Gtk.Align.CENTER)
+
+    def _do_backup(*_):
+        dest = dest_entry.get_text().strip() or str(Path.home() / "pachul-backup")
+        dialog.close()
+        quoted_sources = " ".join(shlex.quote(s) for s in sources)
+        pkg_line = ""
+        if pkg_cmd:
+            pkg_line = (
+                f'PAKETLISTE="$ZIEL/pakete-$DATUM.txt"; '
+                f'{pkg_cmd} > "$PAKETLISTE" 2>/dev/null; '
+                f'echo "' + tr("Package list saved ({n} packages): $PAKETLISTE").replace("{n}", '$(wc -l < "$PAKETLISTE" 2>/dev/null || echo ?)') + '"; '
+            )
+        script = (
+            f'ZIEL={shlex.quote(dest)}; '
+            'DATUM=$(date +%Y%m%d-%H%M%S); '
+            'mkdir -p "$ZIEL"; '
+            'ARCHIV="$ZIEL/pachul-config-$DATUM.tar.gz"; '
+            f'QUELLEN=({quoted_sources}); '
+            'VORHANDEN=(); '
+            'for Q in "${QUELLEN[@]}"; do [ -e "$Q" ] && VORHANDEN+=("$Q"); done; '
+            'if [ ${#VORHANDEN[@]} -eq 0 ]; then '
+            '  echo "' + tr("Nothing to back up — none of the expected config paths exist.") + '"; '
+            'else '
+            '  tar -czf "$ARCHIV" "${VORHANDEN[@]}" 2>/dev/null || true; '
+            '  echo "' + tr("Backup created ({size}): $ARCHIV").replace("{size}", '$(du -sh "$ARCHIV" 2>/dev/null | cut -f1)') + '"; '
+            'fi; '
+            + pkg_line +
+            'ls -t "$ZIEL"/pachul-config-*.tar.gz 2>/dev/null | tail -n +6 | while read -r ALT; do '
+            '  rm -f "$ALT"; echo "' + tr("Removed old backup:") + ' $ALT"; '
+            'done'
+        )
+        run_terminal_fn(f"bash -c {shlex.quote(script)}", tr("Configuration Backup"))
+    backup_btn.connect("clicked", _do_backup)
+    outer.append(backup_btn)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
 
 
 # ─── Mirror rater dialog ──────────────────────────────────────────────────────
 
 def show_mirror_rater(parent, run_terminal_fn):
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("Rate Mirrors"))
-    dialog.set_content_width(600)
-    dialog.set_content_height(560)
+    dialog.set_default_size(600, 560)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -866,10 +2700,12 @@ def show_mirror_rater(parent, run_terminal_fn):
                 content = ""
             server_count = sum(1 for ln in content.splitlines() if ln.strip().startswith("Server"))
 
-            result_dialog = Adw.Dialog()
+            result_dialog = Adw.Window()
             result_dialog.set_title(tr("Mirror Ranking Result"))
-            result_dialog.set_content_width(680)
-            result_dialog.set_content_height(600)
+            result_dialog.set_default_size(680, 600)
+            result_dialog.set_resizable(True)
+            result_dialog.set_transient_for(parent)
+            result_dialog.set_modal(True)
 
             rtv = Adw.ToolbarView()
             rhdr = Adw.HeaderBar()
@@ -941,8 +2777,8 @@ def show_mirror_rater(parent, run_terminal_fn):
             router_outer.append(rscroll)
 
             rtv.set_content(router_outer)
-            result_dialog.set_child(rtv)
-            result_dialog.present(parent)
+            result_dialog.set_content(rtv)
+            result_dialog.present()
 
         run_btn.connect("clicked", on_run)
         outer.append(run_btn)
@@ -998,17 +2834,19 @@ def show_mirror_rater(parent, run_terminal_fn):
 
     scroll.set_child(outer)
     tv.set_content(scroll)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
 
 # ─── Orphan finder dialog ─────────────────────────────────────────────────────
 
 def show_orphan_finder(parent, run_terminal_fn):
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("Orphaned Packages"))
-    dialog.set_content_width(560)
-    dialog.set_content_height(460)
+    dialog.set_default_size(560, 460)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -1066,7 +2904,10 @@ def show_orphan_finder(parent, run_terminal_fn):
             name = o["name"]
             rm_btn.connect("clicked", lambda *_, n=name: (
                 dialog.close(),
-                run_terminal_fn(f"sudo -S pacman -R --noconfirm {shlex.quote(n)}", tr("Remove {name} ").format(name=n))
+                run_terminal_fn(
+                    f"sudo -S pacman -R --noconfirm {shlex.quote(n)}" if distro.is_arch()
+                    else pkgmanager.remove_cmd([n]),
+                    tr("Remove {name} ").format(name=n))
             ))
             row.add_suffix(rm_btn)
             listbox.append(row)
@@ -1078,18 +2919,22 @@ def show_orphan_finder(parent, run_terminal_fn):
         btn_box.set_halign(Gtk.Align.CENTER)
         btn_box.set_margin_top(12); btn_box.set_margin_bottom(16)
         names = " ".join(shlex.quote(o["name"]) for o in orphans)
+        name_list = [o["name"] for o in orphans]
         remove_all_btn = Gtk.Button(label=tr("Remove All {n} Orphans").format(n=len(orphans)))
         remove_all_btn.add_css_class("destructive-action")
         remove_all_btn.connect("clicked", lambda *_: (
             dialog.close(),
-            run_terminal_fn(f"sudo -S pacman -Rns --noconfirm {names}", tr("Remove All Orphans"))
+            run_terminal_fn(
+                f"sudo -S pacman -Rns --noconfirm {names}" if distro.is_arch()
+                else pkgmanager.remove_cmd(name_list, purge=distro.is_debian()),
+                tr("Remove All Orphans"))
         ))
         btn_box.append(remove_all_btn)
         outer.append(btn_box)
 
     tv.set_content(outer)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
 
 # ─── Clean cache dialog ────────────────────────────────────────────────────────
@@ -1097,8 +2942,8 @@ def show_orphan_finder(parent, run_terminal_fn):
 def show_clean_cache_dialog(parent, run_terminal_fn):
     dialog = Adw.Dialog()
     dialog.set_title(tr("Clean Cache"))
-    dialog.set_content_width(480)
-    dialog.set_content_height(340)
+    dialog.set_content_width(520)
+    dialog.set_content_height(620)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -1118,7 +2963,15 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
     outer.set_margin_start(16); outer.set_margin_end(16)
 
     _, code = run_command("which paccache 2>/dev/null")
-    has_paccache = (code == 0)
+    has_paccache = distro.is_arch() and (code == 0)
+
+    cache_dir_by_family = {
+        "debian": "/var/cache/apt/archives",
+        "fedora": "/var/cache/dnf",
+        "suse":   "/var/cache/zypp/packages",
+    }
+    cache_path = "/var/cache/pacman/pkg" if distro.is_arch() \
+        else cache_dir_by_family.get(distro.get_family(), "N/A")
 
     info_group = Adw.PreferencesGroup()
     info_group.set_title(tr("What this does"))
@@ -1129,7 +2982,7 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
             "package so you can still downgrade later if needed. "
             "Currently installed packages are never touched."
         ))
-    else:
+    elif distro.is_arch():
         info_group.set_description(tr(
             "paccache isn't installed, so this falls back to pacman's "
             "built-in cleanup (pacman -Sc), which removes cached versions "
@@ -1137,12 +2990,17 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
             "versions of packages you still have. "
             "Currently installed packages are never touched."
         ))
+    else:
+        info_group.set_description(tr(
+            "Removes cached package files from {path}. Currently "
+            "installed packages are never touched."
+        ).format(path=cache_path))
     outer.append(info_group)
 
     size_group = Adw.PreferencesGroup()
     size_row = Adw.ActionRow()
     size_row.set_title(tr("Current Cache Size"))
-    size_row.set_subtitle("/var/cache/pacman/pkg")
+    size_row.set_subtitle(cache_path)
     size_lbl = Gtk.Label(label=get_package_cache_size())
     size_lbl.add_css_class("caption"); size_lbl.add_css_class("dim-label")
     size_row.add_suffix(size_lbl)
@@ -1155,12 +3013,71 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
 
     def _do_clean(*_):
         dialog.close()
-        run_terminal_fn(
-            "sudo -S -v && { paccache -rk2 2>/dev/null || sudo pacman -Sc --noconfirm; }",
-            tr("Clean Cache"))
+        if distro.is_arch():
+            cmd = "sudo -S -v && { paccache -rk2 2>/dev/null || sudo pacman -Sc --noconfirm; }"
+        else:
+            cmd = pkgmanager.clean_cache_cmd() or "true"
+        run_terminal_fn(cmd, tr("Clean Cache"))
 
     clean_btn.connect("clicked", _do_clean)
     outer.append(clean_btn)
+
+    # ── System Cleanup (from the user's manjaro-wartung.sh "MODUL 4"): the
+    # journal/thumbnail/trash part of it, which is genuinely distro-agnostic
+    # (journalctl, find, gio are the same everywhere) — unlike the package
+    # cache above it, which needed the pacman/apt/dnf/zypper branching. ──
+    sys_group = Adw.PreferencesGroup()
+    sys_group.set_title(tr("System Cleanup"))
+    sys_group.set_description(tr(
+        "Not package-related — general disk cleanup for the systemd "
+        "journal, old thumbnail previews, and the trash."))
+
+    def _sys_row(title, subtitle, button_label, cmd, cmd_title, suggested=False):
+        row = Adw.ActionRow()
+        row.set_title(GLib.markup_escape_text(title))
+        row.set_subtitle(GLib.markup_escape_text(subtitle))
+        row.set_subtitle_lines(0)
+        btn = Gtk.Button(label=button_label)
+        if suggested:
+            btn.add_css_class("suggested-action")
+        btn.set_valign(Gtk.Align.CENTER)
+
+        def _run(*_):
+            dialog.close()
+            run_terminal_fn(cmd, cmd_title)
+        btn.connect("clicked", _run)
+        row.add_suffix(btn)
+        return row
+
+    sys_group.add(_sys_row(
+        tr("Clean systemd Journal"),
+        tr("Shrinks the journal to 500 MB and removes entries older than 4 weeks."),
+        tr("Run"),
+        "sudo -S journalctl --vacuum-size=500M && sudo -S journalctl --vacuum-time=4weeks",
+        tr("Clean systemd Journal"),
+    ))
+    sys_group.add(_sys_row(
+        tr("Remove Old Thumbnail Previews"),
+        tr("Deletes cached thumbnail images in ~/.cache/thumbnails older than "
+           "30 days. No sudo needed — this only touches your own cache."),
+        tr("Run"),
+        'bash -c \'if [ -d "$HOME/.cache/thumbnails" ]; then '
+        'find "$HOME/.cache/thumbnails" -type f -atime +30 -delete && '
+        'echo "' + tr("Done.") + '"; else echo "' +
+        tr("No thumbnail cache found.") + '"; fi\'',
+        tr("Remove Old Thumbnail Previews"),
+    ))
+    sys_group.add(_sys_row(
+        tr("Empty Trash"),
+        tr("Permanently empties your desktop trash/recycle bin (via 'gio "
+           "trash --empty'). No sudo needed."),
+        tr("Run"),
+        'bash -c \'if command -v gio >/dev/null 2>&1; then gio trash --empty && '
+        'echo "' + tr("Done.") + '"; else echo "' +
+        tr("gio not found — nothing to do.") + '"; fi\'',
+        tr("Empty Trash"),
+    ))
+    outer.append(sys_group)
 
     scroll.set_child(outer)
     tv.set_content(scroll)
@@ -1236,10 +3153,12 @@ def show_import_pkgs_dialog(parent, names, helper, run_terminal_fn):
     the file picker — the "why"/"how" was already explained by
     show_import_pkgs_intro() before the file was even picked, so this one
     only needs the concrete result and the final confirmation."""
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("Import Package List"))
-    dialog.set_content_width(520)
-    dialog.set_content_height(480)
+    dialog.set_default_size(520, 480)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -1282,11 +3201,14 @@ def show_import_pkgs_dialog(parent, names, helper, run_terminal_fn):
 
     def _do_install(*_):
         dialog.close()
-        quoted = " ".join(shlex.quote(n) for n in names)
         if helper:
+            quoted = " ".join(shlex.quote(n) for n in names)
             cmd = f"{helper} -S --needed --noconfirm {quoted}"
-        else:
+        elif distro.is_arch():
+            quoted = " ".join(shlex.quote(n) for n in names)
             cmd = f"sudo -S pacman -S --needed --noconfirm {quoted}"
+        else:
+            cmd = pkgmanager.install_cmd(names)
         run_terminal_fn(cmd, tr("Install {n} packages").format(n=len(names)))
 
     install_btn.connect("clicked", _do_install)
@@ -1297,8 +3219,8 @@ def show_import_pkgs_dialog(parent, names, helper, run_terminal_fn):
     scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
     scroll.set_child(outer)
     tv.set_content(scroll)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
 
 # ─── Export package list dialog ────────────────────────────────────────────────
@@ -1358,10 +3280,12 @@ def show_export_pkgs_intro(parent, on_choose_location):
 # ─── File search dialog (pacman -F) ──────────────────────────────────────────
 
 def show_file_search_dialog(parent, run_terminal_fn):
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("Find Package by File"))
-    dialog.set_content_width(600)
-    dialog.set_content_height(560)
+    dialog.set_default_size(600, 560)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -1409,8 +3333,8 @@ def show_file_search_dialog(parent, run_terminal_fn):
     outer.append(scroll)
 
     tv.set_content(outer)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
     def render(results):
         while listbox.get_first_child():
@@ -1433,8 +3357,12 @@ def show_file_search_dialog(parent, run_terminal_fn):
             icon.add_css_class("dim-label")
             row.add_prefix(icon)
 
-            _, installed_code = run_command(f"pacman -Qi {shlex.quote(pkg_name)} 2>/dev/null")
-            if installed_code == 0:
+            if distro.is_arch():
+                _, installed_code = run_command(f"pacman -Qi {shlex.quote(pkg_name)} 2>/dev/null")
+                pkg_installed = installed_code == 0
+            else:
+                pkg_installed = pkgmanager.is_installed(pkg_name)
+            if pkg_installed:
                 badge = Gtk.Label(label=tr("INSTALLED"))
                 badge.add_css_class("caption"); badge.add_css_class("status-installed")
                 badge.add_css_class("row-status-pill")
@@ -1447,8 +3375,10 @@ def show_file_search_dialog(parent, run_terminal_fn):
                 name = pkg_name
                 inst_btn.connect("clicked", lambda *_, n=name: (
                     dialog.close(),
-                    run_terminal_fn(f"sudo -S pacman -S --noconfirm {shlex.quote(n)}",
-                                    tr("Install {name}").format(name=n))
+                    run_terminal_fn(
+                        f"sudo -S pacman -S --noconfirm {shlex.quote(n)}" if distro.is_arch()
+                        else pkgmanager.install_cmd([n]),
+                        tr("Install {name}").format(name=n))
                 ))
                 row.add_suffix(inst_btn)
 
@@ -1467,7 +3397,9 @@ def show_file_search_dialog(parent, run_terminal_fn):
 
     def do_sync(*_):
         sync_banner.set_revealed(False)
-        run_terminal_fn("sudo -S pacman -Fy --noconfirm", tr("Sync File Database"))
+        cmd = "sudo -S pacman -Fy --noconfirm" if distro.is_arch() else pkgmanager.sync_files_db_cmd()
+        if cmd:
+            run_terminal_fn(cmd, tr("Sync File Database"))
     sync_banner.connect("button-clicked", do_sync)
 
     def do_search(*_):
@@ -1493,10 +3425,12 @@ def show_file_search_dialog(parent, run_terminal_fn):
     entry.connect("activate", do_search)
 
 def show_sysinfo_dialog(parent):
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("System Information"))
-    dialog.set_content_width(560)
-    dialog.set_content_height(680)
+    dialog.set_default_size(560, 680)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -1529,8 +3463,8 @@ def show_sysinfo_dialog(parent):
 
     scroll.set_child(outer)
     tv.set_content(scroll)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
     def populate(info):
         outer.remove(loading_box)
@@ -1561,7 +3495,7 @@ def show_sysinfo_dialog(parent):
 
         pkg_group = Adw.PreferencesGroup()
         pkg_group.set_title(tr("Packages"))
-        for key in ("Pacman", "AUR Helper", "Installed Packages", "Foreign (AUR) Packages", "Package Cache Size"):
+        for key in ("Pacman", "Package Manager", "AUR Helper", "Installed Packages", "Foreign (AUR) Packages", "Package Cache Size"):
             if key in info:
                 row = Adw.ActionRow(); row.set_title(tr(key))
                 val_lbl = Gtk.Label(label=info[key])
@@ -1598,7 +3532,173 @@ def show_sysinfo_dialog(parent):
     threading.Thread(target=worker, daemon=True).start()
 
 
-# ─── Package history (pacman log) ─────────────────────────────────────────────
+# ─── About dialog (single page — see show_about_dialog docstring) ────────────
+
+def show_about_dialog(parent, app_icon_name="io.github.wergosam.pachul"):
+    """Custom, single-page replacement for Adw.AboutDialog.
+
+    Adw.AboutDialog is a rigid GNOME-standard widget: as soon as you set
+    debug_info / a stock license_type / multiple credit categories, it
+    grows extra navigation buttons at the bottom that push those onto
+    separate "Legal"/"Troubleshooting"/"Credits" pages — by design, and
+    not something the public API lets you flatten. Since the whole point
+    here is "everything visible at a glance, no clicking around", this
+    builds a plain Adw.Window instead: one scrollable page, no
+    sub-navigation, just grouped rows — and, unlike Adw.Dialog, a real
+    window the user can freely move and resize."""
+    import platform
+    try:
+        distro_name = distro.get_distro_name()
+        pkg_mgr = distro.get_package_manager() or "?"
+    except Exception:
+        distro_name, pkg_mgr = "?", "?"
+    gtk_ver = f"{Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()}"
+    adw_ver = f"{Adw.get_major_version()}.{Adw.get_minor_version()}.{Adw.get_micro_version()}"
+    py_ver = platform.python_version()
+    version = "2.2.5"
+
+    dialog = Adw.Window()
+    dialog.set_title(tr("About Pachul"))
+    # Wider than before so the identity block and description can sit
+    # side by side instead of stacking into one tall column. Height is
+    # taken from the main window's own startup default size (set via
+    # set_default_size() in window.py), not its current/resized size —
+    # get_default_size() always returns that original value, so this
+    # dialog stays exactly as tall as the program window was at launch
+    # even if the user has since resized the main window.
+    _, start_height = parent.get_default_size() if parent is not None else (600, 560)
+    if start_height <= 0:
+        start_height = 560
+    dialog.set_default_size(600, start_height)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(close_btn)
+    tv.add_top_bar(hdr)
+
+    # Everything below lives in a ScrolledWindow. Adw.Dialog is capped to
+    # the parent window's size, so on a small/default-size main window the
+    # dialog's natural (unscrolled) height used to get clipped top and
+    # bottom with no way to reach the rest. Inside a scroller it simply
+    # scrolls instead.
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_vexpand(True)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+    outer.set_margin_top(8);    outer.set_margin_bottom(24)
+    outer.set_margin_start(24); outer.set_margin_end(24)
+
+    # ── Identity block (icon/name/version/links) on the left, purpose
+    # description on the right — side by side to keep the dialog short ──
+    top_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=24)
+
+    left_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    left_col.set_halign(Gtk.Align.CENTER)
+    left_col.set_valign(Gtk.Align.START)
+    left_col.set_size_request(180, -1)
+    icon_img = Gtk.Image.new_from_icon_name(app_icon_name)
+    icon_img.set_pixel_size(80)
+    left_col.append(icon_img)
+    name_lbl = Gtk.Label(label="Pachul")
+    name_lbl.add_css_class("title-1")
+    left_col.append(name_lbl)
+    ver_lbl = Gtk.Label(label=tr("Version {v}").format(v=version))
+    ver_lbl.add_css_class("dim-label")
+    left_col.append(ver_lbl)
+    top_box.append(left_col)
+
+    # ── Kurzfassung des Zwecks — direkt sichtbar, kein Klick nötig ──
+    right_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    right_col.set_valign(Gtk.Align.CENTER)
+    right_col.set_hexpand(True)
+    desc_lbl = Gtk.Label(label=tr(
+        "Pachul is a graphical package manager for Arch, Debian/Ubuntu, "
+        "Fedora and openSUSE. Search, install, update and remove packages, "
+        "review config file conflicts, keep external tools (rustup, npm, "
+        "pip, Flatpak, …) up to date, and more — all from one native "
+        "GTK4/libadwaita app."))
+    desc_lbl.set_wrap(True)
+    desc_lbl.set_justify(Gtk.Justification.LEFT)
+    desc_lbl.set_halign(Gtk.Align.START)
+    desc_lbl.set_xalign(0)
+    right_col.append(desc_lbl)
+    top_box.append(right_col)
+    outer.append(top_box)
+
+    # ── Alle Detailinformationen als flache Liste, keine Unterseiten ──
+    info_group = Adw.PreferencesGroup()
+    info_rows = [
+        (tr("Developer"), "Juerg Rechsteiner"),
+        (tr("License"), "GPL-2.0-or-later"),
+        (tr("Distro"), distro_name),
+        (tr("Package Manager"), pkg_mgr),
+        ("GTK", gtk_ver),
+        ("libadwaita", adw_ver),
+        ("Python", py_ver),
+    ]
+    for title, value in info_rows:
+        row = Adw.ActionRow()
+        row.set_title(title)
+        val_lbl = Gtk.Label(label=value)
+        val_lbl.add_css_class("caption"); val_lbl.add_css_class("dim-label")
+        val_lbl.set_selectable(True)
+        row.add_suffix(val_lbl)
+        info_group.add(row)
+    outer.append(info_group)
+
+    # ── Links & Aktionen — direkt als Buttons, keine "Legal"/"Troubleshooting"-Seite.
+    # Angehängt an die linke Spalte (unter Icon/Name/Version), damit der
+    # Dialog insgesamt weniger hoch wird. ──
+    links_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    links_box.set_margin_top(6)
+
+    def open_uri(uri):
+        Gtk.UriLauncher.new(uri).launch(parent, None, None)
+
+    website_btn = Gtk.Button(label=tr("Website"))
+    website_btn.connect("clicked", lambda *_: open_uri("https://github.com/wergosam/Pachul"))
+    links_box.append(website_btn)
+
+    issue_btn = Gtk.Button(label=tr("Report an Issue"))
+    issue_btn.connect("clicked", lambda *_: open_uri("https://github.com/wergosam/Pachul/issues"))
+    links_box.append(issue_btn)
+
+    def copy_debug_info(*_):
+        text = (f"Pachul {version}\n"
+                f"Distro: {distro_name} (pkg manager: {pkg_mgr})\n"
+                f"GTK: {gtk_ver}  ·  libadwaita: {adw_ver}\n"
+                f"Python: {py_ver}\n")
+        display = Gdk.Display.get_default()
+        if display:
+            display.get_clipboard().set(text)
+        copy_btn.set_label(tr("Copied!"))
+        GLib.timeout_add(1500, lambda: copy_btn.set_label(tr("Copy Debug Info")) or False)
+
+    copy_btn = Gtk.Button(label=tr("Copy Debug Info"))
+    copy_btn.connect("clicked", copy_debug_info)
+    links_box.append(copy_btn)
+    left_col.append(links_box)
+
+    copyright_lbl = Gtk.Label(label="© 2024–2026 Juerg Rechsteiner")
+    copyright_lbl.add_css_class("caption"); copyright_lbl.add_css_class("dim-label")
+    copyright_lbl.set_halign(Gtk.Align.CENTER)
+    outer.append(copyright_lbl)
+
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
+
+
+
 
 _HISTORY_ICONS = {
     "installed":   ("package-x-generic-symbolic",        "status-installed"),
@@ -1610,10 +3710,12 @@ _HISTORY_ICONS = {
 
 
 def show_history_dialog(parent):
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("Package History"))
-    dialog.set_content_width(640)
-    dialog.set_content_height(600)
+    dialog.set_default_size(640, 600)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -1653,8 +3755,8 @@ def show_history_dialog(parent):
     outer.append(scroll)
 
     tv.set_content(outer)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
     def render(entries):
         while listbox.get_first_child():
@@ -1699,10 +3801,12 @@ def show_history_dialog(parent):
 # ─── Downgrade from cache ─────────────────────────────────────────────────────
 
 def show_downgrade_dialog(parent, pkg_name, run_terminal_fn):
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("Downgrade {pkg}").format(pkg=pkg_name))
-    dialog.set_content_width(560)
-    dialog.set_content_height(420)
+    dialog.set_default_size(560, 420)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -1714,19 +3818,29 @@ def show_downgrade_dialog(parent, pkg_name, run_terminal_fn):
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-    versions = get_cached_versions(pkg_name)
+    candidates = get_downgrade_candidates(pkg_name)
 
-    if not versions:
+    if not candidates:
         status = Adw.StatusPage()
         status.set_paintable(themed_paintable("package-x-generic-symbolic", 72))
-        status.set_title(tr("No Cached Versions"))
-        status.set_description(
-            tr("No package files for {pkg} were found in /var/cache/pacman/pkg.\nOlder versions are only available while they remain in the cache.").format(pkg=pkg_name))
+        status.set_title(tr("No Older Versions Found"))
+        if distro.is_arch():
+            desc = tr("No package files for {pkg} were found in /var/cache/pacman/pkg."
+                      "\nOlder versions are only available while they remain in the cache."
+                      ).format(pkg=pkg_name)
+        else:
+            desc = tr("No older build of {pkg} is available — either nothing is cached "
+                      "locally, or the configured repositories only carry the current "
+                      "version.").format(pkg=pkg_name)
+        status.set_description(desc)
         status.set_vexpand(True)
         outer.append(status)
     else:
-        info_bar = Gtk.Label(
-            label=tr("{n} cached version(s) — pick one to install with pacman -U").format(n=len(versions)))
+        if distro.is_arch():
+            info_text = tr("{n} cached version(s) — pick one to install with pacman -U").format(n=len(candidates))
+        else:
+            info_text = tr("{n} version(s) available — some may need to be downloaded").format(n=len(candidates))
+        info_bar = Gtk.Label(label=info_text)
         info_bar.add_css_class("caption"); info_bar.set_wrap(True)
         info_bar.set_halign(Gtk.Align.START)
         info_bar.set_margin_start(16); info_bar.set_margin_end(16)
@@ -1741,18 +3855,21 @@ def show_downgrade_dialog(parent, pkg_name, run_terminal_fn):
         listbox.set_selection_mode(Gtk.SelectionMode.NONE)
         listbox.add_css_class("boxed-list")
 
-        for version, filepath in versions:
+        for cand in candidates:
             row = Adw.ActionRow()
-            row.set_title(version)
-            row.set_subtitle(filepath)
+            row.set_title(cand["version"])
+            if cand["kind"] == "file":
+                row.set_subtitle(cand["source"])
+            else:
+                row.set_subtitle(tr("Available from repository"))
             row.set_subtitle_selectable(True)
             btn = Gtk.Button(label=tr("Install"))
             btn.add_css_class("suggested-action"); btn.add_css_class("flat")
             btn.set_valign(Gtk.Align.CENTER)
-            btn.connect("clicked", lambda *_, fp=filepath, v=version: (
+            btn.connect("clicked", lambda *_, c=cand: (
                 dialog.close(),
-                run_terminal_fn(f"sudo -S pacman -U --noconfirm {shlex.quote(fp)}",
-                                tr("Downgrade {pkg} to {ver}").format(pkg=pkg_name, ver=v))
+                run_terminal_fn(build_downgrade_cmd(pkg_name, c),
+                                tr("Downgrade {pkg} to {ver}").format(pkg=pkg_name, ver=c["version"]))
             ))
             row.add_suffix(btn)
             listbox.append(row)
@@ -1761,8 +3878,8 @@ def show_downgrade_dialog(parent, pkg_name, run_terminal_fn):
         outer.append(scroll)
 
     tv.set_content(outer)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
 
 # ─── Hold / unhold package dialog ──────────────────────────────────────────────
@@ -1792,21 +3909,25 @@ def show_hold_dialog(parent, pkg_name, currently_held, on_confirm):
     outer.set_margin_start(16); outer.set_margin_end(16)
 
     info_group = Adw.PreferencesGroup()
+    mechanism = tr("IgnorePkg in /etc/pacman.conf") if distro.is_arch() \
+        else tr("apt-mark hold") if distro.is_debian() \
+        else tr("a zypper package lock") if distro.is_suse() \
+        else tr("the system's hold mechanism")
     if currently_held:
         info_group.set_title(tr("Allow {pkg} to Update Again").format(pkg=pkg_name))
         info_group.set_description(tr(
-            "Removes {pkg} from IgnorePkg in /etc/pacman.conf. It will be "
+            "Removes {pkg} from {mechanism}. It will be "
             "included in system upgrades again from now on."
-        ).format(pkg=pkg_name))
+        ).format(pkg=pkg_name, mechanism=mechanism))
         action_label = tr("Unhold {pkg}").format(pkg=pkg_name)
     else:
         info_group.set_title(tr("Pin {pkg} to Its Current Version").format(pkg=pkg_name))
         info_group.set_description(tr(
-            "Adds {pkg} to IgnorePkg in /etc/pacman.conf. Held packages are "
+            "Adds {pkg} to {mechanism}. Held packages are "
             "skipped by system upgrades — useful if a specific version needs "
             "to stay put for compatibility — and won't update again until "
             "you unhold them."
-        ).format(pkg=pkg_name))
+        ).format(pkg=pkg_name, mechanism=mechanism))
         action_label = tr("Hold {pkg}").format(pkg=pkg_name)
     outer.append(info_group)
 
@@ -1887,10 +4008,12 @@ def show_mark_asdeps_dialog(parent, pkg_name, on_confirm):
 def show_pkgbuild_dialog(parent, pkg_name, on_install):
     from backend import get_aur_info
 
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("PKGBUILD — {pkg}").format(pkg=pkg_name))
-    dialog.set_content_width(760)
-    dialog.set_content_height(600)
+    dialog.set_default_size(760, 600)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -1967,8 +4090,8 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
     outer.append(scroll)
 
     tv.set_content(outer)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
     def render_meta(info):
         if info is None:
@@ -2000,10 +4123,13 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
 # ─── .pacnew / .pacsave manager ───────────────────────────────────────────────
 
 def show_pacdiff_dialog(parent, run_terminal_fn):
-    dialog = Adw.Dialog()
-    dialog.set_title(tr("Config Files (.pacnew / .pacsave)"))
-    dialog.set_content_width(720)
-    dialog.set_content_height(560)
+    dialog = Adw.Window()
+    dialog.set_title(tr("Config Files (.pacnew / .pacsave)") if distro.is_arch()
+                      else tr("Config File Conflicts"))
+    dialog.set_default_size(720, 560)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -2020,12 +4146,13 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
     loading.set_vexpand(True)
     sp = Gtk.Spinner(); sp.start(); sp.set_size_request(32, 32)
     loading.append(sp)
-    loading.append(Gtk.Label(label=tr("Scanning for .pacnew/.pacsave files…")))
+    loading.append(Gtk.Label(label=tr("Scanning for .pacnew/.pacsave files…") if distro.is_arch()
+                                    else tr("Scanning for config file conflicts…")))
     outer.append(loading)
 
     tv.set_content(outer)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
     def render(files):
         outer.remove(loading)
@@ -2033,7 +4160,8 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
             status = Adw.StatusPage()
             status.set_paintable(themed_paintable("emblem-ok-symbolic", 72))
             status.set_title(tr("Nothing to Merge"))
-            status.set_description(tr("No .pacnew or .pacsave files were found."))
+            status.set_description(tr("No .pacnew or .pacsave files were found.") if distro.is_arch()
+                                    else tr("No config file conflicts were found."))
             status.set_vexpand(True)
             outer.append(status)
             return
@@ -2120,7 +4248,7 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
 # translation; most descriptions reuse an existing note string, a few are
 # new and only used here.
 _TOOL_HELP_ENTRIES = [
-    ("Config Files (.pacnew / .pacsave)",
+    ("Config Files (.pacnew / .pacsave)" if distro.is_arch() else "Config File Conflicts",
      "Review and merge configuration files left behind by package updates."),
     ("Firmware (fwupdmgr)",
      "Firmware updates for the mainboard, SSDs, and other devices via fwupd."),
@@ -2170,10 +4298,12 @@ def show_ignored_packages_dialog(parent, run_terminal_fn):
     /etc/pacman.conf — a single place to see and undo holds, instead of
     having to remember which packages were pinned and visit each one's
     detail panel individually."""
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("Ignored Packages"))
-    dialog.set_content_width(520)
-    dialog.set_content_height(560)
+    dialog.set_default_size(520, 560)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -2190,17 +4320,15 @@ def show_ignored_packages_dialog(parent, run_terminal_fn):
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
     tv.set_content(outer)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
     def run_unignore(names):
-        tmp = set_packages_ignored(names, False)
-        if not tmp:
+        cmd = build_hold_cmd_bulk(names, False)
+        if not cmd:
             return
         dialog.close()
-        run_terminal_fn(
-            f"sudo -S install -m644 {shlex.quote(tmp)} /etc/pacman.conf",
-            tr("Unignore {n} packages").format(n=len(names)))
+        run_terminal_fn(cmd, tr("Unignore {n} packages").format(n=len(names)))
 
     def render():
         for child in list(outer):
@@ -2213,7 +4341,7 @@ def show_ignored_packages_dialog(parent, run_terminal_fn):
             status.set_paintable(themed_paintable("emblem-ok-symbolic", 64))
             status.set_title(tr("No Ignored Packages"))
             status.set_description(tr(
-                "Packages held via IgnorePkg (skipped by system upgrades) show up here."))
+                "Held/ignored packages (skipped by system upgrades) show up here."))
             outer.append(status)
             return
 
@@ -2247,10 +4375,12 @@ def show_tool_updates_dialog(parent, run_terminal_fn):
     Ollama, JetBrains PyCharm plugins, fwupd firmware, …) and let the user
     both run a one-off update now and opt individual tools into running
     automatically alongside every normal system upgrade."""
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("More Update Sources"))
-    dialog.set_content_width(760)
-    dialog.set_content_height(620)
+    dialog.set_default_size(760, 620)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -2276,8 +4406,8 @@ def show_tool_updates_dialog(parent, run_terminal_fn):
     outer.append(loading)
 
     tv.set_content(outer)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
     checks = {}   # id -> (Gtk.CheckButton, update_cmd, display name)
 
@@ -2337,12 +4467,14 @@ def show_tool_updates_dialog(parent, run_terminal_fn):
         scroll.set_margin_top(12);   scroll.set_margin_bottom(12)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
 
-        # Config files (.pacnew/.pacsave) always gets its own entry point —
-        # it has its own diff-review dialog rather than a plain update_cmd.
+        # Config files (.pacnew/.pacsave on Arch; .rpmnew/.dpkg-dist etc.
+        # elsewhere) always gets its own entry point — it has its own
+        # diff-review dialog rather than a plain update_cmd.
         cfg_group = Adw.PreferencesGroup()
         cfg_group.set_title(tr("Configuration"))
         cfg_row = Adw.ActionRow()
-        cfg_row.set_title(tr("Config Files (.pacnew / .pacsave)"))
+        cfg_row.set_title(tr("Config Files (.pacnew / .pacsave)") if distro.is_arch()
+                           else tr("Config File Conflicts"))
         cfg_row.set_subtitle(tr("Review and merge configuration files left behind by package updates."))
         cfg_btn = Gtk.Button(label=tr("Review…"))
         cfg_btn.set_valign(Gtk.Align.CENTER)
@@ -2458,14 +4590,16 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
                          is_autostart_enabled, set_autostart_enabled, start_tray, stop_tray)
     s = load_settings()
 
-    dlg = Adw.PreferencesDialog()
+    dlg = Adw.PreferencesWindow()
     dlg.set_title(tr("Preferences "))
-    # Adw.PreferencesDialog doesn't support free resizing by dragging an
-    # edge (a deliberate libadwaita design choice, see show_repo_manager
-    # above for the same note) — so just open it a bit more generously
-    # sized by default instead. Was implicitly ~640×576 (built-in default).
-    dlg.set_content_width(780)
-    dlg.set_content_height(780)
+    # Adw.PreferencesWindow (unlike Adw.PreferencesDialog) is a real,
+    # freely resizable/movable top-level window — same reasoning as
+    # show_repo_manager above. Default a bit more generously sized than
+    # the implicit ~640×576 default.
+    dlg.set_default_size(780, 780)
+    dlg.set_resizable(True)
+    dlg.set_transient_for(parent)
+    dlg.set_modal(True)
     page = Adw.PreferencesPage()
     page.set_title(tr("General"))
     page.set_icon_name("preferences-system-symbolic")
@@ -2502,7 +4636,10 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
             if not run_terminal_fn:
                 return
             btn.set_sensitive(False)
-            run_terminal_fn(get_paru_bootstrap_cmd(), tr("Install paru"))
+            # Parent the terminal dialog to this (still-open, modal)
+            # Preferences window instead of the main window, so it stacks
+            # correctly above it right from the first frame.
+            run_terminal_fn(get_paru_bootstrap_cmd(), tr("Install paru"), parent=dlg)
         paru_btn.connect("clicked", _on_install_paru)
         paru_row.add_suffix(paru_btn)
         aur_group.add(paru_row)
@@ -2513,7 +4650,62 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
     inc_row.connect("notify::active", lambda r, _: (
         save_settings({"include_aur_updates": r.get_active()}), on_changed()))
     aur_group.add(inc_row)
-    page.add(aur_group)
+    if distro.is_arch():
+        page.add(aur_group)
+
+    # python3-apt (Debian only) — the native binding pkgmanager_native.py
+    # uses for faster package info/listing/updates/repo detection. Without
+    # it, Pachul still works fine via the plain apt/dpkg CLI, just a bit
+    # slower, and the sidebar's repo categories stay empty for installed
+    # packages (see pkgmanager.installed_repos()'s docstring).
+    if distro.is_debian() and not pkgmanager.native.apt_available():
+        apt_group = Adw.PreferencesGroup()
+        apt_group.set_title(tr("Performance"))
+        apt_row = Adw.ActionRow()
+        apt_row.set_title(tr("python3-apt not installed"))
+        apt_row.set_subtitle(tr(
+            "Speeds up package info, listing and update checks, and lets "
+            "the sidebar show repo categories for installed packages. "
+            "Pachul works without it, just a bit slower. Restart Pachul "
+            "after installing for it to take effect."))
+        apt_btn = Gtk.Button(label=tr("Install python3-apt"))
+        apt_btn.add_css_class("suggested-action")
+        apt_btn.set_valign(Gtk.Align.CENTER)
+
+        def _on_install_python3_apt(btn):
+            if not run_terminal_fn:
+                return
+            btn.set_sensitive(False)
+            run_terminal_fn(pkgmanager.python3_apt_install_cmd(),
+                             tr("Install python3-apt"), parent=dlg)
+        apt_btn.connect("clicked", _on_install_python3_apt)
+        apt_row.add_suffix(apt_btn)
+        apt_group.add(apt_row)
+        page.add(apt_group)
+
+    if distro.is_fedora() and not pkgmanager.native.dnf_available():
+        dnf_group = Adw.PreferencesGroup()
+        dnf_group.set_title(tr("Performance"))
+        dnf_row = Adw.ActionRow()
+        dnf_row.set_title(tr("python3-libdnf5 not installed"))
+        dnf_row.set_subtitle(tr(
+            "Speeds up package info, listing and update checks. "
+            "Pachul works without it, just a bit slower. Restart Pachul "
+            "after installing for it to take effect."))
+        dnf_btn = Gtk.Button(label=tr("Install python3-libdnf5"))
+        dnf_btn.add_css_class("suggested-action")
+        dnf_btn.set_valign(Gtk.Align.CENTER)
+
+        def _on_install_python3_libdnf5(btn):
+            if not run_terminal_fn:
+                return
+            btn.set_sensitive(False)
+            run_terminal_fn(pkgmanager.dnf_native_install_cmd(),
+                             tr("Install python3-libdnf5"), parent=dlg)
+        dnf_btn.connect("clicked", _on_install_python3_libdnf5)
+        dnf_row.add_suffix(dnf_btn)
+        dnf_group.add(dnf_row)
+        page.add(dnf_group)
 
     # Additional package sources
     from backend import flatpak_available, snap_available
@@ -2560,9 +4752,10 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
     _switch(tr("Confirm before removing packages"), None, "confirm_remove")
     _switch(tr("Check for updates on startup"), None, "check_updates_on_start")
     _switch(tr("Notify when updates are available"), None, "notify_updates")
-    _switch(tr("Show Arch news before upgrades"),
-            tr("Warns about manual interventions before a system upgrade"),
-            "show_news_before_upgrade")
+    if distro.is_arch():
+        _switch(tr("Show Arch news before upgrades"),
+                tr("Warns about manual interventions before a system upgrade"),
+                "show_news_before_upgrade")
 
     snap_tool, snap_info = detect_snapshot_tool()
     snap_row = Adw.SwitchRow()
@@ -2656,16 +4849,18 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
     page.add(svc)
 
     dlg.add(page)
-    dlg.present(parent)
+    dlg.present()
 
 
 # ─── Arch news (pre-upgrade) ──────────────────────────────────────────────────
 
 def show_news_dialog(parent, on_proceed):
-    dialog = Adw.Dialog()
+    dialog = Adw.Window()
     dialog.set_title(tr("Arch Linux News"))
-    dialog.set_content_width(640)
-    dialog.set_content_height(520)
+    dialog.set_default_size(640, 520)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -2690,8 +4885,8 @@ def show_news_dialog(parent, on_proceed):
     outer.append(loading)
 
     tv.set_content(outer)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
     def render(items):
         outer.remove(loading)
@@ -2748,24 +4943,141 @@ def show_news_dialog(parent, on_proceed):
     threading.Thread(target=worker, daemon=True).start()
 
 
-# ─── Keyboard shortcuts ───────────────────────────────────────────────────────
+# ─── Help (functions overview + keyboard shortcuts) ───────────────────────────
 
-_SHORTCUTS = [
-    ("Ctrl+F",      tr("Focus search")),
-    ("F5",          tr("Sync databases")),
-    ("Ctrl+R",      tr("Refresh package list")),
-    ("Ctrl+U",      tr("Check for updates")),
-    ("Ctrl+,",      tr("Preferences  ")),
-    ("Ctrl+A",      tr("Select all packages (batch mode)")),
-    ("Ctrl+Shift+A", tr("Deselect all packages (batch mode)")),
-    ("Ctrl+Q",      tr("Quit")),
-]
+def _shortcuts_list():
+    """Built fresh on every call (not at module import) so it always
+    reflects the currently active language, even if the user switches
+    language in Preferences without restarting Pachul."""
+    return [
+        ("Ctrl+F",        tr("Focus search")),
+        ("F5",            tr("Sync databases")),
+        ("Ctrl+R",        tr("Refresh package list")),
+        ("Ctrl+U",        tr("Check for updates")),
+        ("Ctrl+,",        tr("Preferences")),
+        ("Ctrl+A",        tr("Select all packages (batch mode)")),
+        ("Ctrl+Shift+A",  tr("Deselect all packages (batch mode)")),
+        ("F1 / Ctrl+?",   tr("Help")),
+        ("Ctrl+Q",        tr("Quit")),
+    ]
 
 
-def show_shortcuts_dialog(parent):
-    dialog = Adw.Dialog()
-    dialog.set_title(tr("Keyboard Shortcuts "))
-    dialog.set_content_width(420)
+def _help_function_groups(parent):
+    """(group_title, [(name, description), …]) pairs describing every menu
+    function — grouped to match the app menu's own sections. `parent` is
+    the main window, used to skip rows for features that don't apply on
+    the current distro/setup (same conditions the menu itself uses)."""
+    hold_supported = getattr(parent, "_hold_supported", False)
+    mark_supported = getattr(parent, "_mark_reason_supported", False)
+
+    groups = []
+
+    groups.append((tr("Browsing & Search"), [
+        (tr("New Packages / All Packages / Installed / Updates"),
+         tr("Sidebar filters for the package list — what's newly available, "
+            "everything, only what's installed, or only what has an update "
+            "pending.")),
+        (tr("Search"),
+         tr("Type in the search bar (or press Ctrl+F) to filter the current "
+            "list by name or description.")),
+        (tr("Package details"),
+         tr("Click any package to see its description, version, size, "
+            "dependencies and files on the right, with Install/Remove/"
+            "Update actions.")),
+    ]))
+
+    groups.append((tr("Updating"), [
+        (tr("Sync Databases"),
+         tr("Refresh the local package index from the repositories, "
+            "without installing anything yet.")),
+        (tr("Check for Updates"),
+         tr("Sync, then rebuild the Updates list — same as pressing Ctrl+U.")),
+        (tr("Refresh List"),
+         tr("Reload the current view from what's already known locally, "
+            "without contacting the repositories.")),
+        (tr("Upgrade All"),
+         tr("Install every pending update in one go — shown as a button "
+            "whenever the Updates list isn't empty.")),
+        (tr("Batch mode"),
+         tr("Select several packages at once (checkboxes in the list) to "
+            "install or remove them together; Ctrl+A / Ctrl+Shift+A select "
+            "or deselect everything currently visible.")),
+    ]))
+
+    repo_rows = [
+        (tr("Manage Repositories…"),
+         tr("View and edit which package repositories are enabled.")),
+    ]
+    if distro.is_arch():
+        repo_rows.append((tr("Rate Mirrors…"),
+            tr("Benchmark configured mirrors and switch to the fastest "
+               "ones. Arch-only — Fedora and openSUSE already pick the "
+               "fastest mirror automatically.")))
+    groups.append((tr("Repositories"), repo_rows))
+
+    groups.append((tr("Tools"), [
+        (tr("Find Orphans"),
+         tr("List packages that were pulled in as dependencies but are no "
+            "longer needed by anything, so you can clean them up.")),
+        (tr("Find Package by File…"),
+         tr("Look up which installed package owns a given file path.")),
+        (tr("Config File Conflicts…"),
+         tr("Review and merge configuration files a package update left "
+            "behind instead of overwriting your local changes.")),
+        (tr("More Update Sources…"),
+         tr("Check for updates outside the system package manager — "
+            "rustup, npm, pip, Flatpak, and similar tools.")),
+        *([(tr("Ignored Packages…"),
+            tr("Hold specific packages back from updates."))] if hold_supported else []),
+        (tr("Package History…"),
+         tr("Browse a log of past installs, removals and updates.")),
+        (tr("System Info"),
+         tr("Overview of the system, hardware and installed packages.")),
+        (tr("Cache Cleaner"),
+         tr("Free up disk space by clearing old cached package files.")),
+    ]))
+
+    groups.append((tr("Package Lists"), [
+        (tr("Export Package List…"),
+         tr("Save the list of explicitly installed packages to a file — "
+            "handy for setting up another machine the same way.")),
+        (tr("Import Package List…"),
+         tr("Install every package from a previously exported list.")),
+    ]))
+
+    if distro.is_arch() or hold_supported or mark_supported:
+        adv_rows = []
+        if distro.is_arch():
+            adv_rows.append((tr("View PKGBUILD (AUR)…"),
+                tr("Inspect the build script of an AUR package before "
+                   "installing it.")))
+        if hold_supported:
+            adv_rows.append((tr("Hold / Unhold Selected"),
+                tr("Toggle whether the selected packages are excluded from "
+                   "updates.")))
+        if mark_supported:
+            adv_rows.append((tr("Mark Selected as Explicit / as Dependency"),
+                tr("Change how a package is tracked, so orphan-cleanup "
+                   "treats it correctly.")))
+        groups.append((tr("AUR / Advanced"), adv_rows))
+
+    groups.append((tr("General"), [
+        (tr("Preferences"),
+         tr("App-wide settings: language, theme, and other options.")),
+        (tr("About Pachul"),
+         tr("Version, license and system info for bug reports.")),
+    ]))
+
+    return groups
+
+
+def show_help_dialog(parent):
+    dialog = Adw.Window()
+    dialog.set_title(tr("Help"))
+    dialog.set_default_size(480, 640)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -2776,18 +5088,48 @@ def show_shortcuts_dialog(parent):
     hdr.pack_start(close_btn)
     tv.add_top_bar(hdr)
 
-    group = Adw.PreferencesGroup()
-    group.set_margin_top(12); group.set_margin_bottom(16)
-    group.set_margin_start(12); group.set_margin_end(12)
-    for keys, desc in _SHORTCUTS:
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_vexpand(True)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(12);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    # ── Functions, grouped exactly like the app menu ──
+    for title, rows in _help_function_groups(parent):
+        if not rows:
+            continue
+        group = Adw.PreferencesGroup()
+        # set_title/set_title/set_subtitle all parse their text as Pango
+        # markup, so a literal "&" (e.g. "Browsing & Search") would
+        # otherwise crash ("Failed to set text ... from markup") — escape
+        # everything here defensively.
+        group.set_title(GLib.markup_escape_text(title))
+        for name, desc in rows:
+            row = Adw.ActionRow()
+            row.set_title(GLib.markup_escape_text(name))
+            row.set_subtitle(GLib.markup_escape_text(desc))
+            row.set_subtitle_lines(0)
+            row.add_css_class("help-row")
+            group.add(row)
+        outer.append(group)
+
+    # ── Keyboard shortcuts, all in one place ──
+    kb_group = Adw.PreferencesGroup()
+    kb_group.set_title(tr("Keyboard Shortcuts"))
+    for keys, desc in _shortcuts_list():
         row = Adw.ActionRow()
-        row.set_title(desc)
+        row.set_title(GLib.markup_escape_text(desc))
         kbd = Gtk.Label(label=keys)
         kbd.add_css_class("dim-label"); kbd.add_css_class("monospace")
         kbd.set_valign(Gtk.Align.CENTER)
         row.add_suffix(kbd)
-        group.add(row)
+        kb_group.add(row)
+    outer.append(kb_group)
 
-    tv.set_content(group)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
+

@@ -13,11 +13,13 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib, Gio, Pango
 
+import distro
+import pkgmanager
 from backend import (
     get_packages, get_package_info, get_package_files,
     check_updates, search_packages_cmd, run_command,
     invalidate_cache, invalidate_syncdb_cache, get_explicit_packages,
-    get_ignored_packages, set_package_ignored, set_packages_ignored, get_setting, save_settings,
+    get_ignored_packages, build_hold_cmd, build_hold_cmd_bulk, get_setting, save_settings,
     build_snapshot_cmd, flatpak_available, snap_available,
     is_pachul_installed, build_install_command,
     get_enabled_auto_update_commands, check_aur_ahead_of_repo,
@@ -53,6 +55,15 @@ from dialogs import (
     run_terminal_dialog,
     show_sync_db_dialog,
     show_repo_manager,
+    show_repo_manager_native,
+    show_apt_repair_dialog,
+    show_dnf_repair_dialog,
+    show_zypper_repair_dialog,
+    show_pacman_repair_dialog,
+    show_cert_checker_dialog,
+    show_broken_symlinks_dialog,
+    show_services_security_dialog,
+    show_config_backup_dialog,
     show_mirror_rater,
     show_orphan_finder,
     show_clean_cache_dialog,
@@ -71,7 +82,7 @@ from dialogs import (
     show_ignored_packages_dialog,
     show_preferences,
     show_news_dialog,
-    show_shortcuts_dialog,
+    show_help_dialog,
 )
 
 
@@ -297,7 +308,7 @@ class DetailPanel:
         raw_group.set_title(tr("Raw Output"))
         info_inner.append(raw_group)
         raw_exp = Adw.ExpanderRow()
-        raw_exp.set_title(tr("pacman -Qi output"))
+        raw_exp.set_title(tr("pacman -Qi output") if distro.is_arch() else tr("Raw package info"))
         raw_exp.set_subtitle(tr("Full package information"))
         raw_group.add(raw_exp)
         raw_scroll = Gtk.ScrolledWindow()
@@ -421,6 +432,7 @@ class DetailPanel:
             row.add_prefix(icon)
             self.batch_listbox.append(row)
 
+        self.stack.set_visible(True)
         self.stack.set_visible_child_name("batch")
 
 
@@ -441,6 +453,15 @@ class pachulWindow(Adw.ApplicationWindow):
         self._search_timer     = None   # GLib source id for debounced search
         self._alive            = True   # set False on close to stop background workers
         self._current_lang     = get_language()
+        # Whether "Hold/Unhold" (pacman IgnorePkg / apt-mark hold / zypper
+        # lock) and "Mark as Explicit/Dependency" (pacman -D --asexplicit/
+        # --asdeps / apt-mark manual|auto / dnf mark) have a real backend
+        # on this distro at all — dnf has no reliable built-in hold
+        # mechanism, and zypper has no simple explicit/dependency marking.
+        # Computed once here so every menu/button built below can just
+        # check these flags instead of re-deriving them.
+        self._hold_supported = distro.is_arch() or distro.get_family() in ("debian", "suse")
+        self._mark_reason_supported = distro.is_arch() or distro.get_family() in ("debian", "fedora")
         self.connect("close-request", self._on_close_request)
         self._build_ui()
         self._load_packages()
@@ -535,29 +556,73 @@ class pachulWindow(Adw.ApplicationWindow):
         menu.append(tr("Sync Databases"),       "app.sync")
         menu.append(tr("Check for Updates"),    "app.check_updates")
         menu.append(tr("Refresh List"),         "app.refresh")
+
         menu.append_section(None, Gio.Menu())
         menu.append(tr("Manage Repositories…"), "app.manage_repos")
-        menu.append(tr("Rate Mirrors…"),        "app.rate_mirrors")
+        menu.append(tr("Check Certificates…"), "app.cert_checker")
+        if distro.is_arch():
+            # Rate Mirrors edits pacman.d/mirrorlist directly — Fedora and
+            # openSUSE both already auto-select the fastest mirror via
+            # their own infrastructure (mirror-manager / download redirector),
+            # so there's no equivalent tool needed there.
+            menu.append(tr("Rate Mirrors…"),        "app.rate_mirrors")
+            # pacman equivalent of the repair menus below — force-refresh,
+            # -Dk/-Qkk diagnostics, keyring reinit, -Rdd force-remove. The
+            # two most common Arch failure modes (stale GPG keys, a stuck
+            # db.lck) already get their own automatic fix banners
+            # elsewhere, so this covers what those don't.
+            menu.append(tr("Repair System (pacman)…"), "app.pacman_repair")
+        if distro.is_debian():
+            # apt/dpkg's own maintenance commands (--fix-broken, dpkg
+            # --configure -a, --fix-missing, …) — Arch/Fedora/openSUSE
+            # each have their own different repair tools/conventions, so
+            # this stays Debian-family-only rather than trying to unify
+            # them into one cross-distro "repair" concept.
+            menu.append(tr("Repair System (apt/dpkg)…"), "app.apt_repair")
+        if distro.is_fedora():
+            # dnf/rpm equivalent of the apt/dpkg repair menu above
+            # (distro-sync, rpm --rebuilddb, dnf clean all, …).
+            menu.append(tr("Repair System (dnf/rpm)…"), "app.dnf_repair")
+        if distro.is_suse():
+            # zypper/rpm equivalent (zypper verify, rpm --rebuilddb,
+            # zypper clean --all, …).
+            menu.append(tr("Repair System (zypper/rpm)…"), "app.zypper_repair")
+
         menu.append_section(None, Gio.Menu())
         menu.append(tr("Find Orphans"),         "app.orphans")
+        menu.append(tr("Find Broken Symlinks…"), "app.broken_symlinks")
+        menu.append(tr("Services & Security…"), "app.services_security")
+        menu.append(tr("Configuration Backup…"), "app.config_backup")
         menu.append(tr("Find Package by File…"), "app.file_search")
-        menu.append(tr("Config Files (.pacnew)…"), "app.pacdiff")
+        cfg_conflicts_label = tr("Config Files (.pacnew)…") if distro.is_arch() \
+            else tr("Config File Conflicts…")
+        menu.append(cfg_conflicts_label,        "app.pacdiff")
         menu.append(tr("More Update Sources…"),  "app.tool_updates")
-        menu.append(tr("Ignored Packages…"),    "app.ignored")
+        if self._hold_supported:
+            menu.append(tr("Ignored Packages…"),    "app.ignored")
         menu.append(tr("Package History…"),     "app.history")
         menu.append(tr("System Info"),          "app.sysinfo")
         menu.append(tr("Cache Cleaner"),        "app.cache")
         menu.append_section(None, Gio.Menu())
         menu.append(tr("Export Package List…"), "app.export_pkgs")
         menu.append(tr("Import Package List…"), "app.import_pkgs")
-        menu.append_section(None, Gio.Menu())
-        menu.append(tr("View PKGBUILD (AUR)…"),         "app.pkgbuild")
-        menu.append(tr("Hold / Unhold Selected"),       "app.hold")
-        menu.append(tr("Mark Selected as Explicit"),    "app.mark_explicit")
-        menu.append(tr("Mark Selected as Dependency"),  "app.mark_asdeps")
+
+        # PKGBUILD/Hold/Mark-as: each only where its backend actually works
+        # (see _hold_supported / _mark_reason_supported above). Skip the
+        # whole section if none of them apply on this distro.
+        if distro.is_arch() or self._hold_supported or self._mark_reason_supported:
+            menu.append_section(None, Gio.Menu())
+            if distro.is_arch():
+                menu.append(tr("View PKGBUILD (AUR)…"), "app.pkgbuild")
+            if self._hold_supported:
+                menu.append(tr("Hold / Unhold Selected"), "app.hold")
+            if self._mark_reason_supported:
+                menu.append(tr("Mark Selected as Explicit"),    "app.mark_explicit")
+                menu.append(tr("Mark Selected as Dependency"),  "app.mark_asdeps")
+
         menu.append_section(None, Gio.Menu())
         menu.append(tr("Preferences"),          "app.preferences")
-        menu.append(tr("Keyboard Shortcuts"),   "app.shortcuts")
+        menu.append(tr("Help"),                 "app.shortcuts")
         menu.append(tr("About Pachul"),         "app.about")
         menu_btn.set_menu_model(menu)
         right_box.append(menu_btn)
@@ -653,10 +718,16 @@ class pachulWindow(Adw.ApplicationWindow):
             "snap":      "package-x-generic-symbolic",
             "chaotic-aur": "folder-remote-symbolic",
         }
-        for key in ("core", "extra", "multilib", "aur"):
-            row = NavRow(self._repo_icon_map[key], key, 0, "count-badge")
-            self.repo_listbox.append(row)
-            self._repo_nav_rows[key] = row
+        # core/extra/multilib/aur are pre-seeded so the sidebar isn't empty
+        # before the first package list loads — but those names are Arch's
+        # own repo layout specifically. On other distros, real repo/category
+        # rows (however they're actually named) appear organically as
+        # packages load, via the same dynamic _repo_nav_rows mechanism.
+        if distro.is_arch():
+            for key in ("core", "extra", "multilib", "aur"):
+                row = NavRow(self._repo_icon_map[key], key, 0, "count-badge")
+                self.repo_listbox.append(row)
+                self._repo_nav_rows[key] = row
         outer.append(self.repo_listbox)
 
         # Tools
@@ -664,11 +735,15 @@ class pachulWindow(Adw.ApplicationWindow):
         outer.append(self._sidebar_header(tr("TOOLS")))
         tools_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         tools_box.set_margin_start(5); tools_box.set_margin_end(5); tools_box.set_margin_bottom(4)
-        for icon_name, btn_label, cb in [
-            (ICON_RATE_MIRRORS,        tr("Rate Mirrors"),  self._on_rate_mirrors),
+        tools_entries = []
+        if distro.is_arch():
+            # Rate Mirrors edits pacman.d/mirrorlist — Arch-specific.
+            tools_entries.append((ICON_RATE_MIRRORS, tr("Rate Mirrors"), self._on_rate_mirrors))
+        tools_entries += [
             ("user-trash-symbolic",    tr("Find Orphans"),  self._on_show_orphans),
             (ICON_CLEAN_CACHE,         tr("Clean Cache"),   self._on_clean_cache),
-        ]:
+        ]
+        for icon_name, btn_label, cb in tools_entries:
             btn = Gtk.Button()
             btn.add_css_class("flat"); btn.add_css_class("nav-row")
             row_inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
@@ -904,6 +979,20 @@ class pachulWindow(Adw.ApplicationWindow):
             "button-clicked", self._on_aur_ahead_install_clicked)
         self._aur_ahead_pkg_name = None
         self._aur_ahead_token = 0
+        # Hold/Ignore-Updates only has a real backend on some distros (see
+        # _hold_supported above) — rather than leave a button that always
+        # just fails, hide it outright where it can never do anything.
+        # Downgrade always has *some* backend now (repo history and/or a
+        # local package cache, however sparse), so it stays visible
+        # everywhere and just shows "no older version found" when empty.
+        self.detail_panel.btn_hold.set_visible(self._hold_supported)
+        # Right-hand detail panel starts hidden — at launch nothing is
+        # selected yet, so showing an empty "Select a Package" pane just
+        # wastes half the window. It's revealed the moment a package (or
+        # a batch selection) is actually shown, in _show_detail() and
+        # DetailPanel.show_batch(); until then the Paned gives the
+        # package list the full width.
+        self.detail_panel.stack.set_visible(False)
         return self.detail_panel.stack
 
     # ── Data loading ──────────────────────────────────────────────────────────
@@ -1178,6 +1267,11 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _on_nav_selected(self, listbox, row):
         self.repo_listbox.unselect_all()
+        # Clicking any sidebar entry (Updates, Installed, orphans, …) is a
+        # fresh navigation away from whatever package/batch was shown
+        # before — hide the detail panel again so it doesn't keep showing
+        # stale info until something new gets clicked in the list.
+        self.detail_panel.stack.set_visible(False)
         keys = list(self._nav_rows.keys())
         idx  = row.get_index()
         if idx >= len(keys):
@@ -1192,6 +1286,7 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _on_repo_nav_selected(self, listbox, row):
         self.nav_listbox.unselect_all()
+        self.detail_panel.stack.set_visible(False)
         keys = list(self._repo_nav_rows.keys())
         idx  = row.get_index()
         if idx < len(keys):
@@ -1211,7 +1306,7 @@ class pachulWindow(Adw.ApplicationWindow):
         show_batch_buttons = has_selection or not is_updates
         self.btn_install.set_visible(show_batch_buttons)
         self.btn_remove.set_visible(show_batch_buttons)
-        self.btn_hold.set_visible(has_selection)
+        self.btn_hold.set_visible(has_selection and self._hold_supported)
         self.btn_upgrade_all.set_visible(is_updates and not has_selection)
         self.btn_check_updates.set_visible(is_updates and not has_selection)
         if is_updates and not has_selection:
@@ -1348,6 +1443,7 @@ class pachulWindow(Adw.ApplicationWindow):
         panel.ver_badge.set_label(pkg.pkg_version)
         self._set_status_pill(panel, pkg.pkg_status, pkg.pkg_foreign)
 
+        panel.stack.set_visible(True)
         panel.stack.set_visible_child_name("detail")
         for row in panel.info_rows.values():
             if isinstance(row, Adw.ActionRow):
@@ -1564,14 +1660,25 @@ class pachulWindow(Adw.ApplicationWindow):
         except AttributeError:
             pass
 
-    def _run_terminal(self, cmd, title, on_success=None):
+    def _run_terminal(self, cmd, title, on_success=None, parent=None, target_window=None,
+                       on_success_with_window=None):
+        # parent defaults to the main window, but callers that are
+        # themselves opening this from an already-open modal dialog (e.g.
+        # Preferences) should pass that dialog instead — otherwise the
+        # terminal window ends up transient to the main window while a
+        # different modal dialog is still on top of it, which briefly
+        # confuses the compositor's stacking and can trigger a harmless
+        # "Trying to snapshot GtkGizmo ... without a current allocation"
+        # GTK warning right as the terminal window first appears.
         def _on_done(code):
             if code == 0:
                 invalidate_cache()
             self._toast(f"✓ {title} completed" if code == 0
                         else f"✗ {title} failed (exit {code})")
             self._load_packages()
-        run_terminal_dialog(self, cmd, title, on_success=on_success, on_done_extra=_on_done)
+        run_terminal_dialog(parent or self, cmd, title, on_success=on_success,
+                             on_done_extra=_on_done, target_window=target_window,
+                             on_success_with_window=on_success_with_window)
 
     def _on_refresh(self, *_):
         self._all_packages = []
@@ -1589,11 +1696,12 @@ class pachulWindow(Adw.ApplicationWindow):
     def _on_sync_db(self, *_):
         def _do_sync():
             invalidate_syncdb_cache()
-            self._run_terminal("sudo -S pacman -Sy --noconfirm", tr("Sync Databases"))
+            cmd = "sudo -S pacman -Sy --noconfirm" if distro.is_arch() else pkgmanager.sync_db_cmd()
+            self._run_terminal(cmd, tr("Sync Databases"))
         show_sync_db_dialog(self, _do_sync)
 
     def _on_upgrade(self, *_):
-        if get_setting("show_news_before_upgrade"):
+        if distro.is_arch() and get_setting("show_news_before_upgrade"):
             show_news_dialog(self, self._do_upgrade)
         else:
             self._do_upgrade()
@@ -1608,7 +1716,12 @@ class pachulWindow(Adw.ApplicationWindow):
         # /etc/pacman.conf uniformly (core, extra, multilib, chaotic-aur,
         # ...) — there's no per-repo command needed for those.
         helper = self._get_aur_helper()
-        cmd = f"{helper} -Syu --noconfirm" if helper else "sudo -S pacman -Syu --noconfirm"
+        if helper:
+            cmd = f"{helper} -Syu --noconfirm"
+        elif distro.is_arch():
+            cmd = "sudo -S pacman -Syu --noconfirm"
+        else:
+            cmd = pkgmanager.upgrade_all_cmd()
         if get_setting("snapshot_before_upgrade"):
             snap_cmd = build_snapshot_cmd()
             if snap_cmd:
@@ -1619,7 +1732,7 @@ class pachulWindow(Adw.ApplicationWindow):
         # (flatpak_enabled/snap_enabled), matching how the rest of the app
         # treats these two optional sources.
         if get_setting("flatpak_enabled") and flatpak_available():
-            cmd = f"{cmd} && flatpak install -y"
+            cmd = f"{cmd} && flatpak update -y"
         if get_setting("snap_enabled") and snap_available():
             cmd = f"{cmd} && sudo -S snap refresh"
         # Extra sources opted into via "More Update Sources" (rustup, npm,
@@ -1654,18 +1767,30 @@ class pachulWindow(Adw.ApplicationWindow):
             "if [ -n \"$_snap_out\" ]; then echo \"$_snap_out\"; "
             "else echo '(No Snap updates found.)'; fi; "
         ) if (get_setting("snap_enabled") and snap_available()) else ""
+        if distro.is_arch():
+            repo_section = (
+                "echo '== Official Repositories =='; "
+                "if command -v checkupdates >/dev/null 2>&1; then "
+                "_repo_out=$(checkupdates 2>/dev/null); "
+                "else "
+                "_repo_out=$(pacman -Qu 2>/dev/null); "
+                "echo '(Note: pacman-contrib/checkupdates not found -- checked against the "
+                "last-synced local database instead of a live one. Install pacman-contrib, "
+                "or run Sync Databases first, for a fully up-to-date check.)'; "
+                "fi; "
+                "if [ -n \"$_repo_out\" ]; then echo \"$_repo_out\"; "
+                "else echo '(No repo updates found.)'; fi; "
+            )
+        else:
+            preview_cmd = pkgmanager.check_updates_preview_cmd() or "true"
+            repo_section = (
+                "echo '== Repositories =='; "
+                f"_repo_out=$({preview_cmd}); "
+                "if [ -n \"$_repo_out\" ]; then echo \"$_repo_out\"; "
+                "else echo '(No repo updates found.)'; fi; "
+            )
         self._run_terminal(
-            "echo '== Official Repositories =='; "
-            "if command -v checkupdates >/dev/null 2>&1; then "
-            "_repo_out=$(checkupdates 2>/dev/null); "
-            "else "
-            "_repo_out=$(pacman -Qu 2>/dev/null); "
-            "echo '(Note: pacman-contrib/checkupdates not found -- checked against the "
-            "last-synced local database instead of a live one. Install pacman-contrib, "
-            "or run Sync Databases first, for a fully up-to-date check.)'; "
-            "fi; "
-            "if [ -n \"$_repo_out\" ]; then echo \"$_repo_out\"; "
-            "else echo '(No repo updates found.)'; fi; "
+            repo_section +
             f"{aur_section}"
             f"{flatpak_section}"
             f"{snap_section}"
@@ -1673,7 +1798,34 @@ class pachulWindow(Adw.ApplicationWindow):
             tr("Check for Updates"))
 
     def _on_manage_repos(self, *_):
-        show_repo_manager(self, self._run_terminal)
+        if distro.is_arch():
+            show_repo_manager(self, self._run_terminal)
+        else:
+            show_repo_manager_native(self, self._run_terminal)
+
+    def _on_show_apt_repair(self, *_):
+        show_apt_repair_dialog(self, self._run_terminal)
+
+    def _on_show_dnf_repair(self, *_):
+        show_dnf_repair_dialog(self, self._run_terminal)
+
+    def _on_show_zypper_repair(self, *_):
+        show_zypper_repair_dialog(self, self._run_terminal)
+
+    def _on_show_pacman_repair(self, *_):
+        show_pacman_repair_dialog(self, self._run_terminal, self._get_aur_helper())
+
+    def _on_show_cert_checker(self, *_):
+        show_cert_checker_dialog(self, self._run_terminal)
+
+    def _on_show_broken_symlinks(self, *_):
+        show_broken_symlinks_dialog(self, self._run_terminal)
+
+    def _on_show_services_security(self, *_):
+        show_services_security_dialog(self, self._run_terminal)
+
+    def _on_show_config_backup(self, *_):
+        show_config_backup_dialog(self, self._run_terminal)
 
     def _on_rate_mirrors(self, *_):
         show_mirror_rater(self, self._run_terminal)
@@ -1720,14 +1872,12 @@ class pachulWindow(Adw.ApplicationWindow):
         currently = pkg.pkg_name in get_ignored_packages()
 
         def _do_toggle():
-            tmp = set_package_ignored(pkg.pkg_name, not currently)
-            if tmp is None:
-                self._toast(tr("Could not read /etc/pacman.conf"))
+            cmd = build_hold_cmd(pkg.pkg_name, not currently)
+            if cmd is None:
+                self._toast(tr("Could not update hold status for this package"))
                 return
             verb = tr("Unhold") if currently else tr("Hold")
-            self._run_terminal(
-                f"sudo -S install -m644 {shlex.quote(tmp)} /etc/pacman.conf",
-                f"{verb} {pkg.pkg_name}")
+            self._run_terminal(cmd, f"{verb} {pkg.pkg_name}")
 
         show_hold_dialog(self, pkg.pkg_name, currently, _do_toggle)
 
@@ -1735,7 +1885,7 @@ class pachulWindow(Adw.ApplicationWindow):
         show_preferences(self, self._on_settings_changed, app_dir=APP_DIR,
                           run_terminal_fn=self._run_terminal_reset_aur_helper)
 
-    def _run_terminal_reset_aur_helper(self, cmd, title):
+    def _run_terminal_reset_aur_helper(self, cmd, title, parent=None):
         # After installing an AUR helper (e.g. paru) from Preferences, drop
         # both cached lookups (window's own, and backend's — used by
         # check_updates() and friends) so the very next AUR action picks
@@ -1744,7 +1894,7 @@ class pachulWindow(Adw.ApplicationWindow):
         def _after():
             self._aur_helper_cache = None
             save_settings({})   # side effect: also resets backend's own cache
-        self._run_terminal(cmd, title, on_success=_after)
+        self._run_terminal(cmd, title, on_success=_after, parent=parent)
 
     def _on_settings_changed(self):
         new_lang = get_language()
@@ -1801,7 +1951,7 @@ class pachulWindow(Adw.ApplicationWindow):
         # is done.
 
     def _on_show_shortcuts(self, *_):
-        show_shortcuts_dialog(self)
+        show_help_dialog(self)
 
     def _on_focus_search(self, *_):
         GLib.idle_add(self._grab_search_focus)
@@ -1820,9 +1970,14 @@ class pachulWindow(Adw.ApplicationWindow):
         if pkg.pkg_repo in ("flatpak", "snap"):
             self._toast(tr("Not applicable to Flatpak/Snap packages"))
             return
+        cmd = ("sudo -S pacman -D --asexplicit " + shlex.quote(pkg.pkg_name)
+               if distro.is_arch() else pkgmanager.mark_explicit_cmd(pkg.pkg_name))
+        if cmd is None:
+            self._toast(tr("Not supported on this system"))
+            return
         self._run_terminal(
-            f"sudo -S pacman -D --asexplicit {shlex.quote(pkg.pkg_name)}",
-            tr("Mark {name} as explicit").format(name=pkg.pkg_name), on_success=self._refresh_selected_pkg)
+            cmd, tr("Mark {name} as explicit").format(name=pkg.pkg_name),
+            on_success=self._refresh_selected_pkg)
 
     def _on_mark_asdeps(self, *_):
         pkg = self._selected_pkg
@@ -1834,9 +1989,14 @@ class pachulWindow(Adw.ApplicationWindow):
             return
 
         def _do_mark():
+            cmd = ("sudo -S pacman -D --asdeps " + shlex.quote(pkg.pkg_name)
+                   if distro.is_arch() else pkgmanager.mark_asdeps_cmd(pkg.pkg_name))
+            if cmd is None:
+                self._toast(tr("Not supported on this system"))
+                return
             self._run_terminal(
-                f"sudo -S pacman -D --asdeps {shlex.quote(pkg.pkg_name)}",
-                tr("Mark {name} as dependency").format(name=pkg.pkg_name), on_success=self._refresh_selected_pkg)
+                cmd, tr("Mark {name} as dependency").format(name=pkg.pkg_name),
+                on_success=self._refresh_selected_pkg)
 
         show_mark_asdeps_dialog(self, pkg.pkg_name, _do_mark)
 
@@ -2063,6 +2223,15 @@ class pachulWindow(Adw.ApplicationWindow):
                 # so the person answers the [Y/n] / numbered-choice prompt
                 # directly there instead.
                 return f"{helper} -S --noconfirm {name}"
+        if not distro.is_arch():
+            # Same reasoning as the pacman -Sy case below: refresh repo
+            # metadata first so a pending update isn't missed just because
+            # the locally cached repo data hasn't caught up yet. Combined
+            # into ONE sudo prompt (see pkgmanager._combine_sudo) — two
+            # separate `sudo -S` calls chained with && would silently
+            # stall on the second, unannounced password prompt instead
+            # of actually installing/updating the package.
+            return pkgmanager.install_cmd_synced([pkg.pkg_name])
         # -Sy (not plain -S): checkupdates always syncs its own fresh copy
         # of the repo databases, so it can correctly flag a pending update
         # (e.g. from a repo like chaotic-aur) that the *local* sync db
@@ -2082,6 +2251,8 @@ class pachulWindow(Adw.ApplicationWindow):
         if pkg.pkg_repo == "snap":
             name = pkg.pkg_source_id or pkg.pkg_name
             return f"sudo -S snap remove {shlex.quote(name)}"
+        if not distro.is_arch():
+            return pkgmanager.remove_cmd([pkg.pkg_name])
         return f"sudo -S pacman -R --noconfirm {shlex.quote(pkg.pkg_name)}"
 
     def _on_batch_install(self):
@@ -2111,12 +2282,17 @@ class pachulWindow(Adw.ApplicationWindow):
                     self._toast(tr("No AUR helper found — skipped {n} AUR package(s).")
                                .format(n=len(foreign_names)))
             if repo_names:
-                quoted = " ".join(shlex.quote(n) for n in repo_names)
-                # -Sy for the same reason as _install_cmd_for: a plain -S
-                # only consults the last-synced local db and can miss a
-                # pending update that checkupdates (always fresh) already
-                # sees, leaving the package stuck reporting as an update.
-                cmds.append(f"sudo -S pacman -Sy --noconfirm {quoted}")
+                if distro.is_arch():
+                    quoted = " ".join(shlex.quote(n) for n in repo_names)
+                    # -Sy for the same reason as _install_cmd_for: a plain -S
+                    # only consults the last-synced local db and can miss a
+                    # pending update that checkupdates (always fresh) already
+                    # sees, leaving the package stuck reporting as an update.
+                    cmds.append(f"sudo -S pacman -Sy --noconfirm {quoted}")
+                else:
+                    # See _install_cmd_for: one combined sudo prompt,
+                    # not two chained `sudo -S` calls.
+                    cmds.append(pkgmanager.install_cmd_synced(repo_names))
         if fp_items:
             ids = " ".join(shlex.quote(i.pkg_source_id or i.pkg_name) for i in fp_items)
             cmds.append(f"flatpak update -y {ids}")
@@ -2148,11 +2324,12 @@ class pachulWindow(Adw.ApplicationWindow):
             return
 
         def do_hold():
-            tmp = set_packages_ignored(to_add, True)
-            if not tmp:
+            cmd = build_hold_cmd_bulk(to_add, True)
+            if not cmd:
+                self._toast(tr("Holding packages isn't supported on this system"))
                 return
             self._run_terminal(
-                f"sudo -S install -m644 {shlex.quote(tmp)} /etc/pacman.conf",
+                cmd,
                 tr("Ignore {n} packages").format(n=len(to_add)),
                 on_success=self._exit_selection_mode)
 
@@ -2182,8 +2359,12 @@ class pachulWindow(Adw.ApplicationWindow):
 
             cmds = []
             if pac_items:
-                quoted = " ".join(shlex.quote(i.pkg_name) for i in pac_items)
-                cmds.append(f"sudo -S pacman -R --noconfirm {quoted}")
+                names = [i.pkg_name for i in pac_items]
+                if distro.is_arch():
+                    quoted = " ".join(shlex.quote(n) for n in names)
+                    cmds.append(f"sudo -S pacman -R --noconfirm {quoted}")
+                else:
+                    cmds.append(pkgmanager.remove_cmd(names))
             if fp_items:
                 fp_cmds = [self._flatpak_uninstall_cmd(i.pkg_source_id or i.pkg_name)
                           for i in fp_items]
@@ -2298,8 +2479,11 @@ class pachulWindow(Adw.ApplicationWindow):
             _, code = run_command(f"snap list {shlex.quote(name)} 2>/dev/null")
             pkg.pkg_status = "installed" if code == 0 else "available"
         else:
-            out, code = run_command(f"pacman -Qi {shlex.quote(pkg.pkg_name)} 2>/dev/null")
-            pkg.pkg_status = "installed" if (code == 0 and out) else "available"
+            if distro.is_arch():
+                out, code = run_command(f"pacman -Qi {shlex.quote(pkg.pkg_name)} 2>/dev/null")
+                pkg.pkg_status = "installed" if (code == 0 and out) else "available"
+            else:
+                pkg.pkg_status = "installed" if pkgmanager.is_installed(pkg.pkg_name) else "available"
         installed = pkg.pkg_status == "installed"
         self.btn_install.set_sensitive(not installed)
         self.btn_remove.set_sensitive(installed)
@@ -2348,6 +2532,8 @@ class pachulWindow(Adw.ApplicationWindow):
         return False
 
     def _get_aur_helper(self):
+        if not distro.is_arch():
+            return None
         if self._aur_helper_cache is None:
             for h in ("yay", "paru", "pikaur", "trizen"):
                 _, c = run_command(f"which {h} 2>/dev/null")
