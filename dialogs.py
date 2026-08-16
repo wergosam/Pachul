@@ -320,6 +320,19 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
     term_view.set_wrap_mode(Gtk.WrapMode.CHAR)
     term_view.add_css_class("terminal-view")
     term_view.set_monospace(True)
+
+    # Dunkles Systemtheme: .terminal-view-dark schaltet in styles.py auf
+    # dunklen Hintergrund/hellen Text um, das helle Theme bleibt
+    # unverändert. Läuft synchron mit dem System, falls das Theme
+    # gewechselt wird, während der Dialog offen ist.
+    _style_mgr = Adw.StyleManager.get_default()
+    def _sync_terminal_theme(*_a):
+        if _style_mgr.get_dark():
+            term_view.add_css_class("terminal-view-dark")
+        else:
+            term_view.remove_css_class("terminal-view-dark")
+    _sync_terminal_theme()
+    _style_mgr.connect("notify::dark", _sync_terminal_theme)
     scroll.set_child(term_view)
     outer.append(scroll)
 
@@ -338,7 +351,7 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
 
     pw_entry = Gtk.Entry()
     pw_entry.set_hexpand(True)
-    pw_entry.set_visibility(True)
+    pw_entry.set_visibility(False)
     pw_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
     pw_entry.set_placeholder_text(tr("Password or input — press Enter to send"))
     input_box.append(pw_entry)
@@ -4752,10 +4765,6 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
     _switch(tr("Confirm before removing packages"), None, "confirm_remove")
     _switch(tr("Check for updates on startup"), None, "check_updates_on_start")
     _switch(tr("Notify when updates are available"), None, "notify_updates")
-    if distro.is_arch():
-        _switch(tr("Show Arch news before upgrades"),
-                tr("Warns about manual interventions before a system upgrade"),
-                "show_news_before_upgrade")
 
     snap_tool, snap_info = detect_snapshot_tool()
     snap_row = Adw.SwitchRow()
@@ -4850,97 +4859,6 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
 
     dlg.add(page)
     dlg.present()
-
-
-# ─── Arch news (pre-upgrade) ──────────────────────────────────────────────────
-
-def show_news_dialog(parent, on_proceed):
-    dialog = Adw.Window()
-    dialog.set_title(tr("Arch Linux News"))
-    dialog.set_default_size(640, 520)
-    dialog.set_resizable(True)
-    dialog.set_transient_for(parent)
-    dialog.set_modal(True)
-
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
-    cancel_btn = Gtk.Button(label=tr("Cancel"))
-    cancel_btn.add_css_class("flat")
-    cancel_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(cancel_btn)
-    proceed_btn = Gtk.Button(label=tr("Upgrade Now"))
-    proceed_btn.add_css_class("suggested-action")
-    proceed_btn.connect("clicked", lambda *_: (dialog.close(), on_proceed()))
-    hdr.pack_end(proceed_btn)
-    tv.add_top_bar(hdr)
-
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-    loading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-    loading.set_halign(Gtk.Align.CENTER); loading.set_valign(Gtk.Align.CENTER)
-    loading.set_vexpand(True)
-    sp = Gtk.Spinner(); sp.start(); sp.set_size_request(32, 32)
-    loading.append(sp)
-    loading.append(Gtk.Label(label=tr("Fetching latest news…")))
-    outer.append(loading)
-
-    tv.set_content(outer)
-    dialog.set_content(tv)
-    dialog.present()
-
-    def render(items):
-        outer.remove(loading)
-        if items is None:
-            status = Adw.StatusPage()
-            status.set_paintable(themed_paintable("network-offline-symbolic", 72))
-            status.set_title(tr("Could Not Fetch News"))
-            status.set_description(tr("You appear to be offline. You can still proceed with the upgrade."))
-            status.set_vexpand(True)
-            outer.append(status)
-            return
-        if not items:
-            status = Adw.StatusPage()
-            status.set_paintable(themed_paintable("emblem-ok-symbolic", 72))
-            status.set_title(tr("No Recent News"))
-            status.set_vexpand(True)
-            outer.append(status)
-            return
-
-        hint_text = tr("Review recent announcements before upgrading:")
-        if get_language() != "en":
-            hint_text += " " + tr("(machine-translated from English)")
-        hint = Gtk.Label(label=hint_text)
-        hint.add_css_class("caption"); hint.set_halign(Gtk.Align.START)
-        hint.set_margin_start(16); hint.set_margin_end(16)
-        hint.set_margin_top(12);   hint.set_margin_bottom(8)
-        outer.append(hint)
-
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_vexpand(True)
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_margin_start(12); scroll.set_margin_end(12); scroll.set_margin_bottom(12)
-        group = Adw.PreferencesGroup()
-        for it in items:
-            row = Adw.ActionRow()
-            row.set_title(GLib.markup_escape_text(it["title"]))
-            row.set_subtitle(it["date"])
-            if it["title"] != it.get("title_en", it["title"]):
-                row.set_tooltip_text(it["title_en"])  # original English, for transparency
-            if it["link"]:
-                link = Gtk.LinkButton.new_with_label(it["link"], tr("Open"))
-                link.set_valign(Gtk.Align.CENTER)
-                row.add_suffix(link)
-            group.add(row)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL); box.append(group)
-        scroll.set_child(box)
-        outer.append(scroll)
-
-    def worker():
-        from backend import get_arch_news
-        items = get_arch_news(lang=get_language())
-        GLib.idle_add(render, items)
-
-    threading.Thread(target=worker, daemon=True).start()
 
 
 # ─── Help (functions overview + keyboard shortcuts) ───────────────────────────

@@ -81,7 +81,6 @@ from dialogs import (
     show_tool_updates_dialog,
     show_ignored_packages_dialog,
     show_preferences,
-    show_news_dialog,
     show_help_dialog,
 )
 
@@ -1701,16 +1700,20 @@ class pachulWindow(Adw.ApplicationWindow):
         show_sync_db_dialog(self, _do_sync)
 
     def _on_upgrade(self, *_):
-        if distro.is_arch() and get_setting("show_news_before_upgrade"):
-            show_news_dialog(self, self._do_upgrade)
-        else:
-            self._do_upgrade()
+        self._do_upgrade()
 
     def _do_upgrade(self):
         def _after():
             self._updates = []
             self.stat_updates._num.set_label("0")
             self._nav_rows["updates"].set_count(0)
+            # Nur das interne Update-Tracking zu leeren reicht nicht — die
+            # mittlere Paketliste (list_stack) rendert dadurch nicht neu und
+            # bleibt auf dem alten Stand stehen. _load_packages() lädt die
+            # Pakete neu, wendet den aktuellen Filter erneut an und zeigt so
+            # wieder die reguläre Ansicht (inkl. "Keine Updates"-Platzhalter,
+            # falls auf der Updates-Seite), statt dass die Mitte leer bleibt.
+            self._load_packages()
         # Use the AUR helper if present so repo *and* AUR packages are upgraded.
         # Note: pacman's -Syu already covers every repo listed in
         # /etc/pacman.conf uniformly (core, extra, multilib, chaotic-aur,

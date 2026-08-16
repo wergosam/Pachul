@@ -5,7 +5,7 @@
 
 pkgname=pachul
 pkgver=2.2.5
-pkgrel=1
+pkgrel=4
 pkgdesc="A modern, graphical Pacman/AUR front end for Arch Linux built with GTK4 and libadwaita"
 arch=('any')
 url="https://github.com/wergosam/Pachul"
@@ -55,8 +55,9 @@ package() {
 
     # Python-Module
     install -d "$pkgdir/usr/share/$pkgname"
-    install -m644 app.py backend.py dialogs.py i18n.py icons.py models.py \
-        notifier.py styles.py tray.py window.py "$pkgdir/usr/share/$pkgname/"
+    install -m644 app.py backend.py dialogs.py distro.py i18n.py icons.py \
+        models.py notifier.py pkgmanager.py pkgmanager_native.py styles.py \
+        tray.py window.py "$pkgdir/usr/share/$pkgname/"
 
     # Master-SVG-Icon liegt laut app.py direkt neben den Modulen
     install -m644 io.github.wergosam.pachul.svg "$pkgdir/usr/share/$pkgname/"

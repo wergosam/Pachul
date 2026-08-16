@@ -119,6 +119,16 @@ CSS = """
     padding: 14px 16px;
 }
 
+/* Dunkles Systemtheme: heller Text auf hellgrauem Hintergrund wäre
+   unlesbar, deshalb im Dark Mode auf klassisches dunkles Terminal
+   umschalten. Wird per CSS-Klasse "terminal-view-dark" gesteuert, die
+   dialogs.py abhängig von Adw.StyleManager().get_dark() setzt. Das
+   helle Theme bleibt dadurch unverändert. */
+.terminal-view.terminal-view-dark {
+    background: #1e1e1e;
+    color: #f0f0f0;
+}
+
 /* ── Detail hero ── */
 .pkg-hero {
     background: alpha(@card_fg_color, 0.04);

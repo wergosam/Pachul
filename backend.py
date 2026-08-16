@@ -69,7 +69,6 @@ _DEFAULT_SETTINGS = {
     "include_aur_updates":      True,
     "confirm_remove":           True,
     "check_updates_on_start":   True,
-    "show_news_before_upgrade": True,
     "snapshot_before_upgrade":  False,  # off by default — Timeshift rsync mode can be slow
     "notify_updates":           True,
     "bg_check_interval":        "daily",  # hourly | 6h | daily
@@ -1198,78 +1197,6 @@ def get_pacman_history(limit=500):
             entries.append({"time": ts, "action": action, "name": name, "version": ver})
     entries.reverse()
     return entries[:limit]
-
-
-# ─── Arch news (pre-upgrade warning) ──────────────────────────────────────────
-
-def _translate_text(text, target_lang, source_lang="en"):
-    """Best-effort machine translation via Google's free, no-key translate
-    endpoint (the same one tools like `trans`/`googletrans` use). Returns
-    the original text unchanged on any failure (offline, endpoint
-    unreachable, unexpected response, ...) — translation here is a nice-to-
-    have, never something that should block showing the news at all.
-    """
-    import urllib.request
-    import urllib.parse
-    import json
-    if not text or target_lang == source_lang:
-        return text
-    try:
-        params = urllib.parse.urlencode({
-            "client": "gtx", "sl": source_lang, "tl": target_lang,
-            "dt": "t", "q": text,
-        })
-        req = urllib.request.Request(
-            "https://translate.googleapis.com/translate_a/single?" + params,
-            headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=8) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        # Response shape: [[[translated_chunk, original_chunk, ...], ...], ...] —
-        # long input can come back split into several chunks to concatenate.
-        return "".join(chunk[0] for chunk in data[0] if chunk[0])
-    except Exception:
-        return text
-
-
-def get_arch_news(limit=6, lang="en"):
-    """Fetch recent Arch Linux news headlines. Returns a list, or None on
-    failure (so callers can tell 'no news' apart from 'couldn't reach the
-    server') — also None on non-Arch systems, since this feed is Arch-
-    specific and wouldn't be relevant there.
-
-    Arch Linux only publishes this feed in English — there's no official
-    translated source — so when `lang` isn't English, each headline is
-    additionally run through best-effort machine translation. Each item
-    keeps the original English title too (as "title_en"), since machine
-    translation of technical wording can occasionally be imprecise and a
-    caller may want to show or link back to the original.
-    """
-    if not distro.is_arch():
-        return None
-    import urllib.request
-    import xml.etree.ElementTree as ET
-    try:
-        req = urllib.request.Request("https://archlinux.org/feeds/news/",
-                                     headers={"User-Agent": "Pachul"})
-        with urllib.request.urlopen(req, timeout=12) as r:
-            root = ET.fromstring(r.read())
-    except Exception:
-        return None
-    items = []
-    for item in root.iterfind(".//item"):
-        title = (item.findtext("title") or "").strip()
-        items.append({
-            "title":    title,
-            "title_en": title,
-            "date":     (item.findtext("pubDate") or "").strip(),
-            "link":     (item.findtext("link") or "").strip(),
-        })
-        if len(items) >= limit:
-            break
-    if lang != "en":
-        for it in items:
-            it["title"] = _translate_text(it["title_en"], lang)
-    return items
 
 
 # ─── AUR package metadata (votes / popularity / maintainer) ───────────────────
