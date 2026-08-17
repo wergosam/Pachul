@@ -35,7 +35,7 @@ from backend import (run_command, get_orphans, get_system_info,
                      get_pkgbuild, get_pacnew_files, get_file_diff, get_setting, save_settings,
                      files_db_available, search_file_owner, get_package_cache_size,
                      get_tool_updates, paru_installed, get_paru_bootstrap_cmd,
-                     get_ignored_packages, build_hold_cmd_bulk)
+                     get_ignored_packages, build_hold_cmd_bulk, APP_VERSION)
 from i18n import tr, get_language, set_language
 from icons import themed_image, themed_paintable
 
@@ -3568,7 +3568,7 @@ def show_about_dialog(parent, app_icon_name="io.github.wergosam.pachul"):
     gtk_ver = f"{Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()}"
     adw_ver = f"{Adw.get_major_version()}.{Adw.get_minor_version()}.{Adw.get_micro_version()}"
     py_ver = platform.python_version()
-    version = "2.2.5"
+    version = APP_VERSION
 
     dialog = Adw.Window()
     dialog.set_title(tr("About Pachul"))

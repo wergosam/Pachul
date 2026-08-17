@@ -40,6 +40,10 @@ INSTALLED_CACHE= CACHE_DIR / "installed.json"
 CACHE_VERSION  = 2   # bump when the cached package schema changes, to force a rebuild
 SYNCDB_TTL     = 6 * 3600   # 6 hours
 
+# ─── App metadata ───────────────────────────────────────────────────────────
+
+APP_VERSION    = "2.2.6"   # single source of truth — bump here for a release
+
 def _ensure_cache_dir():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
