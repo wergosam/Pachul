@@ -23,6 +23,7 @@ INSTALL_DIR="/usr/local/bin"
 DATA_DIR="/usr/local/share/${APP_NAME}"
 DESKTOP_DIR="/usr/share/applications"
 ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
+POLICY_DIR="/usr/share/polkit-1/actions"
 ICON_ID="io.github.wergosam.pachul"
 DESKTOP_FILE="${DESKTOP_DIR}/${ICON_ID}.desktop"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -172,6 +173,23 @@ EOF
 chmod 755 "${INSTALL_DIR}/${APP_NAME}-tray"
 success "Tray launcher created."
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  3c. pachuli AUR helper (optional — installs it to the same directory as
+#      the pachul launcher, so it's automatically on PATH and Pachul picks
+#      it up over yay/paru without any extra configuration. Entirely
+#      optional, same pattern as the Polkit policy below: a source checkout
+#      without pachuli.py next to install.sh (e.g. Pachul used with yay/
+#      paru instead) just skips this step.
+# ─────────────────────────────────────────────────────────────────────────────
+PACHULI_SRC="${SRC_DIR}/pachuli.py"
+if [[ -f "$PACHULI_SRC" ]]; then
+    info "Installing pachuli AUR helper to ${INSTALL_DIR}/pachuli…"
+    install -m 755 "$PACHULI_SRC" "${INSTALL_DIR}/pachuli"
+    success "pachuli installed — already on PATH via ${INSTALL_DIR}."
+else
+    info "No pachuli.py found next to install.sh — skipping (optional; Pachul falls back to yay/paru if installed)."
+fi
+
 case "$DISTRO_FAMILY" in
     arch)
         if ! pacman -Qi libayatana-appindicator &>/dev/null && ! pacman -Qi libappindicator-gtk3 &>/dev/null; then
@@ -237,6 +255,24 @@ gtk-update-icon-cache -f -t /usr/share/icons/hicolor &>/dev/null || true
 success "Icon installed."
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  5b. Polkit policy (optional — nicer "Authentication required to manage
+#      packages with Pachul" text in the native pkexec dialog, instead of
+#      Polkit's generic fallback message that dumps the raw command line;
+#      see PKEXEC_MIGRATION.md for the full explanation and trade-offs).
+#      Entirely optional — Pachul's pkexec calls work fine without it, so a
+#      missing file here (e.g. an older source checkout) is not an error.
+# ─────────────────────────────────────────────────────────────────────────────
+POLICY_SRC="${SRC_DIR}/${ICON_ID}.policy"
+if [[ -f "$POLICY_SRC" ]]; then
+    info "Installing Polkit policy (nicer authentication dialog text)…"
+    install -d "$POLICY_DIR"
+    install -m 644 "$POLICY_SRC" "${POLICY_DIR}/${ICON_ID}.policy"
+    success "Polkit policy installed — no polkitd restart needed."
+else
+    info "No ${ICON_ID}.policy found next to install.sh — skipping (optional, app works fine without it)."
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  6. Update desktop database
 # ─────────────────────────────────────────────────────────────────────────────
 update-desktop-database "$DESKTOP_DIR" &>/dev/null || true
@@ -256,3 +292,7 @@ echo
 echo -e "  Tray update icon   : enable at login via Preferences → Tray Icon"
 echo -e "  Run it right away  : ${BOLD}${APP_NAME}-tray &${RESET}"
 echo
+if [[ -f "${INSTALL_DIR}/pachuli" ]]; then
+    echo -e "  AUR helper         : ${BOLD}pachuli${RESET} (installed to ${INSTALL_DIR}, used automatically by Pachul)"
+    echo
+fi

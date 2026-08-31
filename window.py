@@ -23,12 +23,16 @@ from backend import (
     build_snapshot_cmd, flatpak_available, snap_available,
     is_pachul_installed, build_install_command,
     get_enabled_auto_update_commands, check_aur_ahead_of_repo,
+    build_desktop_icon_map, fetch_flatpak_icon,
+    aur_helper_upgrade_cmd, aur_helper_install_cmd, _find_aur_helper,
 )
 from models import (
     PackageItem, NavRow, REPO_BADGE_CLASS, pkg_icon, make_package_listview,
-    make_icon, set_button_icon, ListSelectionState,
+    make_icon, set_button_icon, ListSelectionState, set_installed_icon_map,
+    resolve_real_icon_paintable,
 )
-from icons import themed_image, themed_paintable, get_icon_texture
+from icons import (themed_image, themed_paintable, get_icon_texture,
+                    get_flatpak_icon_paintable)
 
 # Directory this module (and app.py) live in — used to find install.sh
 # next to a source checkout, and as the tray.py path for the autostart
@@ -112,6 +116,7 @@ class DetailPanel:
         self.dep_rows = {}         # key -> (ExpanderRow, FlowBox)
         self._files_query = ""     # current Files-tab filter text (lowercased)
         self._files_loading = False
+        self._current_pkg_name = None   # guards async icon fetch races
         self._build(action_btn, on_install, on_remove, on_reinstall, on_downgrade, on_hold)
 
     def _build(self, action_btn, on_install, on_remove, on_reinstall, on_downgrade, on_hold=None):
@@ -448,7 +453,6 @@ class pachulWindow(Adw.ApplicationWindow):
                                           # doesn't fire row-activated, so this has to be set here too)
         self._search_query     = ""      # current text in the always-visible search entry
         self._updates          = None
-        self._aur_helper_cache = None
         self._search_timer     = None   # GLib source id for debounced search
         self._alive            = True   # set False on close to stop background workers
         self._current_lang     = get_language()
@@ -558,50 +562,60 @@ class pachulWindow(Adw.ApplicationWindow):
 
         menu.append_section(None, Gio.Menu())
         menu.append(tr("Manage Repositories…"), "app.manage_repos")
-        menu.append(tr("Check Certificates…"), "app.cert_checker")
         if distro.is_arch():
             # Rate Mirrors edits pacman.d/mirrorlist directly — Fedora and
             # openSUSE both already auto-select the fastest mirror via
             # their own infrastructure (mirror-manager / download redirector),
             # so there's no equivalent tool needed there.
             menu.append(tr("Rate Mirrors…"),        "app.rate_mirrors")
+
+        # "System Repair" submenu: every entry here is specifically about
+        # finding or fixing something broken (a corrupt package DB, a
+        # dangling symlink, a stale .pacnew, an orphaned package eating
+        # disk space, a poisoned package cache, …), as opposed to the
+        # general maintenance/info tools above and below it that don't
+        # imply anything is actually wrong.
+        repair_menu = Gio.Menu()
+        if distro.is_arch():
             # pacman equivalent of the repair menus below — force-refresh,
             # -Dk/-Qkk diagnostics, keyring reinit, -Rdd force-remove. The
             # two most common Arch failure modes (stale GPG keys, a stuck
             # db.lck) already get their own automatic fix banners
             # elsewhere, so this covers what those don't.
-            menu.append(tr("Repair System (pacman)…"), "app.pacman_repair")
+            repair_menu.append(tr("Repair System (pacman)…"), "app.pacman_repair")
         if distro.is_debian():
             # apt/dpkg's own maintenance commands (--fix-broken, dpkg
             # --configure -a, --fix-missing, …) — Arch/Fedora/openSUSE
             # each have their own different repair tools/conventions, so
             # this stays Debian-family-only rather than trying to unify
             # them into one cross-distro "repair" concept.
-            menu.append(tr("Repair System (apt/dpkg)…"), "app.apt_repair")
+            repair_menu.append(tr("Repair System (apt/dpkg)…"), "app.apt_repair")
         if distro.is_fedora():
             # dnf/rpm equivalent of the apt/dpkg repair menu above
             # (distro-sync, rpm --rebuilddb, dnf clean all, …).
-            menu.append(tr("Repair System (dnf/rpm)…"), "app.dnf_repair")
+            repair_menu.append(tr("Repair System (dnf/rpm)…"), "app.dnf_repair")
         if distro.is_suse():
             # zypper/rpm equivalent (zypper verify, rpm --rebuilddb,
             # zypper clean --all, …).
-            menu.append(tr("Repair System (zypper/rpm)…"), "app.zypper_repair")
+            repair_menu.append(tr("Repair System (zypper/rpm)…"), "app.zypper_repair")
+        repair_menu.append(tr("Check Certificates…"), "app.cert_checker")
+        repair_menu.append(tr("Find Broken Symlinks…"), "app.broken_symlinks")
+        cfg_conflicts_label = tr("Config Files (.pacnew)…") if distro.is_arch() \
+            else tr("Config File Conflicts…")
+        repair_menu.append(cfg_conflicts_label, "app.pacdiff")
+        repair_menu.append(tr("Find Orphans"), "app.orphans")
+        repair_menu.append(tr("Cache Cleaner"), "app.cache")
+        menu.append_submenu(tr("Repair System"), repair_menu)
 
         menu.append_section(None, Gio.Menu())
-        menu.append(tr("Find Orphans"),         "app.orphans")
-        menu.append(tr("Find Broken Symlinks…"), "app.broken_symlinks")
         menu.append(tr("Services & Security…"), "app.services_security")
         menu.append(tr("Configuration Backup…"), "app.config_backup")
         menu.append(tr("Find Package by File…"), "app.file_search")
-        cfg_conflicts_label = tr("Config Files (.pacnew)…") if distro.is_arch() \
-            else tr("Config File Conflicts…")
-        menu.append(cfg_conflicts_label,        "app.pacdiff")
         menu.append(tr("More Update Sources…"),  "app.tool_updates")
         if self._hold_supported:
             menu.append(tr("Ignored Packages…"),    "app.ignored")
         menu.append(tr("Package History…"),     "app.history")
         menu.append(tr("System Info"),          "app.sysinfo")
-        menu.append(tr("Cache Cleaner"),        "app.cache")
         menu.append_section(None, Gio.Menu())
         menu.append(tr("Export Package List…"), "app.export_pkgs")
         menu.append(tr("Import Package List…"), "app.import_pkgs")
@@ -1013,11 +1027,28 @@ class pachulWindow(Adw.ApplicationWindow):
         self._reapply_update_markers()
         self._update_sidebar_counts()
         self._apply_filter()
+        # Real per-program icons (installed repo/AUR + Flatpak) are resolved
+        # from local .desktop files — no network involved, but scanning them
+        # and looking up owning packages still takes a moment, so it's done
+        # in the background rather than blocking this load. The list is
+        # re-filtered/re-rendered once the map is ready so icons pop in
+        # without needing a manual refresh.
+        threading.Thread(target=self._bg_build_icon_map, daemon=True).start()
         # Re-verify updates: on first load when the setting allows it, and on
         # every reload once we've checked before (e.g. after a package op, so
         # an updated package leaves the Updates list).
         if self._updates is not None or get_setting("check_updates_on_start"):
             threading.Thread(target=self._bg_check_updates, daemon=True).start()
+        return False
+
+    def _bg_build_icon_map(self):
+        mapping = build_desktop_icon_map()
+        if self._alive:
+            GLib.idle_add(self._on_icon_map_built, mapping)
+
+    def _on_icon_map_built(self, mapping):
+        set_installed_icon_map(mapping)
+        self._apply_filter()
         return False
 
     def _bg_check_updates(self):
@@ -1186,6 +1217,14 @@ class pachulWindow(Adw.ApplicationWindow):
             self.list_stack.set_visible_child_name(
                 "empty_updates" if filt == "updates" and not query and self._updates is not None
                 else "empty_generic")
+            # Nothing to select any more (e.g. right after an upgrade the
+            # updates list goes to zero) — hide the right-hand detail
+            # column too, the same way _on_nav_selected() already does when
+            # navigating away from a selected package. Otherwise it keeps
+            # showing its "Select a Package" placeholder, leaving a
+            # pointless 3-column layout (menu / "up to date" / placeholder)
+            # instead of just menu + "up to date".
+            self.detail_panel.stack.set_visible(False)
         else:
             self.list_stack.set_visible_child_name("list")
         return False
@@ -1403,8 +1442,11 @@ class pachulWindow(Adw.ApplicationWindow):
         # No --noconfirm: see _install_cmd_for — the repo-vs-AUR prompt
         # this deliberately triggers (the person is explicitly choosing
         # the AUR build over the repo's own version) needs real input.
-        self._run_terminal(f"{helper} -S {shlex.quote(name)}",
-                           tr("Install {n} from AUR").format(n=name),
+        # pachuli instead uses -a/--aur-only (force_aur=True) to force the
+        # AUR build outright, deterministically skipping its own repo-
+        # preferring classification, so no prompt is needed there either.
+        cmd = aur_helper_install_cmd(helper, shlex.quote(name), noconfirm=False, force_aur=True)
+        self._run_terminal(cmd, tr("Install {n} from AUR").format(n=name),
                            on_success=self._refresh_selected_pkg)
 
     def _set_status_pill(self, panel, status, foreign):
@@ -1426,13 +1468,26 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _show_detail(self, panel, pkg):
         """Fill `panel`'s hero with `pkg`, then load its info/files in a thread."""
+        panel._current_pkg_name = pkg.pkg_name
         panel.name.set_label(pkg.pkg_name)
         panel.desc.set_label(pkg.pkg_description or tr("No description available."))
-        _tex = get_icon_texture(pkg_icon(pkg.pkg_name), 58)
-        if _tex is not None:
-            panel.icon.set_from_paintable(_tex)
+        real_tex = resolve_real_icon_paintable(pkg, 58)
+        if real_tex is not None:
+            panel.icon.set_from_paintable(real_tex)
         else:
-            panel.icon.set_from_icon_name(pkg_icon(pkg.pkg_name))
+            _tex = get_icon_texture(pkg_icon(pkg.pkg_name), 58)
+            if _tex is not None:
+                panel.icon.set_from_paintable(_tex)
+            else:
+                panel.icon.set_from_icon_name(pkg_icon(pkg.pkg_name))
+            # Not-yet-installed Flatpak packages have no local .desktop file
+            # to resolve an icon from — Flathub still publishes one though
+            # (see backend.fetch_flatpak_icon()), so fetch it once in the
+            # background and swap the symbolic icon out if it arrives while
+            # this panel is still showing the same package.
+            if pkg.pkg_repo == "flatpak" and pkg.pkg_source_id:
+                threading.Thread(target=self._bg_fetch_detail_flatpak_icon,
+                                  args=(panel, pkg), daemon=True).start()
 
         repo_str = "aur" if pkg.pkg_foreign else (pkg.pkg_repo or "local").lower()
         panel.repo_badge.set_label(repo_str.upper())
@@ -1443,6 +1498,22 @@ class pachulWindow(Adw.ApplicationWindow):
         self._set_status_pill(panel, pkg.pkg_status, pkg.pkg_foreign)
 
         panel.stack.set_visible(True)
+
+    def _bg_fetch_detail_flatpak_icon(self, panel, pkg):
+        ok = fetch_flatpak_icon(pkg.pkg_source_id)
+        if ok and self._alive:
+            GLib.idle_add(self._on_detail_flatpak_icon_fetched, panel, pkg)
+
+    def _on_detail_flatpak_icon_fetched(self, panel, pkg):
+        # Only swap the icon in if this panel is still showing the same
+        # package — the user may have clicked something else in the
+        # meantime while the download was in flight.
+        if panel._current_pkg_name != pkg.pkg_name:
+            return False
+        tex = get_flatpak_icon_paintable(pkg.pkg_source_id, 58)
+        if tex is not None:
+            panel.icon.set_from_paintable(tex)
+        return False
         panel.stack.set_visible_child_name("detail")
         for row in panel.info_rows.values():
             if isinstance(row, Adw.ActionRow):
@@ -1672,8 +1743,14 @@ class pachulWindow(Adw.ApplicationWindow):
         def _on_done(code):
             if code == 0:
                 invalidate_cache()
-            self._toast(f"✓ {title} completed" if code == 0
-                        else f"✗ {title} failed (exit {code})")
+            # Adw.Toast.set_title() parses its text as Pango markup (it
+            # supports "<a href>" action links), so an unescaped "&" in
+            # *title* — e.g. "Firewall installieren & aktivieren" —
+            # throws a markup-parse GTK-WARNING instead of showing the
+            # toast. Escape it the same way _row() does for row titles.
+            safe_title = GLib.markup_escape_text(title)
+            self._toast(f"✓ {safe_title} completed" if code == 0
+                        else f"✗ {safe_title} failed (exit {code})")
             self._load_packages()
         run_terminal_dialog(parent or self, cmd, title, on_success=on_success,
                              on_done_extra=_on_done, target_window=target_window,
@@ -1695,7 +1772,7 @@ class pachulWindow(Adw.ApplicationWindow):
     def _on_sync_db(self, *_):
         def _do_sync():
             invalidate_syncdb_cache()
-            cmd = "sudo -S pacman -Sy --noconfirm" if distro.is_arch() else pkgmanager.sync_db_cmd()
+            cmd = "pkexec /usr/bin/pacman -Sy --noconfirm" if distro.is_arch() else pkgmanager.sync_db_cmd()
             self._run_terminal(cmd, tr("Sync Databases"))
         show_sync_db_dialog(self, _do_sync)
 
@@ -1714,35 +1791,131 @@ class pachulWindow(Adw.ApplicationWindow):
             # wieder die reguläre Ansicht (inkl. "Keine Updates"-Platzhalter,
             # falls auf der Updates-Seite), statt dass die Mitte leer bleibt.
             self._load_packages()
+
+        def _strip(c):
+            return c[len("pkexec "):] if c and c.startswith("pkexec ") else c
+
+        def _best_effort(parts):
+            """Join steps so every one runs regardless of whether an
+            earlier one failed, and none of their exit codes can escape
+            this fragment (each is wrapped in its own `{ ...; } || true`)."""
+            return "; ".join(f"{{ {p}; }} || true" for p in parts if p)
+
         # Use the AUR helper if present so repo *and* AUR packages are upgraded.
         # Note: pacman's -Syu already covers every repo listed in
         # /etc/pacman.conf uniformly (core, extra, multilib, chaotic-aur,
         # ...) — there's no per-repo command needed for those.
         helper = self._get_aur_helper()
         if helper:
-            cmd = f"{helper} -Syu --noconfirm"
+            main_cmd = aur_helper_upgrade_cmd(helper)
         elif distro.is_arch():
-            cmd = "sudo -S pacman -Syu --noconfirm"
+            main_cmd = "pkexec /usr/bin/pacman -Syu --noconfirm"
         else:
-            cmd = pkgmanager.upgrade_all_cmd()
-        if get_setting("snapshot_before_upgrade"):
-            snap_cmd = build_snapshot_cmd()
-            if snap_cmd:
-                cmd = f"{snap_cmd} && {cmd}"
-        # Flatpak and Snap are entirely separate ecosystems that pacman/AUR
-        # helpers never touch, so they need their own commands chained on —
-        # only when the person has actually opted into showing them
-        # (flatpak_enabled/snap_enabled), matching how the rest of the app
-        # treats these two optional sources.
-        if get_setting("flatpak_enabled") and flatpak_available():
-            cmd = f"{cmd} && flatpak update -y"
-        if get_setting("snap_enabled") and snap_available():
-            cmd = f"{cmd} && sudo -S snap refresh"
-        # Extra sources opted into via "More Update Sources" (rustup, npm,
-        # pipx, …) — each gets its own header line in the terminal output,
-        # same convention as show_tool_updates_dialog's own "Update Selected".
+            main_cmd = pkgmanager.upgrade_all_cmd()
+
+        snap_cmd = build_snapshot_cmd() if get_setting("snapshot_before_upgrade") else None
+        snap_refresh_cmd = ("pkexec /usr/bin/snap refresh"
+                             if get_setting("snap_enabled") and snap_available() else None)
+
+        # Auxiliary steps below (Snap refresh, Flatpak updates, every
+        # opted-into "More Update Sources" tool) must NEVER be able to
+        # mask a successful package upgrade by returning their own
+        # non-zero exit code — e.g. ClamAV's freshclam is documented to
+        # exit non-zero just for "no update needed", not an actual
+        # failure (same class of quirk on_done() already special-cases
+        # for fwupdmgr above). Since on_success — and with it, clearing
+        # the Updates list — is driven entirely by this command's exit
+        # code, letting any of these leak their own status through would
+        # make a perfectly successful upgrade look failed and silently
+        # skip clearing the list, even though nothing about the upgrade
+        # itself was wrong.
+        aux_root_steps, aux_plain_steps = [], []
+        has_pkexec_extra = False
+        if snap_refresh_cmd:
+            aux_root_steps.append(_strip(snap_refresh_cmd))
         for name, extra_cmd in get_enabled_auto_update_commands():
-            cmd = f'{cmd} && echo; echo "=== {name} ==="; echo; {extra_cmd}'
+            header = f'echo; echo "=== {name} ==="; echo; '
+            if extra_cmd.startswith("pkexec "):
+                aux_root_steps.append(header + _strip(extra_cmd))
+                has_pkexec_extra = True
+            else:
+                aux_plain_steps.append(header + extra_cmd)
+        if get_setting("flatpak_enabled") and flatpak_available():
+            aux_plain_steps.append("flatpak update -y")
+
+        # Bundle every pkexec-prefixed step we control into ONE `pkexec
+        # bash -c '...'` call, so only one native Polkit dialog appears
+        # for all of them together — chaining them as separate
+        # `pkexec X && pkexec Y` calls each need their own authentication,
+        # and a second, unannounced dialog popping up mid-upgrade is easy
+        # to miss (it doesn't visually stand out from the terminal window
+        # it appears next to), which looks exactly like the upgrade
+        # silently hanging. Only *our own* pkexec calls can be merged this
+        # way — an AUR helper's own internal `sudo` is a separate
+        # mechanism we don't control and can't fold in (bundling it into
+        # our pkexec's bash -c would also incorrectly run the helper
+        # itself as root, which yay/paru both refuse to do).
+        if main_cmd.startswith("pkexec "):
+            # Native pacman/dnf/apt/zypper path — snapshot gates the main
+            # upgrade (a failed snapshot deliberately stops it, since
+            # that's the whole point of taking one first), then the
+            # gate's own exit code is captured and restored at the very
+            # end regardless of what the best-effort steps do.
+            if snap_cmd or aux_root_steps:
+                gate = _strip(main_cmd)
+                if snap_cmd:
+                    gate = f"{_strip(snap_cmd)} && {gate}"
+                if aux_root_steps:
+                    inner = f"{gate}; _RC=$?; {_best_effort(aux_root_steps)}; exit $_RC"
+                else:
+                    inner = gate
+                cmd = "pkexec /usr/bin/bash -c " + shlex.quote(inner)
+            else:
+                # Nothing to combine — keep this a direct, unwrapped
+                # pkexec call. Confirmed via testing: wrapping even a
+                # single command in `pkexec bash -c '...'` can make some
+                # Polkit setups silently fall back to a plain-text
+                # terminal password prompt instead of the native dialog,
+                # even though `pkexec pacman ...` alone shows it correctly
+                # on that very same system.
+                cmd = main_cmd
+        else:
+            # AUR-helper path: main_cmd has its own internal sudo we can't
+            # fold in. Snapshot still gates the upgrade (a failed snapshot
+            # deliberately blocks it — that's the whole point of taking
+            # one first); snap-refresh/pkexec-needing tool updates are
+            # merged into the same authentication purely to share it, not
+            # to affect that gate, so their own exit code is captured and
+            # discarded the same way as in the native branch above.
+            snap_stripped = _strip(snap_cmd) if snap_cmd else None
+            if snap_stripped and aux_root_steps:
+                inner = f"{snap_stripped}; _RC=$?; {_best_effort(aux_root_steps)}; exit $_RC"
+                pre = "pkexec /usr/bin/bash -c " + shlex.quote(inner)
+                cmd = f"{pre} && {main_cmd}"
+            elif snap_stripped:
+                # Only the snapshot, nothing else to combine it with —
+                # keep it a direct, unwrapped pkexec call (see the
+                # native-path comment above for why this matters).
+                cmd = f"{snap_cmd} && {main_cmd}"
+            elif len(aux_root_steps) == 1 and snap_refresh_cmd and not has_pkexec_extra:
+                # The only aux step is a bare `snap refresh`, no snapshot
+                # and no extra-tool update involved — likewise keep it a
+                # direct pkexec call, just wrapped in `{ ...; } || true`
+                # at the outer shell level (not inside pkexec's own
+                # target) so its failure can't block the helper's upgrade.
+                cmd = f"{{ {snap_refresh_cmd}; }} || true && {main_cmd}"
+            elif aux_root_steps:
+                # Multiple items, or an extra-tool step that already needs
+                # a shell for its own echo header regardless — bundling
+                # here is unavoidable.
+                pre = "pkexec /usr/bin/bash -c " + shlex.quote(_best_effort(aux_root_steps))
+                cmd = f"{{ {pre}; }} || true && {main_cmd}"
+            else:
+                cmd = main_cmd
+
+        if aux_plain_steps:
+            cmd = f"{{ {cmd}; }}; _RC=$?; {_best_effort(aux_plain_steps)}; exit $_RC"
+
         self._run_terminal(cmd, tr("System Upgrade"), on_success=_after)
 
     def _on_clean_cache(self, *_):
@@ -1890,13 +2063,11 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _run_terminal_reset_aur_helper(self, cmd, title, parent=None):
         # After installing an AUR helper (e.g. paru) from Preferences, drop
-        # both cached lookups (window's own, and backend's — used by
-        # check_updates() and friends) so the very next AUR action picks
-        # it up instead of still reporting "no helper" for the rest of
-        # this session.
+        # backend's cached lookup — now the only one, see _get_aur_helper()
+        # — so the very next AUR action picks it up instead of still
+        # reporting "no helper" for the rest of this session.
         def _after():
-            self._aur_helper_cache = None
-            save_settings({})   # side effect: also resets backend's own cache
+            save_settings({})   # side effect: resets backend's _aur_helper_cache
         self._run_terminal(cmd, title, on_success=_after, parent=parent)
 
     def _on_settings_changed(self):
@@ -1973,7 +2144,7 @@ class pachulWindow(Adw.ApplicationWindow):
         if pkg.pkg_repo in ("flatpak", "snap"):
             self._toast(tr("Not applicable to Flatpak/Snap packages"))
             return
-        cmd = ("sudo -S pacman -D --asexplicit " + shlex.quote(pkg.pkg_name)
+        cmd = ("pkexec /usr/bin/pacman -D --asexplicit " + shlex.quote(pkg.pkg_name)
                if distro.is_arch() else pkgmanager.mark_explicit_cmd(pkg.pkg_name))
         if cmd is None:
             self._toast(tr("Not supported on this system"))
@@ -1992,7 +2163,7 @@ class pachulWindow(Adw.ApplicationWindow):
             return
 
         def _do_mark():
-            cmd = ("sudo -S pacman -D --asdeps " + shlex.quote(pkg.pkg_name)
+            cmd = ("pkexec /usr/bin/pacman -D --asdeps " + shlex.quote(pkg.pkg_name)
                    if distro.is_arch() else pkgmanager.mark_asdeps_cmd(pkg.pkg_name))
             if cmd is None:
                 self._toast(tr("Not supported on this system"))
@@ -2192,7 +2363,26 @@ class pachulWindow(Adw.ApplicationWindow):
     def _flatpak_uninstall_cmd(self, app_id):
         q = shlex.quote(app_id)
         return (f"{{ flatpak uninstall -y {q} 2>/dev/null "
-                f"|| sudo -S flatpak uninstall -y --system {q}; }}")
+                f"|| pkexec /usr/bin/flatpak uninstall -y --system {q}; }}")
+
+    def _flatpak_batch_uninstall_cmd(self, app_ids):
+        """Same per-user-then-system-wide fallback as
+        _flatpak_uninstall_cmd, but for several app ids removed together:
+        every per-user attempt runs first (no privileges needed, and most
+        Flatpaks on Arch/Manjaro are --user anyway — see the privilege
+        note in backend.py), and only the ids that actually turn out to be
+        system-wide installs get bundled into a SINGLE pkexec call at the
+        end. Chaining `_flatpak_uninstall_cmd()` per app instead would
+        mean one separate Polkit authentication for every system-wide
+        Flatpak in the batch."""
+        quoted = [shlex.quote(a) for a in app_ids]
+        per_user = "; ".join(
+            f'flatpak uninstall -y {q} 2>/dev/null || FAILED="$FAILED {q}"'
+            for q in quoted)
+        return (
+            'FAILED=""; ' + per_user + '; '
+            'if [ -n "$FAILED" ]; then pkexec /usr/bin/flatpak uninstall -y --system $FAILED; fi'
+        )
 
     def _install_cmd_for(self, pkg):
         """Build the right install command for a single package, based on
@@ -2202,7 +2392,7 @@ class pachulWindow(Adw.ApplicationWindow):
             return f"flatpak install -y {shlex.quote(app_id)}"
         if pkg.pkg_repo == "snap":
             name = pkg.pkg_source_id or pkg.pkg_name
-            return f"sudo -S snap install {shlex.quote(name)}"
+            return f"pkexec /usr/bin/snap install {shlex.quote(name)}"
         name = shlex.quote(pkg.pkg_name)
         # Only go through the AUR helper for packages that aren't known to
         # any configured repo at all (pkg_foreign) — e.g. a package also
@@ -2222,18 +2412,22 @@ class pachulWindow(Adw.ApplicationWindow):
                 # prompt (shown for a package known both to a repo and the
                 # true AUR) doesn't resolve reliably under --noconfirm —
                 # confirmed by testing both helpers. Pachul's terminal
-                # dialog is already interactive (e.g. sudo password entry),
-                # so the person answers the [Y/n] / numbered-choice prompt
-                # directly there instead.
-                return f"{helper} -S --noconfirm {name}"
+                # dialog is already interactive via its generic PTY input
+                # row, so the person answers the [Y/n] / numbered-choice
+                # prompt directly there instead. (Unlike pacman itself, yay/
+                # paru still call `sudo` internally for their own root
+                # steps — that's the helper's own choice, outside Pachul's
+                # pkexec migration — so that row also still doubles as
+                # where its password prompt, if any, would be answered.)
+                return aur_helper_install_cmd(helper, name, noconfirm=False)
         if not distro.is_arch():
             # Same reasoning as the pacman -Sy case below: refresh repo
             # metadata first so a pending update isn't missed just because
             # the locally cached repo data hasn't caught up yet. Combined
-            # into ONE sudo prompt (see pkgmanager._combine_sudo) — two
-            # separate `sudo -S` calls chained with && would silently
-            # stall on the second, unannounced password prompt instead
-            # of actually installing/updating the package.
+            # into ONE pkexec call (see pkgmanager.combine_pkexec) — two
+            # separate `pkexec` calls chained with && could silently stall
+            # on a second, unannounced Polkit dialog instead of actually
+            # installing/updating the package.
             return pkgmanager.install_cmd_synced([pkg.pkg_name])
         # -Sy (not plain -S): checkupdates always syncs its own fresh copy
         # of the repo databases, so it can correctly flag a pending update
@@ -2243,7 +2437,7 @@ class pachulWindow(Adw.ApplicationWindow):
         # ever seeing the new version, leaving the package stuck showing
         # as an update forever. Refreshing first (-y) here is standard
         # practice for updating a single package outside a full -Syu.
-        return f"sudo -S pacman -Sy --noconfirm {name}"
+        return f"pkexec /usr/bin/pacman -Sy --noconfirm {name}"
 
     def _remove_cmd_for(self, pkg):
         """Build the right remove command for a single package, based on
@@ -2253,10 +2447,10 @@ class pachulWindow(Adw.ApplicationWindow):
             return self._flatpak_uninstall_cmd(app_id)
         if pkg.pkg_repo == "snap":
             name = pkg.pkg_source_id or pkg.pkg_name
-            return f"sudo -S snap remove {shlex.quote(name)}"
+            return f"pkexec /usr/bin/snap remove {shlex.quote(name)}"
         if not distro.is_arch():
             return pkgmanager.remove_cmd([pkg.pkg_name])
-        return f"sudo -S pacman -R --noconfirm {shlex.quote(pkg.pkg_name)}"
+        return f"pkexec /usr/bin/pacman -R --noconfirm {shlex.quote(pkg.pkg_name)}"
 
     def _on_batch_install(self):
         items = list(getattr(self, "_batch_install_items", []))
@@ -2266,7 +2460,14 @@ class pachulWindow(Adw.ApplicationWindow):
         fp_items  = [i for i in items if i.pkg_repo == "flatpak"]
         sn_items  = [i for i in items if i.pkg_repo == "snap"]
 
-        cmds = []
+        helper_cmd = None
+        # Steps that need root and are genuinely ours to combine into one
+        # pkexec call — kept separate from helper_cmd (the AUR helper's
+        # own internal `sudo`, a different mechanism we don't control and
+        # can't fold in) and from the flatpak step (unprivileged --user
+        # installs, which folding into our own root shell would wrongly
+        # run as root instead).
+        pkexec_steps = []
         if pac_items:
             helper = self._get_aur_helper()
             names = [i.pkg_name for i in pac_items]
@@ -2280,7 +2481,7 @@ class pachulWindow(Adw.ApplicationWindow):
                 if helper:
                     quoted = " ".join(shlex.quote(n) for n in foreign_names)
                     # No --noconfirm: see _install_cmd_for.
-                    cmds.append(f"{helper} -S --noconfirm {quoted}")
+                    helper_cmd = aur_helper_install_cmd(helper, quoted, noconfirm=False)
                 else:
                     self._toast(tr("No AUR helper found — skipped {n} AUR package(s).")
                                .format(n=len(foreign_names)))
@@ -2291,17 +2492,24 @@ class pachulWindow(Adw.ApplicationWindow):
                     # only consults the last-synced local db and can miss a
                     # pending update that checkupdates (always fresh) already
                     # sees, leaving the package stuck reporting as an update.
-                    cmds.append(f"sudo -S pacman -Sy --noconfirm {quoted}")
+                    pkexec_steps.append(f"pkexec /usr/bin/pacman -Sy --noconfirm {quoted}")
                 else:
-                    # See _install_cmd_for: one combined sudo prompt,
-                    # not two chained `sudo -S` calls.
-                    cmds.append(pkgmanager.install_cmd_synced(repo_names))
+                    pkexec_steps.append(pkgmanager.install_cmd_synced(repo_names))
+        if sn_items:
+            names = " ".join(shlex.quote(i.pkg_source_id or i.pkg_name) for i in sn_items)
+            pkexec_steps.append(f"pkexec /usr/bin/snap install {names}")
+
+        # Merge every pkexec step above into ONE Polkit authentication
+        # (see pkgmanager.combine_pkexec) — then place the helper's own,
+        # separately-authenticated step and the unprivileged flatpak step
+        # around it. Order between these three doesn't matter functionally
+        # (repo/AUR packages, Snap, and Flatpak are independent
+        # ecosystems); only avoiding one extra prompt per step does.
+        merged = pkgmanager.combine_pkexec(*pkexec_steps) if pkexec_steps else None
+        cmds = [c for c in (helper_cmd, merged) if c]
         if fp_items:
             ids = " ".join(shlex.quote(i.pkg_source_id or i.pkg_name) for i in fp_items)
             cmds.append(f"flatpak update -y {ids}")
-        if sn_items:
-            names = " ".join(shlex.quote(i.pkg_source_id or i.pkg_name) for i in sn_items)
-            cmds.append(f"sudo -S snap install {names}")
 
         if not cmds:
             return
@@ -2360,21 +2568,26 @@ class pachulWindow(Adw.ApplicationWindow):
             fp_items  = [i for i in items if i.pkg_repo == "flatpak"]
             sn_items  = [i for i in items if i.pkg_repo == "snap"]
 
-            cmds = []
+            # Same reasoning as _on_batch_install: merge our own
+            # pkexec-prefixed steps into one authentication instead of
+            # chaining separate `pkexec` calls with &&.
+            pkexec_steps = []
             if pac_items:
                 names = [i.pkg_name for i in pac_items]
                 if distro.is_arch():
                     quoted = " ".join(shlex.quote(n) for n in names)
-                    cmds.append(f"sudo -S pacman -R --noconfirm {quoted}")
+                    pkexec_steps.append(f"pkexec /usr/bin/pacman -R --noconfirm {quoted}")
                 else:
-                    cmds.append(pkgmanager.remove_cmd(names))
-            if fp_items:
-                fp_cmds = [self._flatpak_uninstall_cmd(i.pkg_source_id or i.pkg_name)
-                          for i in fp_items]
-                cmds.append(" && ".join(fp_cmds))
+                    pkexec_steps.append(pkgmanager.remove_cmd(names))
             if sn_items:
                 names = " ".join(shlex.quote(i.pkg_source_id or i.pkg_name) for i in sn_items)
-                cmds.append(f"sudo -S snap remove {names}")
+                pkexec_steps.append(f"pkexec /usr/bin/snap remove {names}")
+            merged = pkgmanager.combine_pkexec(*pkexec_steps) if pkexec_steps else None
+
+            cmds = [c for c in [merged] if c]
+            if fp_items:
+                ids = [i.pkg_source_id or i.pkg_name for i in fp_items]
+                cmds.append(self._flatpak_batch_uninstall_cmd(ids))
             if not cmds:
                 return
 
@@ -2535,12 +2748,12 @@ class pachulWindow(Adw.ApplicationWindow):
         return False
 
     def _get_aur_helper(self):
-        if not distro.is_arch():
-            return None
-        if self._aur_helper_cache is None:
-            for h in ("yay", "paru", "pikaur", "trizen"):
-                _, c = run_command(f"which {h} 2>/dev/null")
-                if c == 0:
-                    self._aur_helper_cache = h
-                    break
-        return self._aur_helper_cache
+        # Delegates to backend's own cached _find_aur_helper() instead of
+        # keeping a second, independent lookup here — the two used to
+        # disagree in one important way: this copy always auto-detected
+        # and ignored the "AUR Helper" preference in Settings, so choosing
+        # e.g. "paru" there while yay was also installed silently kept
+        # using yay for anything routed through this method. One lookup,
+        # one cache (reset together via save_settings(), see
+        # _run_terminal_reset_aur_helper below), one preference honoured.
+        return _find_aur_helper()

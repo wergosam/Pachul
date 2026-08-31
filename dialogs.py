@@ -1,7 +1,14 @@
 """
 Pachul — dialogs.py
 All modal tool dialogs:
-  - TerminalDialog  : PTY-backed command runner with sudo password input
+  - TerminalDialog  : PTY-backed command runner. Privileged commands use
+                      pkexec, so authentication happens in the desktop's
+                      own native Polkit dialog (GNOME/KDE), not in a
+                      password field built by Pachul itself — Pachul never
+                      sees the password. The dialog's input row is now a
+                      generic "send text to the running command" field for
+                      the rare interactive [y/n]-style prompt, not for
+                      passwords.
   - RepoManagerDialog : View/edit /etc/pacman.conf repositories
   - MirrorRaterDialog : rate-mirrors front end
   - OrphanFinderDialog: list and remove orphaned packages
@@ -35,7 +42,9 @@ from backend import (run_command, get_orphans, get_system_info,
                      get_pkgbuild, get_pacnew_files, get_file_diff, get_setting, save_settings,
                      files_db_available, search_file_owner, get_package_cache_size,
                      get_tool_updates, paru_installed, get_paru_bootstrap_cmd,
-                     get_ignored_packages, build_hold_cmd_bulk, APP_VERSION)
+                     get_ignored_packages, build_hold_cmd_bulk, APP_VERSION,
+                     aur_helper_install_cmd, pachuli_installed, local_pachuli_path,
+                     get_pachuli_install_cmd)
 from i18n import tr, get_language, set_language
 from icons import themed_image, themed_paintable
 
@@ -345,7 +354,16 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
     input_box.set_margin_top(8);    input_box.set_margin_bottom(8)
     input_box.set_margin_start(10); input_box.set_margin_end(10)
 
-    pw_icon = themed_image("dialog-password-symbolic", 18)
+    # This row is mainly for the rare leftover interactive prompt pkexec
+    # itself doesn't cover (e.g. a [Y/n] confirmation some tool still
+    # asks for) — but in practice it does still sometimes receive an
+    # actual password: an AUR helper (yay/paru) calls its own internal
+    # `sudo` for its privileged steps, which is a separate mechanism from
+    # pkexec that Pachul can't fold into the native Polkit dialog (see
+    # PKEXEC_MIGRATION.md). So this stays masked by default, with a
+    # reveal toggle to check what was typed — same idea as the eye icon
+    # on the native Polkit dialog itself.
+    pw_icon = themed_image("utilities-terminal-symbolic", 18)
     pw_icon.add_css_class("dim-label")
     input_box.append(pw_icon)
 
@@ -353,7 +371,24 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
     pw_entry.set_hexpand(True)
     pw_entry.set_visibility(False)
     pw_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
-    pw_entry.set_placeholder_text(tr("Password or input — press Enter to send"))
+    pw_entry.set_placeholder_text(tr("Input for the running command (rarely needed) — press Enter to send"))
+    pw_entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic")
+    pw_entry.set_icon_activatable(Gtk.EntryIconPosition.SECONDARY, True)
+    pw_entry.set_icon_tooltip_text(Gtk.EntryIconPosition.SECONDARY, tr("Show input"))
+
+    def _toggle_pw_visibility(entry, icon_pos):
+        if icon_pos != Gtk.EntryIconPosition.SECONDARY:
+            return
+        now_visible = not entry.get_visibility()
+        entry.set_visibility(now_visible)
+        entry.set_icon_from_icon_name(
+            Gtk.EntryIconPosition.SECONDARY,
+            "view-conceal-symbolic" if now_visible else "view-reveal-symbolic")
+        entry.set_icon_tooltip_text(
+            Gtk.EntryIconPosition.SECONDARY,
+            tr("Hide input") if now_visible else tr("Show input"))
+
+    pw_entry.connect("icon-press", _toggle_pw_visibility)
     input_box.append(pw_entry)
 
     send_btn = Gtk.Button(label=tr("Send"))
@@ -406,7 +441,8 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
         r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)'   # OSC sequences: window title, hyperlinks,
                                                 # and newer systemd/pam_systemd session-
                                                 # boundary markers (e.g. "OSC 3008") that
-                                                # sudo now emits — must come before the
+                                                # sudo/pkexec and other pam_systemd-aware
+                                                # tools can emit — must come before the
                                                 # generic ESC-fallback below, otherwise only
                                                 # the ESC ']' gets eaten and the payload
                                                 # (e.g. "3008;start=...;type=session") is
@@ -622,16 +658,26 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
                     gpg_banner.set_revealed(False)
                     if distro.is_arch():
                         if key_id:
-                            fix = (f"sudo -S pacman-key --recv-keys {key_id} && "
-                                   f"sudo -S pacman-key --lsign-key {key_id}")
+                            fix = "pkexec /usr/bin/bash -c " + shlex.quote(
+                                f"pacman-key --recv-keys {key_id} && "
+                                f"pacman-key --lsign-key {key_id}")
                         else:
-                            fix = "sudo -S pacman -Sy --needed --noconfirm archlinux-keyring"
+                            fix = "pkexec /usr/bin/pacman -Sy --needed --noconfirm archlinux-keyring"
                     else:
                         fix = pkgmanager.gpg_fix_cmd(key_id or None)
                     if not fix:
                         return
                     dialog.close()
-                    run_terminal_dialog(parent, f"{fix} && {cmd}", title,
+                    # If both the fix and the original (failed) command are
+                    # our own pkexec calls, merge them into one
+                    # authentication for the retry — otherwise (e.g. cmd
+                    # goes through an AUR helper's own internal sudo)
+                    # chain them as before; that helper case already needs
+                    # its own separate prompt regardless.
+                    retry_cmd = (pkgmanager.combine_pkexec(fix, cmd)
+                                 if fix.startswith("pkexec ") and cmd.startswith("pkexec ")
+                                 else f"{fix} && {cmd}")
+                    run_terminal_dialog(parent, retry_cmd, title,
                                         on_success=on_success, on_done_extra=on_done_extra)
 
                 if key_id:
@@ -680,13 +726,16 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
                             f"if [ \"$held\" = 0 ]; then echo {shlex.quote(lock_msg)} >&2; exit 1; "
                             "else rm -f /var/lib/pacman/db.lck; fi"
                         )
-                        fix = "sudo -S bash -c " + shlex.quote(inner_script)
+                        fix = "pkexec /usr/bin/bash -c " + shlex.quote(inner_script)
                     else:
                         fix = pkgmanager.lock_fix_cmd()
                     if not fix:
                         return
                     dialog.close()
-                    run_terminal_dialog(parent, f"{fix} && {cmd}", title,
+                    retry_cmd = (pkgmanager.combine_pkexec(fix, cmd)
+                                 if fix.startswith("pkexec ") and cmd.startswith("pkexec ")
+                                 else f"{fix} && {cmd}")
+                    run_terminal_dialog(parent, retry_cmd, title,
                                         on_success=on_success, on_done_extra=on_done_extra)
 
                 lock_title = tr("Pacman database is locked (stale db.lck)") if distro.is_arch() \
@@ -725,6 +774,10 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
 
         env = dict(os.environ)
         env['TERM'] = 'xterm-256color'
+        # SUDO_ASKPASS is irrelevant now that privileged commands go
+        # through pkexec (which talks to the Polkit agent over D-Bus, not
+        # via an askpass helper) — left here defensively in case anything
+        # downstream still shells out through plain sudo.
         env.pop('SUDO_ASKPASS', None)
 
         try:
@@ -884,8 +937,9 @@ def show_repo_manager(parent, run_terminal_fn):
     # write it out via the same safe pattern already used elsewhere in the
     # app for pacman.conf changes (window.py's hold/unhold flow) — dump the
     # new content to a user-owned temp file, then apply it with a single
-    # non-interactive `sudo -S install ...` call, which the log-style
-    # terminal panel handles just fine since it isn't interactive.
+    # non-interactive `pkexec install ...` call, authenticated through the
+    # desktop's native Polkit dialog rather than anything typed into the
+    # log-style terminal panel.
     save_btn = Gtk.Button(label=tr("Save"))
     save_btn.add_css_class("suggested-action")
     hdr.pack_end(save_btn)
@@ -965,7 +1019,7 @@ def show_repo_manager(parent, run_terminal_fn):
             return
         dialog.close()
         run_terminal_fn(
-            f"sudo -S install -m644 {shlex.quote(tmp_path)} /etc/pacman.conf",
+            f"pkexec /usr/bin/install -m644 {shlex.quote(tmp_path)} /etc/pacman.conf",
             tr("Save pacman.conf"))
 
     save_btn.connect("clicked", _do_save)
@@ -1155,7 +1209,7 @@ def show_apt_repair_dialog(parent, run_terminal_fn):
 
     warn_banner = Adw.Banner()
     warn_banner.set_title(tr(
-        "These run real apt/dpkg maintenance commands with sudo — read what each "
+        "These run real apt/dpkg maintenance commands with root privileges (via pkexec) — read what each "
         "one does before running it, especially the last one."))
     warn_banner.set_revealed(True)
     outer.append(warn_banner)
@@ -1188,36 +1242,36 @@ def show_apt_repair_dialog(parent, run_terminal_fn):
         tr("Refreshes the package index, upgrades everything, then removes packages "
            "no longer needed by anything else."),
         tr("Run"),
-        "sudo -S apt-get update -y && sudo -S apt-get dist-upgrade -y "
-        "&& sudo -S apt-get autoremove -y",
+        "pkexec /usr/bin/bash -c " + shlex.quote(
+            "apt-get update -y && apt-get dist-upgrade -y && apt-get autoremove -y"),
     ))
     steps_group.add(_row(
         tr("Fix Broken Dependencies"),
         tr("Runs 'apt --fix-broken install' to resolve broken or half-installed "
            "dependencies."),
         tr("Run"),
-        "sudo -S apt-get install --fix-broken -y",
+        "pkexec /usr/bin/apt-get install --fix-broken -y",
     ))
     steps_group.add(_row(
         tr("Reconfigure All Packages"),
         tr("Runs 'dpkg --configure -a' to finish any package configuration that was "
            "interrupted."),
         tr("Run"),
-        "sudo -S dpkg --configure -a",
+        "pkexec /usr/bin/dpkg --configure -a",
     ))
     steps_group.add(_row(
         tr("Fix Missing/Corrupt Package Files"),
         tr("Refreshes the package index, then retries installing anything with "
            "missing or corrupt downloaded files."),
         tr("Run"),
-        "sudo -S apt-get update -y && sudo -S apt-get install --fix-missing -y",
+        "pkexec /usr/bin/bash -c " + shlex.quote("apt-get update -y && apt-get install --fix-missing -y"),
     ))
     steps_group.add(_row(
         tr("Clean Package Cache"),
         tr("Removes outdated .deb files from the local cache, then clears it "
            "completely."),
         tr("Run"),
-        "sudo -S apt-get autoclean -y && sudo -S apt-get clean -y",
+        "pkexec /usr/bin/bash -c " + shlex.quote("apt-get autoclean -y && apt-get clean -y"),
     ))
     outer.append(steps_group)
 
@@ -1262,7 +1316,7 @@ def show_apt_repair_dialog(parent, run_terminal_fn):
             return
         dialog.close()
         run_terminal_fn(
-            f"sudo -S dpkg --remove --force-remove-reinstreq {shlex.quote(pkg_name)}",
+            f"pkexec /usr/bin/dpkg --remove --force-remove-reinstreq {shlex.quote(pkg_name)}",
             tr("Force-Remove Broken Package") + f" ({pkg_name})")
     force_btn.connect("clicked", _do_force_remove)
     danger_row.add_suffix(force_btn)
@@ -1310,7 +1364,7 @@ def show_dnf_repair_dialog(parent, run_terminal_fn):
 
     warn_banner = Adw.Banner()
     warn_banner.set_title(tr(
-        "These run real dnf/rpm maintenance commands with sudo — read what each "
+        "These run real dnf/rpm maintenance commands with root privileges (via pkexec) — read what each "
         "one does before running it, especially the last one."))
     warn_banner.set_revealed(True)
     outer.append(warn_banner)
@@ -1343,7 +1397,7 @@ def show_dnf_repair_dialog(parent, run_terminal_fn):
         tr("Refreshes repo metadata, upgrades everything, then removes packages "
            "no longer needed by anything else."),
         tr("Run"),
-        "sudo -S dnf upgrade --refresh -y && sudo -S dnf autoremove -y",
+        "pkexec /usr/bin/bash -c " + shlex.quote("dnf upgrade --refresh -y && dnf autoremove -y"),
     ))
     steps_group.add(_row(
         tr("Fix Inconsistent Package Versions"),
@@ -1351,19 +1405,19 @@ def show_dnf_repair_dialog(parent, run_terminal_fn):
            "with what the repos currently offer, after an interrupted or "
            "partial upgrade left some at mismatched versions."),
         tr("Run"),
-        "sudo -S dnf distro-sync -y",
+        "pkexec /usr/bin/dnf distro-sync -y",
     ))
     steps_group.add(_row(
         tr("Rebuild RPM Database"),
         tr("Runs 'rpm --rebuilddb' to rebuild a corrupted local RPM database."),
         tr("Run"),
-        "sudo -S rpm --rebuilddb",
+        "pkexec /usr/bin/rpm --rebuilddb",
     ))
     steps_group.add(_row(
         tr("Clean Package Cache"),
         tr("Runs 'dnf clean all' to clear cached package files and metadata."),
         tr("Run"),
-        "sudo -S dnf clean all",
+        "pkexec /usr/bin/dnf clean all",
     ))
     outer.append(steps_group)
 
@@ -1408,7 +1462,7 @@ def show_dnf_repair_dialog(parent, run_terminal_fn):
             return
         dialog.close()
         run_terminal_fn(
-            f"sudo -S rpm -e --nodeps {shlex.quote(pkg_name)}",
+            f"pkexec /usr/bin/rpm -e --nodeps {shlex.quote(pkg_name)}",
             tr("Force-Remove Broken Package") + f" ({pkg_name})")
     force_btn.connect("clicked", _do_force_remove)
     danger_row.add_suffix(force_btn)
@@ -1456,7 +1510,7 @@ def show_zypper_repair_dialog(parent, run_terminal_fn):
 
     warn_banner = Adw.Banner()
     warn_banner.set_title(tr(
-        "These run real zypper/rpm maintenance commands with sudo — read what "
+        "These run real zypper/rpm maintenance commands with root privileges (via pkexec) — read what "
         "each one does before running it, especially the last one."))
     warn_banner.set_revealed(True)
     outer.append(warn_banner)
@@ -1488,27 +1542,27 @@ def show_zypper_repair_dialog(parent, run_terminal_fn):
         tr("Update & Upgrade"),
         tr("Refreshes repo metadata, then installs all available updates."),
         tr("Run"),
-        "sudo -S zypper --non-interactive refresh "
-        "&& sudo -S zypper --non-interactive update",
+        "pkexec /usr/bin/bash -c " + shlex.quote(
+            "zypper --non-interactive refresh && zypper --non-interactive update"),
     ))
     steps_group.add(_row(
         tr("Fix Broken Dependencies"),
         tr("Runs 'zypper verify' — openSUSE's own solver run that finds and "
            "proposes fixes for broken or unsatisfied package dependencies."),
         tr("Run"),
-        "sudo -S zypper --non-interactive verify",
+        "pkexec /usr/bin/zypper --non-interactive verify",
     ))
     steps_group.add(_row(
         tr("Rebuild RPM Database"),
         tr("Runs 'rpm --rebuilddb' to rebuild a corrupted local RPM database."),
         tr("Run"),
-        "sudo -S rpm --rebuilddb",
+        "pkexec /usr/bin/rpm --rebuilddb",
     ))
     steps_group.add(_row(
         tr("Clean Package Cache"),
         tr("Runs 'zypper clean --all' to clear cached package files and metadata."),
         tr("Run"),
-        "sudo -S zypper clean --all",
+        "pkexec /usr/bin/zypper clean --all",
     ))
     outer.append(steps_group)
 
@@ -1554,7 +1608,7 @@ def show_zypper_repair_dialog(parent, run_terminal_fn):
             return
         dialog.close()
         run_terminal_fn(
-            f"sudo -S rpm -e --nodeps {shlex.quote(pkg_name)}",
+            f"pkexec /usr/bin/rpm -e --nodeps {shlex.quote(pkg_name)}",
             tr("Force-Remove Broken Package") + f" ({pkg_name})")
     force_btn.connect("clicked", _do_force_remove)
     danger_row.add_suffix(force_btn)
@@ -1601,31 +1655,32 @@ def show_pacman_repair_dialog(parent, run_terminal_fn, aur_helper=None):
     outer.set_margin_top(16);   outer.set_margin_bottom(24)
     outer.set_margin_start(16); outer.set_margin_end(16)
 
-    warn_banner = Adw.Banner()
-    warn_banner.set_title(tr(
-        "These run real pacman/pacman-key commands with sudo — read what each "
-        "one does before running it, especially the last one."))
-    warn_banner.set_revealed(True)
-    outer.append(warn_banner)
-
     def _row(title, subtitle, button_label, cmd, suggested=True, on_success=None,
              on_success_with_window=None):
         row = Adw.ActionRow()
-        # set_title/set_subtitle parse their text as Pango markup, so a
-        # literal "&" in e.g. "Update & Upgrade" would otherwise crash
-        # ("Failed to set text ... from markup") — escape both first.
+        # set_title parses its text as Pango markup, so a literal "&" in
+        # e.g. "Update & Upgrade" would otherwise crash ("Failed to set
+        # text ... from markup") — escape it first. set_tooltip_text()
+        # below takes plain text, no markup/escaping involved.
         row.set_title(GLib.markup_escape_text(title))
-        row.set_subtitle(GLib.markup_escape_text(subtitle))
-        row.set_subtitle_lines(0)
+        row.set_tooltip_text(subtitle)
         btn = Gtk.Button(label=button_label)
         if suggested:
             btn.add_css_class("suggested-action")
         btn.set_valign(Gtk.Align.CENTER)
 
         def _run(*_):
-            dialog.close()
+            # Keep the repair dialog open behind the terminal window
+            # instead of closing it, so you can run several steps in a
+            # row without reopening the menu each time. Explicitly pass
+            # parent=dialog (instead of letting it default to the main
+            # window) so the terminal window stacks on top of this
+            # still-open dialog rather than the main window behind it —
+            # see the parent= comment on pachulWindow._run_terminal for
+            # why getting this wrong causes a GTK snapshot warning.
             run_terminal_fn(cmd, title, on_success=on_success,
-                             on_success_with_window=on_success_with_window)
+                             on_success_with_window=on_success_with_window,
+                             parent=dialog)
         btn.connect("clicked", _run)
         row.add_suffix(btn)
         return row
@@ -1635,27 +1690,44 @@ def show_pacman_repair_dialog(parent, run_terminal_fn, aur_helper=None):
 
     steps_group.add(_row(
         tr("Force-Refresh & Full Upgrade"),
-        tr("Runs 'pacman -Syyu' — forces a fresh download of all repo "
-           "databases (ignoring their last-sync timestamps) before "
-           "upgrading, useful when a mirror served stale or corrupt data."),
+        tr("Runs 'pacman -Syyu' with root privileges (via pkexec). Normally pacman only re-downloads "
+           "a repo's database if its timestamp changed; this ignores that "
+           "and forces a fresh download of ALL repo databases before "
+           "upgrading every installed package. Use this when a mirror "
+           "served you a stale or corrupted database — typical symptoms "
+           "are pacman reporting packages as up to date that you know "
+           "aren't, or checksum/signature errors that don't go away with a "
+           "normal update. Takes longer than a regular sync since nothing "
+           "is skipped, but makes no changes beyond what -Syu itself would "
+           "install anyway."),
         tr("Run"),
-        "sudo -S pacman -Syyu --noconfirm",
+        "pkexec /usr/bin/pacman -Syyu --noconfirm",
     ))
     steps_group.add(_row(
         tr("Check Package Database Consistency"),
-        tr("Runs 'pacman -Dk' to check the local package database itself "
-           "for internal inconsistencies (separate from checking individual "
-           "installed files)."),
+        tr("Runs 'pacman -Dk', a fast, read-only check. It only looks at "
+           "pacman's own local database — the dependency graph and package "
+           "metadata under /var/lib/pacman — for internal problems like "
+           "orphaned or duplicate entries. It does NOT look at the actual "
+           "installed files on disk (for that, see 'Search for Packages "
+           "With Missing/Modified Files' below); the two checks are "
+           "independent and catch different kinds of corruption."),
         tr("Run"),
         "pacman -Dk",
     ))
     steps_group.add(_row(
         tr("Reinitialize Keyring"),
-        tr("Runs 'pacman-key --init' and '--populate archlinux' — a deeper "
-           "fix than the automatic keyring banner elsewhere, for when "
-           "signature errors persist after that lighter fix."),
+        tr("Runs 'pacman-key --init' followed by 'pacman-key --populate "
+           "archlinux' with root privileges (via pkexec). This resets and rebuilds pacman's GPG "
+           "trust database from scratch and repopulates it with the "
+           "official Arch Linux master keys. Use it when package signature "
+           "verification keeps failing even after the lighter, automatic "
+           "keyring-fix banner shown elsewhere in the app — that banner "
+           "only imports one specific missing key, while this rebuilds the "
+           "whole keyring. It talks to a keyserver over the network, so it "
+           "can take a little while and will fail if you're offline."),
         tr("Run"),
-        "sudo -S pacman-key --init && sudo -S pacman-key --populate archlinux",
+        "pkexec /usr/bin/bash -c " + shlex.quote("pacman-key --init && pacman-key --populate archlinux"),
     ))
     outer.append(steps_group)
 
@@ -1844,9 +1916,9 @@ def show_pacman_repair_dialog(parent, run_terminal_fn, aur_helper=None):
             # Same AUR-helper routing as repair_cmd above — otherwise any
             # AUR-installed package in the selection just fails silently.
             if aur_helper:
-                cmd = f"{aur_helper} -S --noconfirm {quoted}"
+                cmd = aur_helper_install_cmd(aur_helper, quoted)
             else:
-                cmd = f"sudo -S pacman -S --noconfirm {quoted}"
+                cmd = f"pkexec /usr/bin/pacman -S --noconfirm {quoted}"
 
             def _reopen_remaining():
                 if remaining:
@@ -1870,9 +1942,18 @@ def show_pacman_repair_dialog(parent, run_terminal_fn, aur_helper=None):
 
     diag_group.add(_row(
         tr("Search for Packages With Missing/Modified Files"),
-        tr("Runs 'pacman -Qkk' with sudo (read-only, no changes are made). "
-           "If any packages come back altered, you'll be asked right away "
-           "which ones to repair."),
+        tr("Runs 'pacman -Qkk' with root privileges (via pkexec) — read-only, "
+           "no changes are made. Unlike 'Check Package Database Consistency' "
+           "above, this actually hashes every file every installed package "
+           "owns and compares it against what the package claims it should "
+           "be, so it also catches files that were deleted, changed, or "
+           "have the wrong permissions/ownership. On a full system this can "
+           "take a couple of minutes. It's normal to see a few 'altered' "
+           "hits for config files under /etc you've deliberately edited "
+           "yourself — those aren't corruption, and reinstalling can't fix "
+           "them since pacman never overwrites a modified config file. If "
+           "any packages come back altered, you'll be asked right away "
+           "which ones to repair by reinstalling."),
         tr("Run"),
         # stdbuf forces line-buffered output on BOTH streams even though
         # they're going to a file, not a terminal. Without it, libc
@@ -1884,7 +1965,7 @@ def show_pacman_repair_dialog(parent, run_terminal_fn, aur_helper=None):
         # exactly the kind of corruption that made this parser miss (or
         # misattribute) a chunk of the packages it should have caught.
         #
-        # sudo matters just as much: plenty of package-owned files
+        # Root matters just as much: plenty of package-owned files
         # (/etc/shadow, SSL private keys, sudoers, cups/pcp/webmin config,
         # nwfilter templates, ...) are only readable by root. Run as a
         # normal user, pacman can't even open them to hash them and
@@ -1893,22 +1974,20 @@ def show_pacman_repair_dialog(parent, run_terminal_fn, aur_helper=None):
         # wasn't allowed to check." No amount of reinstalling ever clears
         # that specific warning; only checking as root does.
         #
-        # Authenticate with a throwaway `sudo -S true` FIRST, completely
-        # unredirected, so its "[sudo] password for ...:" prompt lands
-        # straight on the visible terminal right away. The actual scan
-        # runs as a separate `sudo -S` call afterwards — by then sudo's
-        # credential cache is warm, so it proceeds without prompting
-        # again, and its own output (not a hidden password prompt) is all
-        # that ends up in the redirected file. Without this split, the
-        # scan's ">file 2>&1" was also swallowing sudo's own -S prompt
-        # (which sudo -S writes to stderr) into the file instead of
-        # showing it, leaving the terminal looking stuck with nowhere to
-        # type the password until something else eventually flushed it.
-        "sudo -S true && { "
-        "LC_ALL=C sudo pacman -Qk > " + _QKK_RAW_FILE + " 2>&1; "
+        # No throwaway pre-auth call needed here (that used to warm sudo's
+        # credential cache before the real, redirected call, so sudo's own
+        # "[sudo] password for ...:" prompt on stderr wouldn't get silently
+        # swallowed by ">file 2>&1"). pkexec's authentication happens in a
+        # separate native Polkit window, entirely outside this command's
+        # own stdout/stderr, so nothing here can accidentally capture it —
+        # one plain call is enough. `env LC_ALL=C` (rather than a bare
+        # `LC_ALL=C` prefix, which sudo/pkexec don't reliably pass through
+        # to the target process) keeps pacman's output in English so the
+        # parser below matches reliably regardless of the system locale.
+        "pkexec /usr/bin/env LC_ALL=C pacman -Qk > " + _QKK_RAW_FILE + " 2>&1; "
         "OUT=$(grep -v '0 altered files' " + _QKK_RAW_FILE + "); "
         "if [ -n \"$OUT\" ]; then printf '%s\\n' \"$OUT\"; "
-        "else echo " + shlex.quote(tr("No broken/incomplete packages found.")) + "; fi; }",
+        "else echo " + shlex.quote(tr("No broken/incomplete packages found.")) + "; fi",
         on_success_with_window=_offer_repair_now,
     ))
     outer.append(diag_group)
@@ -1917,12 +1996,18 @@ def show_pacman_repair_dialog(parent, run_terminal_fn, aur_helper=None):
     danger_group.set_title(tr("Last Resort"))
     danger_row = Adw.ActionRow()
     danger_row.set_title(tr("Force-Remove Broken Package"))
-    danger_row.set_subtitle(tr(
-        "Last resort for a single package pacman refuses to touch normally "
-        "— removes it while ignoring dependency checks entirely. Only use "
-        "this if the steps above didn't help, and only on the one package "
-        "causing the problem."))
-    danger_row.set_subtitle_lines(0)
+    danger_row.set_tooltip_text(tr(
+        "Runs 'pacman -Rdd' with root privileges (via pkexec) on the single package name you type "
+        "in. -Rdd removes it while skipping BOTH dependency checks that "
+        "pacman normally does: it won't stop you even if other installed "
+        "packages still depend on this one, and it won't try to remove "
+        "anything that depends on it either — it only ever touches the one "
+        "package you named. This is a genuine last resort for a package "
+        "pacman refuses to touch any other way (e.g. it's stuck "
+        "half-installed and blocking every other operation); it can leave "
+        "dependents broken, so only use it on the one package actually "
+        "causing the problem, after the steps above didn't help, and "
+        "reinstall it (or whatever needed it) afterwards if you can."))
 
     pkg_entry = Gtk.Entry()
     pkg_entry.set_placeholder_text(tr("Package name"))
@@ -1940,10 +2025,10 @@ def show_pacman_repair_dialog(parent, run_terminal_fn, aur_helper=None):
         pkg_name = pkg_entry.get_text().strip()
         if not pkg_name:
             return
-        dialog.close()
         run_terminal_fn(
-            f"sudo -S pacman -Rdd --noconfirm {shlex.quote(pkg_name)}",
-            tr("Force-Remove Broken Package") + f" ({pkg_name})")
+            f"pkexec /usr/bin/pacman -Rdd --noconfirm {shlex.quote(pkg_name)}",
+            tr("Force-Remove Broken Package") + f" ({pkg_name})",
+            parent=dialog)
     force_btn.connect("clicked", _do_force_remove)
     danger_row.add_suffix(force_btn)
     danger_group.add(danger_row)
@@ -2003,20 +2088,27 @@ def show_cert_checker_dialog(parent, run_terminal_fn):
     ca_cmd = pkgmanager.ca_certificates_refresh_cmd()
     ca_row = Adw.ActionRow()
     ca_row.set_title(GLib.markup_escape_text(tr("Reinstall CA Certificates & Rebuild Trust Store")))
-    ca_row.set_subtitle(GLib.markup_escape_text(tr(
-        "Reinstalls the ca-certificates package and regenerates the "
-        "system's trust store. Useful if HTTPS connections fail with "
-        "certificate-verification errors that aren't the remote site's "
-        "fault.")))
-    ca_row.set_subtitle_lines(0)
+    ca_row.set_tooltip_text(tr(
+        "Reinstalls the ca-certificates package (the bundle of root "
+        "certificates your system trusts by default) and regenerates the "
+        "system's trust store from it. Use this when HTTPS connections "
+        "fail with certificate-verification errors across multiple, "
+        "otherwise-unrelated sites at once — that pattern points at a "
+        "damaged or outdated local trust store rather than a problem "
+        "with any one remote site. Safe to run any time: it only "
+        "reinstalls the package and rebuilds the store, it doesn't "
+        "remove or add any certificate you didn't already have."))
     if ca_cmd:
         ca_btn = Gtk.Button(label=tr("Run"))
         ca_btn.add_css_class("suggested-action")
         ca_btn.set_valign(Gtk.Align.CENTER)
 
         def _do_ca_refresh(*_):
-            dialog.close()
-            run_terminal_fn(ca_cmd, tr("Reinstall CA Certificates & Rebuild Trust Store"))
+            # Stay open — parent=dialog so the terminal stacks correctly
+            # on top of it instead of the main window (see the parent=
+            # comment on pachulWindow._run_terminal).
+            run_terminal_fn(ca_cmd, tr("Reinstall CA Certificates & Rebuild Trust Store"),
+                             parent=dialog)
         ca_btn.connect("clicked", _do_ca_refresh)
         ca_row.add_suffix(ca_btn)
     ca_group.add(ca_row)
@@ -2030,7 +2122,14 @@ def show_cert_checker_dialog(parent, run_terminal_fn):
         "certificate expires — nothing is changed, purely informational."))
     domain_row = Adw.ActionRow()
     domain_row.set_title(GLib.markup_escape_text(tr("Domains")))
-    domain_row.set_subtitle(GLib.markup_escape_text(tr("Comma-separated, e.g. example.com, mail.example.com")))
+    domain_row.set_tooltip_text(tr(
+        "Opens a real TLS connection to each domain on port 443 and reads "
+        "back the certificate it presents, then reports how many days "
+        "remain until it expires (or how many days ago it already did). "
+        "Comma-separated, e.g. example.com, mail.example.com — each "
+        "domain needs to actually be reachable over the network right "
+        "now, since this isn't a local file check like the one below, "
+        "it's a live connection."))
     domain_entry = Gtk.Entry()
     domain_entry.set_placeholder_text(tr("Domains to check"))
     domain_entry.set_valign(Gtk.Align.CENTER)
@@ -2073,8 +2172,7 @@ def show_cert_checker_dialog(parent, run_terminal_fn):
             'done'
         )
         cmd = f"DOMAINS={shlex.quote(domains)} bash -c {shlex.quote(script)}"
-        dialog.close()
-        run_terminal_fn(cmd, tr("Domain Certificate Expiry"))
+        run_terminal_fn(cmd, tr("Domain Certificate Expiry"), parent=dialog)
     domain_btn.connect("clicked", _do_domain_check)
     domain_row.add_suffix(domain_btn)
     domain_group.add(domain_row)
@@ -2085,10 +2183,16 @@ def show_cert_checker_dialog(parent, run_terminal_fn):
     local_group.set_title(tr("Local Certificates"))
     local_row = Adw.ActionRow()
     local_row.set_title(GLib.markup_escape_text(tr("Show Expired Local Certificates")))
-    local_row.set_subtitle(GLib.markup_escape_text(tr(
-        "Read-only: scans /etc/ssl/certs for .pem certificates that have "
-        "already expired.")))
-    local_row.set_subtitle_lines(0)
+    local_row.set_tooltip_text(tr(
+        "Read-only: scans every .pem file under /etc/ssl/certs and checks "
+        "its expiry date, without opening any network connection. This "
+        "covers only that one system-wide certificate directory — not "
+        "your browser's own certificate store, not a login keychain, and "
+        "not certificates presented by remote servers (use the Domain "
+        "check above for those). An expired entry here doesn't "
+        "necessarily break anything today, since most software only "
+        "cares about a certificate's validity at the moment it's "
+        "actually used, but it's worth knowing about and cleaning up."))
     local_btn = Gtk.Button(label=tr("Show"))
     local_btn.set_valign(Gtk.Align.CENTER)
 
@@ -2103,8 +2207,8 @@ def show_cert_checker_dialog(parent, run_terminal_fn):
             'done < <(find /etc/ssl/certs/ -name "*.pem" -print0 2>/dev/null); '
             'if [ "$ABGELAUFEN" -eq 0 ]; then echo "' + tr("All local certificates are valid.") + '"; fi'
         )
-        dialog.close()
-        run_terminal_fn(f"bash -c {shlex.quote(script)}", tr("Show Expired Local Certificates"))
+        run_terminal_fn(f"bash -c {shlex.quote(script)}", tr("Show Expired Local Certificates"),
+                         parent=dialog)
     local_btn.connect("clicked", _do_local_check)
     local_row.add_suffix(local_btn)
     local_group.add(local_row)
@@ -2206,38 +2310,44 @@ def show_broken_symlinks_dialog(parent, run_terminal_fn):
 
     scan_row = Adw.ActionRow()
     scan_row.set_title(GLib.markup_escape_text(tr("Scan Only")))
-    scan_row.set_subtitle(GLib.markup_escape_text(tr(
-        "Read-only: lists and classifies broken symlinks without deleting "
-        "anything. No sudo needed.")))
-    scan_row.set_subtitle_lines(0)
+    scan_row.set_tooltip_text(tr(
+        "Read-only: searches /usr and /etc for symlinks whose target no "
+        "longer exists, then sorts every one it finds into one of three "
+        "groups for the report — license-file leftovers (safe), "
+        "Arch/Manjaro archiso build templates (safe but distro-specific, "
+        "expected to exist there), and everything else (needs manual "
+        "review). Nothing is ever deleted by this button, and since it "
+        "only reads the filesystem, no elevated privileges are needed."))
     scan_btn = Gtk.Button(label=tr("Scan"))
     scan_btn.set_valign(Gtk.Align.CENTER)
 
     def _do_scan(*_):
-        dialog.close()
         run_terminal_fn(
             f"DO_DELETE=0 bash -c {shlex.quote(_classify_core)}",
-            tr("Scan Only"))
+            tr("Scan Only"), parent=dialog)
     scan_btn.connect("clicked", _do_scan)
     scan_row.add_suffix(scan_btn)
     action_group.add(scan_row)
 
     clean_row = Adw.ActionRow()
     clean_row.set_title(GLib.markup_escape_text(tr("Scan & Remove Safe Ones")))
-    clean_row.set_subtitle(GLib.markup_escape_text(tr(
-        "Same scan, but also deletes the SAFE-category links (license "
-        "leftovers only — archiso templates and anything else are still "
-        "just listed, never touched). Needs sudo.")))
-    clean_row.set_subtitle_lines(0)
+    clean_row.set_tooltip_text(tr(
+        "Runs the same scan as above, but this time actually deletes the "
+        "links it classified as safe — license-file leftovers under "
+        "/usr/share/licenses only. The archiso-template group and "
+        "everything in the review group are still just listed, never "
+        "touched, no matter how many times you run this. Needs root "
+        "privileges (via pkexec) because /usr/share is owned by root, "
+        "so the deletion itself requires elevated permissions even "
+        "though scanning doesn't."))
     clean_btn2 = Gtk.Button(label=tr("Clean"))
     clean_btn2.add_css_class("suggested-action")
     clean_btn2.set_valign(Gtk.Align.CENTER)
 
     def _do_clean_symlinks(*_):
-        dialog.close()
         run_terminal_fn(
-            f"sudo -S env DO_DELETE=1 bash -c {shlex.quote(_classify_core)}",
-            tr("Scan & Remove Safe Ones"))
+            f"pkexec /usr/bin/env DO_DELETE=1 bash -c {shlex.quote(_classify_core)}",
+            tr("Scan & Remove Safe Ones"), parent=dialog)
     clean_btn2.connect("clicked", _do_clean_symlinks)
     clean_row.add_suffix(clean_btn2)
     action_group.add(clean_row)
@@ -2362,19 +2472,30 @@ def show_services_security_dialog(parent, run_terminal_fn):
         _, active_code = run_command("systemctl is-active --quiet ufw 2>/dev/null")
         ufw_active = (active_code == 0)
 
-    ufw_enable_cmd = (
-        "sudo -S ufw default deny incoming && sudo -S ufw default allow outgoing && "
+    # openSUSE's ufw package doesn't pull in iptables as a dependency
+    # (openSUSE bug 964649) — without it every ufw command fails with
+    # "ERROR: Couldn't determine iptables version", including on systems
+    # where ufw was already installed before this check was added. Make
+    # sure it's present before every enable, not just on a fresh install.
+    _suse_iptables_guard = (
+        "which iptables >/dev/null 2>&1 || "
+        "zypper --non-interactive install iptables; "
+    ) if pkgmanager.get_family() == "suse" else ""
+    _ufw_enable_inner = (
+        _suse_iptables_guard +
+        "ufw default deny incoming && ufw default allow outgoing && "
         '(systemctl is-active --quiet sshd 2>/dev/null || systemctl is-active --quiet ssh 2>/dev/null) '
-        "&& sudo -S ufw limit ssh; "
-        "sudo -S ufw --force enable && sudo -S systemctl enable --now ufw && "
-        "sudo -S ufw status verbose"
+        "&& ufw limit ssh; "
+        "ufw --force enable && systemctl enable --now ufw && "
+        "ufw status verbose"
     )
+    ufw_enable_cmd = "pkexec /usr/bin/bash -c " + shlex.quote(_ufw_enable_inner)
     if ufw_active:
         ufw_group.add(_row(
             tr("Show Firewall Rules"),
             tr("UFW is active. Read-only: shows the current rule set."),
             tr("Show"),
-            "sudo -S ufw status verbose",
+            "pkexec /usr/bin/ufw status verbose",
         ))
     elif ufw_installed:
         ufw_group.add(_row(
@@ -2388,14 +2509,25 @@ def show_services_security_dialog(parent, run_terminal_fn):
             suggested=True,
         ))
     else:
-        ufw_install_cmd_by_family = {
-            "arch":   "sudo -S pacman -S --noconfirm ufw",
-            "debian": "sudo -S apt-get install -y ufw",
-            "fedora": "sudo -S dnf install -y ufw",
-            "suse":   "sudo -S zypper --non-interactive install ufw",
+        # Raw (un-prefixed) per-family install commands — combined with
+        # the raw enable script below into a single pkexec call, rather
+        # than chaining "pkexec install ... && pkexec bash -c 'enable...'"
+        # (two separate authentications for what's really one operation
+        # from the person's point of view).
+        ufw_install_by_family = {
+            "arch":   "pacman -S --noconfirm ufw",
+            "debian": "apt-get install -y ufw",
+            "fedora": "dnf install -y ufw",
+            # openSUSE's ufw package, unlike the other 3 families, does
+            # NOT pull in iptables as a dependency (openSUSE bug 964649).
+            # Without it ufw can't determine the iptables version and
+            # every ufw command — including "enable" — fails with
+            # "ERROR: Couldn't determine iptables version". Installing
+            # it alongside ufw here closes that gap.
+            "suse":   "zypper --non-interactive install ufw iptables",
         }
-        install_cmd = ufw_install_cmd_by_family.get(pkgmanager.get_family())
-        if install_cmd:
+        install_raw = ufw_install_by_family.get(pkgmanager.get_family())
+        if install_raw:
             ufw_group.add(_row(
                 tr("Install & Enable Firewall"),
                 tr("UFW isn't installed — your system currently has no "
@@ -2403,7 +2535,7 @@ def show_services_security_dialog(parent, run_terminal_fn):
                    "default rules (deny incoming, allow outgoing) and "
                    "rate-limited SSH if sshd is running."),
                 tr("Install & Enable"),
-                f"{install_cmd} && {ufw_enable_cmd}",
+                "pkexec /usr/bin/bash -c " + shlex.quote(install_raw + " && " + _ufw_enable_inner),
                 suggested=True,
             ))
     outer.append(ufw_group)
@@ -2476,7 +2608,7 @@ def show_config_backup_dialog(parent, run_terminal_fn):
         "config, …) plus a plain-text list of explicitly-installed "
         "packages, so a fresh install can be brought back to a similar "
         "state. Only the last 5 archives are kept; older ones are removed "
-        "automatically. No sudo needed — these files are normally "
+        "automatically. No elevated privileges needed — these files are normally "
         "world-readable."))
     outer.append(info_group)
 
@@ -2738,17 +2870,24 @@ def show_mirror_rater(parent, run_terminal_fn):
 
             def _save(*_):
                 result_dialog.close()
+                # A single pkexec call wrapping both steps in one bash -c,
+                # rather than the old "sudo -S -v" credential-warming trick
+                # (which existed only to stop sudo from re-prompting between
+                # two separate `sudo mv` / `sudo install` calls) — pkexec has
+                # no local credential cache to warm, so one call sharing one
+                # Polkit authentication is the equivalent here.
                 if backup:
+                    inner = (
+                        "mv /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist-backup && "
+                        f"install -m644 {shlex.quote(tmp_path)} /etc/pacman.d/mirrorlist"
+                    )
                     cmd2 = (
-                        "sudo -S -v && "
-                        "sudo mv /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist-backup && "
-                        f"sudo install -m644 {shlex.quote(tmp_path)} /etc/pacman.d/mirrorlist && "
+                        "pkexec /usr/bin/bash -c " + shlex.quote(inner) + " && "
                         f'echo "{tr("Done — backup saved to /etc/pacman.d/mirrorlist-backup")}"'
                     )
                 else:
                     cmd2 = (
-                        "sudo -S -v && "
-                        f"sudo install -m644 {shlex.quote(tmp_path)} /etc/pacman.d/mirrorlist && "
+                        f"pkexec /usr/bin/install -m644 {shlex.quote(tmp_path)} /etc/pacman.d/mirrorlist && "
                         f'echo "{tr("Done — /etc/pacman.d/mirrorlist updated")}"'
                     )
 
@@ -2816,7 +2955,7 @@ def show_mirror_rater(parent, run_terminal_fn):
                 gflags.append(f"--entry-country={shlex.quote(first)}")
             sflags = [f"--sort-mirrors-by={sort_key}", f"--max-delay={max_delay}"]
             preview_lbl.set_label(
-                f"rate-mirrors {' '.join(gflags)} arch {' '.join(sflags)} | sudo tee /etc/pacman.d/mirrorlist"
+                f"rate-mirrors {' '.join(gflags)} arch {' '.join(sflags)} | pkexec /usr/bin/tee /etc/pacman.d/mirrorlist"
             )
 
         country_entry.connect("changed", update_preview)
@@ -2840,7 +2979,7 @@ def show_mirror_rater(parent, run_terminal_fn):
         install_btn.set_halign(Gtk.Align.CENTER)
         install_btn.connect("clicked", lambda *_: (
             dialog.close(),
-            run_terminal_fn("sudo -S pacman -S --noconfirm rate-mirrors", tr("Install rate-mirrors"))
+            run_terminal_fn("pkexec /usr/bin/pacman -S --noconfirm rate-mirrors", tr("Install rate-mirrors"))
         ))
         status.set_child(install_btn)
         outer.append(status)
@@ -2915,13 +3054,21 @@ def show_orphan_finder(parent, run_terminal_fn):
             rm_btn.add_css_class("destructive-action"); rm_btn.add_css_class("flat")
             rm_btn.set_valign(Gtk.Align.CENTER)
             name = o["name"]
-            rm_btn.connect("clicked", lambda *_, n=name: (
-                dialog.close(),
+
+            def _do_remove_one(*_, n=name, r=row):
+                # Keep the dialog open so several orphans can be removed
+                # one after another without reopening it — just drop this
+                # one row from the list once its removal actually
+                # succeeds, instead of leaving a stale "removed" entry
+                # sitting there.
+                def _on_ok():
+                    listbox.remove(r)
                 run_terminal_fn(
-                    f"sudo -S pacman -R --noconfirm {shlex.quote(n)}" if distro.is_arch()
+                    f"pkexec /usr/bin/pacman -R --noconfirm {shlex.quote(n)}" if distro.is_arch()
                     else pkgmanager.remove_cmd([n]),
-                    tr("Remove {name} ").format(name=n))
-            ))
+                    tr("Remove {name} ").format(name=n),
+                    on_success=_on_ok, parent=dialog)
+            rm_btn.connect("clicked", _do_remove_one)
             row.add_suffix(rm_btn)
             listbox.append(row)
 
@@ -2938,7 +3085,7 @@ def show_orphan_finder(parent, run_terminal_fn):
         remove_all_btn.connect("clicked", lambda *_: (
             dialog.close(),
             run_terminal_fn(
-                f"sudo -S pacman -Rns --noconfirm {names}" if distro.is_arch()
+                f"pkexec /usr/bin/pacman -Rns --noconfirm {names}" if distro.is_arch()
                 else pkgmanager.remove_cmd(name_list, purge=distro.is_debian()),
                 tr("Remove All Orphans"))
         ))
@@ -3025,11 +3172,16 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
     clean_btn.set_halign(Gtk.Align.CENTER)
 
     def _do_clean(*_):
-        dialog.close()
         if distro.is_arch():
-            cmd = "sudo -S -v && { paccache -rk2 2>/dev/null || sudo pacman -Sc --noconfirm; }"
+            cmd = "{ paccache -rk2 2>/dev/null || pkexec /usr/bin/pacman -Sc --noconfirm; }"
         else:
             cmd = pkgmanager.clean_cache_cmd() or "true"
+        # Not parent=dialog here: this dialog is an Adw.Dialog (a sheet
+        # presented over the main window), not a real Gtk.Window, so it
+        # can't be passed to set_transient_for() — unlike the Adw.Window
+        # dialogs elsewhere in this file. Since it isn't a separate
+        # top-level window, there's also no stacking-order warning risk
+        # to guard against here; the default parent is fine.
         run_terminal_fn(cmd, tr("Clean Cache"))
 
     clean_btn.connect("clicked", _do_clean)
@@ -3048,15 +3200,15 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
     def _sys_row(title, subtitle, button_label, cmd, cmd_title, suggested=False):
         row = Adw.ActionRow()
         row.set_title(GLib.markup_escape_text(title))
-        row.set_subtitle(GLib.markup_escape_text(subtitle))
-        row.set_subtitle_lines(0)
+        row.set_tooltip_text(subtitle)
         btn = Gtk.Button(label=button_label)
         if suggested:
             btn.add_css_class("suggested-action")
         btn.set_valign(Gtk.Align.CENTER)
 
         def _run(*_):
-            dialog.close()
+            # Same Adw.Dialog caveat as _do_clean above: no parent=dialog
+            # here, this isn't a real Gtk.Window.
             run_terminal_fn(cmd, cmd_title)
         btn.connect("clicked", _run)
         row.add_suffix(btn)
@@ -3064,15 +3216,34 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
 
     sys_group.add(_sys_row(
         tr("Clean systemd Journal"),
-        tr("Shrinks the journal to 500 MB and removes entries older than 4 weeks."),
+        tr("Runs 'journalctl --vacuum-size=500M' followed by "
+           "'--vacuum-time=4weeks'. This only vacuums (rotates out and "
+           "discards) old log entries — it shrinks the journal down to "
+           "500 MB total and additionally removes anything older than 4 "
+           "weeks, whichever removes more; it never touches today's live, "
+           "currently-being-written log. Needs root privileges (via pkexec) since the journal "
+           "under /var/log/journal is root-owned. Worth running if disk "
+           "space is tight and 'journalctl --disk-usage' shows the "
+           "journal has grown large — otherwise there's no real downside "
+           "to leaving it, you just lose the ability to look further "
+           "back in the logs."),
         tr("Run"),
-        "sudo -S journalctl --vacuum-size=500M && sudo -S journalctl --vacuum-time=4weeks",
+        "pkexec /usr/bin/bash -c " + shlex.quote(
+            "journalctl --vacuum-size=500M && journalctl --vacuum-time=4weeks"),
         tr("Clean systemd Journal"),
     ))
     sys_group.add(_sys_row(
         tr("Remove Old Thumbnail Previews"),
-        tr("Deletes cached thumbnail images in ~/.cache/thumbnails older than "
-           "30 days. No sudo needed — this only touches your own cache."),
+        tr("Deletes cached preview images under ~/.cache/thumbnails that "
+           "haven't been accessed in the last 30 days — the small "
+           "generated thumbnails your file manager shows for images, "
+           "videos, and documents, not the original files themselves. "
+           "Nothing here is unique data: any thumbnail your file manager "
+           "still needs gets silently regenerated the next time you "
+           "browse to that folder, so this is purely reclaiming disk "
+           "space with no real downside beyond a brief re-generation "
+           "delay next time. No elevated privileges needed — this only touches your own "
+           "user cache, never system files."),
         tr("Run"),
         'bash -c \'if [ -d "$HOME/.cache/thumbnails" ]; then '
         'find "$HOME/.cache/thumbnails" -type f -atime +30 -delete && '
@@ -3082,8 +3253,15 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
     ))
     sys_group.add(_sys_row(
         tr("Empty Trash"),
-        tr("Permanently empties your desktop trash/recycle bin (via 'gio "
-           "trash --empty'). No sudo needed."),
+        tr("Permanently empties your desktop trash/recycle bin via 'gio "
+           "trash --empty', following the same XDG trash location "
+           "(usually ~/.local/share/Trash) your file manager already "
+           "uses — so anything you see in the Trash there is exactly "
+           "what this removes. Unlike a normal delete, this step is NOT "
+           "recoverable through the trash/recycle-bin UI afterwards; "
+           "files not already in the trash are completely unaffected. No "
+           "root privileges needed, since it only ever touches your own account's "
+           "trash."),
         tr("Run"),
         'bash -c \'if command -v gio >/dev/null 2>&1; then gio trash --empty && '
         'echo "' + tr("Done.") + '"; else echo "' +
@@ -3216,10 +3394,10 @@ def show_import_pkgs_dialog(parent, names, helper, run_terminal_fn):
         dialog.close()
         if helper:
             quoted = " ".join(shlex.quote(n) for n in names)
-            cmd = f"{helper} -S --needed --noconfirm {quoted}"
+            cmd = aur_helper_install_cmd(helper, quoted, needed=True)
         elif distro.is_arch():
             quoted = " ".join(shlex.quote(n) for n in names)
-            cmd = f"sudo -S pacman -S --needed --noconfirm {quoted}"
+            cmd = f"pkexec /usr/bin/pacman -S --needed --noconfirm {quoted}"
         else:
             cmd = pkgmanager.install_cmd(names)
         run_terminal_fn(cmd, tr("Install {n} packages").format(n=len(names)))
@@ -3389,7 +3567,7 @@ def show_file_search_dialog(parent, run_terminal_fn):
                 inst_btn.connect("clicked", lambda *_, n=name: (
                     dialog.close(),
                     run_terminal_fn(
-                        f"sudo -S pacman -S --noconfirm {shlex.quote(n)}" if distro.is_arch()
+                        f"pkexec /usr/bin/pacman -S --noconfirm {shlex.quote(n)}" if distro.is_arch()
                         else pkgmanager.install_cmd([n]),
                         tr("Install {name}").format(name=n))
                 ))
@@ -3410,7 +3588,7 @@ def show_file_search_dialog(parent, run_terminal_fn):
 
     def do_sync(*_):
         sync_banner.set_revealed(False)
-        cmd = "sudo -S pacman -Fy --noconfirm" if distro.is_arch() else pkgmanager.sync_files_db_cmd()
+        cmd = "pkexec /usr/bin/pacman -Fy --noconfirm" if distro.is_arch() else pkgmanager.sync_files_db_cmd()
         if cmd:
             run_terminal_fn(cmd, tr("Sync File Database"))
     sync_banner.connect("button-clicked", do_sync)
@@ -4218,15 +4396,25 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
             btn_row.set_margin_top(6);    btn_row.set_margin_bottom(8)
             apply_btn = Gtk.Button(label=tr("Use New (overwrite)"))
             apply_btn.add_css_class("suggested-action")
-            apply_btn.connect("clicked", lambda *_, n=new, o=orig: (
-                dialog.close(),
-                run_terminal_fn(f"sudo -S mv {shlex.quote(n)} {shlex.quote(o)}",
-                                tr("Apply {name}").format(name=n))))
+
+            def _do_apply(*_, n=new, o=orig, e=exp):
+                # Keep the dialog open so several files can be reviewed
+                # and resolved one after another; just drop this file's
+                # row once the move actually succeeds.
+                run_terminal_fn(f"pkexec /usr/bin/mv {shlex.quote(n)} {shlex.quote(o)}",
+                                 tr("Apply {name}").format(name=n),
+                                 on_success=lambda e=e: group.remove(e),
+                                 parent=dialog)
+            apply_btn.connect("clicked", _do_apply)
+
             discard_btn = Gtk.Button(label=tr("Discard"))
             discard_btn.add_css_class("destructive-action"); discard_btn.add_css_class("flat")
-            discard_btn.connect("clicked", lambda *_, n=new: (
-                dialog.close(),
-                run_terminal_fn(f"sudo -S rm {shlex.quote(n)}", tr("Remove {name} ").format(name=n))))
+
+            def _do_discard(*_, n=new, e=exp):
+                run_terminal_fn(f"pkexec /usr/bin/rm {shlex.quote(n)}", tr("Remove {name} ").format(name=n),
+                                 on_success=lambda e=e: group.remove(e),
+                                 parent=dialog)
+            discard_btn.connect("clicked", _do_discard)
             btn_row.append(discard_btn)
             btn_row.append(apply_btn)
             wrap_row = Gtk.ListBoxRow(); wrap_row.set_activatable(False)
@@ -4621,12 +4809,12 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
     aur_group = Adw.PreferencesGroup()
     aur_group.set_title("AUR")
 
-    helper_opts = ["auto", "yay", "paru", "pikaur", "none"]
+    helper_opts = ["auto", "pachuli", "yay", "paru", "pikaur", "none"]
     helper_row = Adw.ComboRow()
     helper_row.set_title(tr("AUR Helper"))
     helper_row.set_subtitle(tr("Used for AUR installs, updates and PKGBUILDs"))
     helper_row.set_model(Gtk.StringList.new(
-        [tr("Auto-detect"), "yay", "paru", "pikaur", tr("None (pacman only)")]))
+        [tr("Auto-detect"), "pachuli", "yay", "paru", "pikaur", tr("None (pacman only)")]))
     cur = s.get("aur_helper", "auto")
     helper_row.set_selected(helper_opts.index(cur) if cur in helper_opts else 0)
     helper_row.connect("notify::selected", lambda r, _: (
@@ -4656,6 +4844,30 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
         paru_btn.connect("clicked", _on_install_paru)
         paru_row.add_suffix(paru_btn)
         aur_group.add(paru_row)
+
+    local_pachuli = local_pachuli_path(app_dir)
+    if local_pachuli and not pachuli_installed():
+        pachuli_row = Adw.ActionRow()
+        pachuli_row.set_title(tr("pachuli found but not installed"))
+        pachuli_row.set_subtitle(tr(
+            "A pachuli.py was found next to Pachul's own files but isn't "
+            "on your PATH yet, so it can't be used as the AUR helper. "
+            "Installs it as-is to /usr/local/bin — same place as the "
+            "pachul launcher itself — no build step, just the one-time "
+            "authentication any system-wide install needs."))
+        pachuli_btn = Gtk.Button(label=tr("Install pachuli"))
+        pachuli_btn.add_css_class("suggested-action")
+        pachuli_btn.set_valign(Gtk.Align.CENTER)
+
+        def _on_install_pachuli(btn):
+            if not run_terminal_fn:
+                return
+            btn.set_sensitive(False)
+            run_terminal_fn(get_pachuli_install_cmd(local_pachuli),
+                             tr("Install pachuli"), parent=dlg)
+        pachuli_btn.connect("clicked", _on_install_pachuli)
+        pachuli_row.add_suffix(pachuli_btn)
+        aur_group.add(pachuli_row)
 
     inc_row = Adw.SwitchRow()
     inc_row.set_title(tr("Include AUR in update checks"))

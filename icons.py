@@ -39,6 +39,57 @@ gi.require_version('GdkPixbuf', '2.0')
 from gi.repository import Gtk, Adw, Gdk, GdkPixbuf, GLib, Gio
 
 from functools import lru_cache
+from pathlib import Path
+
+# ─── Real per-program icons (installed packages, Flatpak) ─────────────────────
+# Everything above this point deliberately avoids the system icon theme (see
+# module docstring). These two helpers are the one place that's unavoidable:
+# an installed program's *own* icon is a third-party image we don't ship
+# ourselves, so it can only come from wherever that program's package put it
+# — either the system icon theme (repo/AUR packages, via their .desktop
+# file's Icon= key) or a locally cached download (Flatpak, see backend.py's
+# fetch_flatpak_icon()). Both fail silently (return None) on any problem, so
+# callers always have the existing symbolic icon as a safe fallback.
+
+FLATPAK_ICON_CACHE_DIR = Path.home() / ".cache" / "pachul" / "icons" / "flatpak"
+
+
+def resolve_desktop_icon_paintable(icon_value, size=22):
+    """Resolve a .desktop file's Icon= value (bare theme name or absolute
+    path) to a paintable via the real system icon theme. Returns None on
+    any failure — no active display, name not found, broken file, etc."""
+    if not icon_value:
+        return None
+    try:
+        if icon_value.startswith("/"):
+            if not Path(icon_value).is_file():
+                return None
+            return Gdk.Texture.new_from_file(Gio.File.new_for_path(icon_value))
+        display = Gdk.Display.get_default()
+        if display is None:
+            return None
+        theme = Gtk.IconTheme.get_for_display(display)
+        if not theme.has_icon(icon_value):
+            return None
+        return theme.lookup_icon(icon_value, None, size, 1,
+                                  Gtk.TextDirection.NONE, 0)
+    except Exception:
+        return None
+
+
+def get_flatpak_icon_paintable(app_id, size=22):
+    """Local-cache-only lookup for a Flatpak app's icon — never touches the
+    network, so it's safe to call from a list row's bind(). Returns None if
+    nothing has been downloaded yet; see backend.fetch_flatpak_icon()."""
+    if not app_id:
+        return None
+    p = FLATPAK_ICON_CACHE_DIR / f"{app_id}.png"
+    if not p.is_file():
+        return None
+    try:
+        return Gdk.Texture.new_from_file(Gio.File.new_for_path(str(p)))
+    except Exception:
+        return None
 
 # ─── Icon definitions ─────────────────────────────────────────────────────────
 

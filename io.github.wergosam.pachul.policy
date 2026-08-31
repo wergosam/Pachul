@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  Optional. Pachul's pkexec calls work perfectly well without this file —
+  when no matching action is registered, Polkit falls back to its own
+  built-in "org.freedesktop.policykit.pkexec.run-command" action, which
+  already sets <allow_active>auth_admin_keep</allow_active> (the "remember
+  for a few minutes" behaviour), so nothing here is required for Pachul to
+  function.
+
+  What this file buys you: instead of Polkit's generic fallback message —
+  which literally dumps the full command line being run, e.g. "Authen­tica­
+  tion is required to run »/usr/bin/bash -c { echo; echo === ClamAV ===;
+  echo; freshclam; } || true« as the super user" — the dialog shows a
+  short, friendly description. Polkit only does this for an action whose
+  <policykit.exec.path> annotation matches the *exact resolved binary path*
+  pkexec is asked to run, so this file registers one action per binary
+  Pachul commonly invokes via pkexec: pacman (Arch/Manjaro/EndeavourOS),
+  bash (every combined multi-step command — snapshot+upgrade, GPG/DB-lock
+  fixes, maintenance scripts, mirrorlist updates, …), apt-get (Debian/
+  Ubuntu), dnf (Fedora), zypper (openSUSE). Actions for binaries that don't
+  exist on a given distro simply never match — harmless to ship all five
+  in one file regardless of which distro it's installed on.
+
+  Trade-off worth knowing about: this trims transparency in exchange for a
+  cleaner dialog — a security-conscious person reading the raw fallback
+  message can see *exactly* what's about to run as root; the friendly
+  message here can't be that specific (Polkit actions have one static
+  <message>, not one per invocation), so it just says "package maintenance"
+  regardless of which particular command it actually is. Many polkit-
+  integrated package-manager GUIs make this same trade-off; it's a
+  judgement call, not a strictly-better default.
+
+  Rarer, non-combined pkexec calls to a binary not listed here (e.g. a
+  lone `pkexec freshclam` or `pkexec journalctl` with nothing else merged
+  into it — see PKEXEC_MIGRATION.md for when merging does vs. doesn't
+  happen) still fall back to Polkit's generic message.
+
+  Install (as root): copy to /usr/share/polkit-1/actions/
+    install -m644 io.github.wergosam.pachul.policy \
+      /usr/share/polkit-1/actions/io.github.wergosam.pachul.policy
+  No daemon restart is needed; polkitd picks up new action files
+  automatically. install.sh now does this step automatically (5b) if this
+  file is present next to it in the source checkout — delete the
+  installed copy afterwards (or drop that step from install.sh) if you'd
+  rather see Polkit's raw, more-transparent fallback message instead.
+-->
+<policyconfig>
+  <vendor>Pachul</vendor>
+  <vendor_url>https://github.com/wergosam/pachul</vendor_url>
+  <icon_name>io.github.wergosam.pachul</icon_name>
+
+  <action id="io.github.wergosam.pachul.run-pacman">
+    <description>Manage system packages with pacman</description>
+    <description xml:lang="de">Systempakete mit pacman verwalten</description>
+    <message>Authentication is required to manage packages with Pachul</message>
+    <message xml:lang="de">Authentifizierung erforderlich, um mit Pachul Pakete zu verwalten</message>
+    <icon_name>io.github.wergosam.pachul</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/pacman</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="io.github.wergosam.pachul.run-maintenance-script">
+    <!-- Covers every combined multi-step command Pachul runs via
+         `pkexec bash -c '...'` (snapshot+upgrade, GPG/DB-lock retries,
+         the Debian/Fedora/openSUSE maintenance dialogs, UFW setup,
+         mirrorlist updates, …) — deliberately worded generically since
+         one static message has to cover all of them. -->
+    <description>Run a Pachul system maintenance task</description>
+    <description xml:lang="de">Eine Pachul-Systemwartungsaufgabe ausführen</description>
+    <message>Authentication is required to run a system maintenance task with Pachul</message>
+    <message xml:lang="de">Authentifizierung erforderlich, um eine Systemwartungsaufgabe mit Pachul auszuführen</message>
+    <icon_name>io.github.wergosam.pachul</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/bash</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="io.github.wergosam.pachul.run-apt">
+    <description>Manage system packages with apt</description>
+    <description xml:lang="de">Systempakete mit apt verwalten</description>
+    <message>Authentication is required to manage packages with Pachul</message>
+    <message xml:lang="de">Authentifizierung erforderlich, um mit Pachul Pakete zu verwalten</message>
+    <icon_name>io.github.wergosam.pachul</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/apt-get</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="io.github.wergosam.pachul.run-dnf">
+    <description>Manage system packages with dnf</description>
+    <description xml:lang="de">Systempakete mit dnf verwalten</description>
+    <message>Authentication is required to manage packages with Pachul</message>
+    <message xml:lang="de">Authentifizierung erforderlich, um mit Pachul Pakete zu verwalten</message>
+    <icon_name>io.github.wergosam.pachul</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/dnf</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="io.github.wergosam.pachul.run-zypper">
+    <description>Manage system packages with zypper</description>
+    <description xml:lang="de">Systempakete mit zypper verwalten</description>
+    <message>Authentication is required to manage packages with Pachul</message>
+    <message xml:lang="de">Authentifizierung erforderlich, um mit Pachul Pakete zu verwalten</message>
+    <icon_name>io.github.wergosam.pachul</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/zypper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>

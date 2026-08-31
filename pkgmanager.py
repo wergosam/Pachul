@@ -111,6 +111,32 @@ def _dir_size(path):
 
 # ─── Install / remove / upgrade / refresh ─────────────────────────────────────
 
+def owning_package_for_file(path):
+    """Which already-installed package owns this file path, or None.
+
+    Distinct from search_file_owner() above, which searches *available*
+    (not-yet-installed) files across the whole repo metadata and is
+    comparatively slow/heavy. This only asks the local package database
+    about one specific file that's already on disk — fast enough to call
+    once per .desktop file when building the installed-icon map.
+    """
+    fam = get_family()
+    q = shlex.quote(path)
+    if fam == "arch":
+        out, code = _run(f"pacman -Qqo {q} 2>/dev/null", timeout=10)
+        return out.strip().splitlines()[-1].strip() if (out and code == 0) else None
+    if fam == "debian":
+        out, code = _run(f"dpkg -S {q} 2>/dev/null", timeout=10)
+        if out and code == 0:
+            pkg, _, _ = out.splitlines()[0].partition(":")
+            return pkg.strip() or None
+        return None
+    if fam in ("fedora", "suse"):
+        out, code = _run(f"rpm -qf --qf '%{{NAME}}\\n' {q} 2>/dev/null", timeout=10)
+        return out.strip().splitlines()[-1].strip() if (out and code == 0) else None
+    return None
+
+
 def get_downgrade_candidates(pkg_name):
     """Older versions of pkg_name that could be installed instead of the
     current one — the non-Arch analogue of backend.get_cached_versions().
@@ -216,15 +242,15 @@ def downgrade_cmd(pkg_name, candidate):
 
     if fam == "debian":
         spec = source if kind == "file" else f"{pkg_name}={version}"
-        return f"sudo -S apt-get install -y --allow-downgrades {shlex.quote(spec)}"
+        return f"pkexec /usr/bin/apt-get install -y --allow-downgrades {shlex.quote(spec)}"
 
     if fam == "fedora":
         spec = source if kind == "file" else f"{pkg_name}-{version}"
-        return f"sudo -S dnf downgrade -y {shlex.quote(spec)}"
+        return f"pkexec /usr/bin/dnf downgrade -y {shlex.quote(spec)}"
 
     if fam == "suse":
         spec = source if kind == "file" else f"{pkg_name}={version}"
-        return f"sudo -S zypper --non-interactive install --oldpackage {shlex.quote(spec)}"
+        return f"pkexec /usr/bin/zypper --non-interactive install --oldpackage {shlex.quote(spec)}"
 
     return None
 
@@ -236,9 +262,9 @@ def mark_explicit_cmd(pkg_name):
     fam = get_family()
     q = shlex.quote(pkg_name)
     if fam == "debian":
-        return f"sudo -S apt-mark manual {q}"
+        return f"pkexec /usr/bin/apt-mark manual {q}"
     if fam == "fedora":
-        return f"sudo -S dnf mark install {q}"
+        return f"pkexec /usr/bin/dnf mark install {q}"
     return None  # no simple zypper equivalent
 
 
@@ -249,9 +275,9 @@ def mark_asdeps_cmd(pkg_name):
     fam = get_family()
     q = shlex.quote(pkg_name)
     if fam == "debian":
-        return f"sudo -S apt-mark auto {q}"
+        return f"pkexec /usr/bin/apt-mark auto {q}"
     if fam == "fedora":
-        return f"sudo -S dnf mark remove {q}"
+        return f"pkexec /usr/bin/dnf mark remove {q}"
     return None  # no simple zypper equivalent
 
 
@@ -336,7 +362,7 @@ def gpg_fix_cmd(key_id=None):
                 "apt-get install -y --reinstall debian-archive-keyring 2>/dev/null); "
                 "apt-get update"
             )
-        return "sudo -S bash -c " + shlex.quote(script)
+        return "pkexec /usr/bin/bash -c " + shlex.quote(script)
 
     if fam == "fedora":
         if key_id:
@@ -344,13 +370,13 @@ def gpg_fix_cmd(key_id=None):
                 f"gpg --keyserver keyserver.ubuntu.com --recv-keys {key_id} "
                 f"--export | rpm --import -"
             )
-            return "sudo -S bash -c " + shlex.quote(script)
-        return "sudo -S dnf clean all && sudo -S dnf makecache"
+            return "pkexec /usr/bin/bash -c " + shlex.quote(script)
+        return "pkexec /usr/bin/bash -c " + shlex.quote("dnf clean all && dnf makecache")
 
     if fam == "suse":
         # zypper's own flag for exactly this situation: import/trust any
         # repo signing keys that would otherwise prompt interactively.
-        return "sudo -S zypper --non-interactive --gpg-auto-import-keys refresh"
+        return "pkexec /usr/bin/zypper --non-interactive --gpg-auto-import-keys refresh"
 
     return None
 
@@ -371,7 +397,7 @@ def lock_fix_cmd():
             f"echo {msg_q} >&2; exit 1; "
             f"else rm -f {paths}; dpkg --configure -a; fi"
         )
-        return "sudo -S bash -c " + shlex.quote(inner)
+        return "pkexec /usr/bin/bash -c " + shlex.quote(inner)
 
     if fam == "fedora":
         inner = (
@@ -380,7 +406,7 @@ def lock_fix_cmd():
             f"echo {msg_q} >&2; exit 1; "
             "else rm -f /var/lib/rpm/.rpm.lock; fi"
         )
-        return "sudo -S bash -c " + shlex.quote(inner)
+        return "pkexec /usr/bin/bash -c " + shlex.quote(inner)
 
     if fam == "suse":
         inner = (
@@ -388,7 +414,7 @@ def lock_fix_cmd():
             f"echo {msg_q} >&2; exit 1; "
             "else rm -f /var/run/zypp.pid; fi"
         )
-        return "sudo -S bash -c " + shlex.quote(inner)
+        return "pkexec /usr/bin/bash -c " + shlex.quote(inner)
 
     return None
 
@@ -567,15 +593,15 @@ def set_repo_enabled_cmd(repo, enabled):
                 f.write(new_text)
         except OSError:
             return None
-        return f"sudo -S install -m644 {shlex.quote(tmp_path)} {shlex.quote(str(path))}"
+        return f"pkexec /usr/bin/install -m644 {shlex.quote(tmp_path)} {shlex.quote(str(path))}"
 
     if fam == "fedora":
         flag = "--set-enabled" if enabled else "--set-disabled"
-        return f"sudo -S dnf config-manager {flag} {shlex.quote(repo['id'])}"
+        return f"pkexec /usr/bin/dnf config-manager {flag} {shlex.quote(repo['id'])}"
 
     if fam == "suse":
         flag = "-e" if enabled else "-d"
-        return f"sudo -S zypper modifyrepo {flag} {shlex.quote(repo['id'])}"
+        return f"pkexec /usr/bin/zypper modifyrepo {flag} {shlex.quote(repo['id'])}"
 
     return None
 
@@ -603,9 +629,9 @@ def third_party_helper_install_cmd():
     """Installs whatever's needed for add_third_party_cmd() to work."""
     fam = get_family()
     if fam == "debian":
-        return "sudo -S apt-get install -y software-properties-common"
+        return "pkexec /usr/bin/apt-get install -y software-properties-common"
     if fam == "fedora":
-        return "sudo -S dnf install -y dnf-plugins-core"
+        return "pkexec /usr/bin/dnf install -y dnf-plugins-core"
     return None
 
 
@@ -619,15 +645,15 @@ def add_third_party_cmd(identifier):
         return None
     if fam == "debian":
         ppa = identifier if identifier.startswith("ppa:") else f"ppa:{identifier}"
-        return f"sudo -S add-apt-repository -y {shlex.quote(ppa)}"
+        return f"pkexec /usr/bin/add-apt-repository -y {shlex.quote(ppa)}"
     if fam == "fedora":
-        return f"sudo -S dnf copr enable -y {shlex.quote(identifier)}"
+        return f"pkexec /usr/bin/dnf copr enable -y {shlex.quote(identifier)}"
     if fam == "suse":
         alias = re.sub(r"[^A-Za-z0-9_.-]", "-", identifier)
-        return _combine_sudo(
-            f"sudo -S zypper --non-interactive addrepo "
+        return combine_pkexec(
+            f"pkexec /usr/bin/zypper --non-interactive addrepo "
             f"obs://{shlex.quote(identifier)} {shlex.quote(alias)}",
-            f"sudo -S zypper --non-interactive --gpg-auto-import-keys refresh {shlex.quote(alias)}")
+            f"pkexec /usr/bin/zypper --non-interactive --gpg-auto-import-keys refresh {shlex.quote(alias)}")
     return None
 
 
@@ -641,12 +667,12 @@ def remove_third_party_cmd(identifier):
         return None
     if fam == "debian":
         ppa = identifier if identifier.startswith("ppa:") else f"ppa:{identifier}"
-        return f"sudo -S add-apt-repository --remove -y {shlex.quote(ppa)}"
+        return f"pkexec /usr/bin/add-apt-repository --remove -y {shlex.quote(ppa)}"
     if fam == "fedora":
-        return f"sudo -S dnf copr remove -y {shlex.quote(identifier)}"
+        return f"pkexec /usr/bin/dnf copr remove -y {shlex.quote(identifier)}"
     if fam == "suse":
         alias = re.sub(r"[^A-Za-z0-9_.-]", "-", identifier)
-        return f"sudo -S zypper --non-interactive removerepo {shlex.quote(alias)}"
+        return f"pkexec /usr/bin/zypper --non-interactive removerepo {shlex.quote(alias)}"
     return None
 
 
@@ -660,36 +686,55 @@ def list_copr_projects():
     return [ln.strip() for ln in out.splitlines() if ln.strip() and not ln.lower().startswith("list of")]
 
 
-def _combine_sudo(*cmds):
-    """Join several `sudo -S ...`-prefixed commands into ONE `sudo -S
-    bash -c '...'` invocation, so Pachul's terminal dialog only has to
-    prompt for the password once.
+def combine_pkexec(*cmds):
+    """Join several `pkexec ...`-prefixed commands into ONE `pkexec
+    bash -c '...'` invocation, so only one native Polkit authentication
+    dialog is shown, instead of one per command.
 
-    Why this matters: chaining separate commands as `sudo -S cmd1 &&
-    sudo -S cmd2` makes sudo prompt for the password a SECOND time
-    partway through — but nothing in the terminal view visually flags
-    that a new prompt appeared, so it's easy to miss. When that happens
-    the second command just sits there waiting for input that never
-    comes: the whole chain looks like it silently did nothing (e.g. a
-    single-package update never actually reinstalls the package, so it
-    never disappears from the Updates list), rather than failing with a
-    visible error.
+    Why this matters: chaining separate commands as `pkexec cmd1 &&
+    pkexec cmd2` can make Polkit's native authentication dialog pop up a
+    SECOND time partway through — polkit's own "remember this
+    authorization for a bit" window usually covers back-to-back calls,
+    but isn't guaranteed (it depends on the system's Polkit config and
+    how much time passed), and nothing in the terminal view visually
+    flags that a new dialog appeared, so it's easy to miss behind the
+    main window. When that happens the second command just sits there
+    waiting for a prompt the person hasn't noticed yet: the whole chain
+    looks like it silently did nothing (e.g. a single-package update
+    never actually reinstalls the package, so it never disappears from
+    the Updates list), rather than failing with a visible error.
 
-    Any cmd not prefixed with "sudo -S " (e.g. a plain flatpak command
+    Any cmd not prefixed with "pkexec " (e.g. a plain flatpak command
     that doesn't need root) is passed through unchanged inside the
     wrapped shell. `None`/empty entries are dropped."""
     parts = []
+    originals = []
+    any_needed_root = False
     for c in cmds:
         if not c:
             continue
-        parts.append(c[len("sudo -S "):] if c.startswith("sudo -S ") else c)
+        originals.append(c)
+        if c.startswith("pkexec "):
+            parts.append(c[len("pkexec "):])
+            any_needed_root = True
+        else:
+            parts.append(c)
     if not parts:
         return None
-    if len(parts) == 1 and not (cmds[0] or "").startswith("sudo -S "):
-        # Nothing actually needed root — don't wrap a plain command in sudo.
-        return parts[0]
+    if len(parts) == 1:
+        # Nothing to actually combine — return the single command exactly
+        # as given, so a lone pkexec call stays a direct
+        # `pkexec pacman ...` invocation instead of an unnecessary
+        # `pkexec bash -c '...'` wrapper. This isn't just tidiness: on at
+        # least one real Polkit setup (confirmed via testing), pkexec
+        # falls back to a plain-text terminal password prompt instead of
+        # its native graphical dialog specifically when its target is a
+        # generic shell rather than the actual program being run — even
+        # though a direct `pkexec pacman ...` call on that very same
+        # system shows the dialog correctly.
+        return originals[0]
     inner = " && ".join(parts)
-    return "sudo -S bash -c " + shlex.quote(inner)
+    return "pkexec /usr/bin/bash -c " + shlex.quote(inner)
 
 
 def install_cmd(names, needed=True):
@@ -697,19 +742,19 @@ def install_cmd(names, needed=True):
     quoted = " ".join(shlex.quote(n) for n in names)
     fam = get_family()
     if fam == "debian":
-        return f"sudo -S apt-get install -y {quoted}"
+        return f"pkexec /usr/bin/apt-get install -y {quoted}"
     if fam == "fedora":
-        return f"sudo -S dnf install -y {quoted}"
+        return f"pkexec /usr/bin/dnf install -y {quoted}"
     if fam == "suse":
-        return f"sudo -S zypper --non-interactive install {quoted}"
+        return f"pkexec /usr/bin/zypper --non-interactive install {quoted}"
     return None
 
 
 def install_cmd_synced(names, needed=True):
     """Same as install_cmd(), but refreshes repo metadata first (same
-    reasoning as sync_db_cmd()'s callers), combined into a single sudo
-    prompt via _combine_sudo() instead of two chained `sudo -S` calls."""
-    return _combine_sudo(sync_db_cmd(), install_cmd(names, needed=needed))
+    reasoning as sync_db_cmd()'s callers), combined into a single pkexec
+    call via combine_pkexec() instead of two chained `pkexec` calls."""
+    return combine_pkexec(sync_db_cmd(), install_cmd(names, needed=needed))
 
 
 def remove_cmd(names, purge=False):
@@ -717,11 +762,11 @@ def remove_cmd(names, purge=False):
     fam = get_family()
     if fam == "debian":
         verb = "purge" if purge else "remove"
-        return f"sudo -S apt-get {verb} -y {quoted}"
+        return f"pkexec /usr/bin/apt-get {verb} -y {quoted}"
     if fam == "fedora":
-        return f"sudo -S dnf remove -y {quoted}"
+        return f"pkexec /usr/bin/dnf remove -y {quoted}"
     if fam == "suse":
-        return f"sudo -S zypper --non-interactive remove {quoted}"
+        return f"pkexec /usr/bin/zypper --non-interactive remove {quoted}"
     return None
 
 
@@ -732,9 +777,9 @@ def autoremove_cmd():
     instead on openSUSE)."""
     fam = get_family()
     if fam == "debian":
-        return "sudo -S apt-get autoremove -y"
+        return "pkexec /usr/bin/apt-get autoremove -y"
     if fam == "fedora":
-        return "sudo -S dnf autoremove -y"
+        return "pkexec /usr/bin/dnf autoremove -y"
     return None
 
 
@@ -742,34 +787,41 @@ def sync_db_cmd():
     """Refresh repo metadata only, no upgrade."""
     fam = get_family()
     if fam == "debian":
-        return "sudo -S apt-get update"
+        return "pkexec /usr/bin/apt-get update"
     if fam == "fedora":
-        return "sudo -S dnf makecache"
+        return "pkexec /usr/bin/dnf makecache"
     if fam == "suse":
-        return "sudo -S zypper --non-interactive refresh"
+        return "pkexec /usr/bin/zypper --non-interactive refresh"
     return None
 
 
 def upgrade_all_cmd():
     fam = get_family()
     if fam == "debian":
-        return _combine_sudo("sudo -S apt-get update", "sudo -S apt-get upgrade -y")
+        # apt-get upgrade (without --with-new-pkgs) keeps back any package
+        # whose new version needs to pull in a new dependency or remove an
+        # old one — but those packages still show up in check_updates()
+        # (apt list --upgradable), so "Upgrade All" looked like it finished
+        # while such packages silently stayed on the list every time.
+        # full-upgrade (apt's dist-upgrade) resolves those dependency
+        # changes too, so what's shown as pending actually gets installed.
+        return combine_pkexec("pkexec /usr/bin/apt-get update", "pkexec /usr/bin/apt-get full-upgrade -y")
     if fam == "fedora":
-        return "sudo -S dnf upgrade -y"
+        return "pkexec /usr/bin/dnf upgrade -y"
     if fam == "suse":
-        return _combine_sudo("sudo -S zypper --non-interactive refresh",
-                              "sudo -S zypper --non-interactive update")
+        return combine_pkexec("pkexec /usr/bin/zypper --non-interactive refresh",
+                              "pkexec /usr/bin/zypper --non-interactive update")
     return None
 
 
 def clean_cache_cmd():
     fam = get_family()
     if fam == "debian":
-        return "sudo -S apt-get clean"
+        return "pkexec /usr/bin/apt-get clean"
     if fam == "fedora":
-        return "sudo -S dnf clean packages"
+        return "pkexec /usr/bin/dnf clean packages"
     if fam == "suse":
-        return "sudo -S zypper clean"
+        return "pkexec /usr/bin/zypper clean"
     return None
 
 
@@ -798,9 +850,9 @@ def hold_cmd(pkg_name, hold):
     fam = get_family()
     q = shlex.quote(pkg_name)
     if fam == "debian":
-        return f"sudo -S apt-mark {'hold' if hold else 'unhold'} {q}"
+        return f"pkexec /usr/bin/apt-mark {'hold' if hold else 'unhold'} {q}"
     if fam == "suse":
-        return f"sudo -S zypper --non-interactive {'addlock' if hold else 'removelock'} {q}"
+        return f"pkexec /usr/bin/zypper --non-interactive {'addlock' if hold else 'removelock'} {q}"
     return None  # fedora: no reliable built-in equivalent without extra plugins
 
 
@@ -808,10 +860,10 @@ def hold_cmd_bulk(pkg_names, hold):
     fam = get_family()
     quoted = " ".join(shlex.quote(n) for n in pkg_names)
     if fam == "debian":
-        return f"sudo -S apt-mark {'hold' if hold else 'unhold'} {quoted}"
+        return f"pkexec /usr/bin/apt-mark {'hold' if hold else 'unhold'} {quoted}"
     if fam == "suse":
         verb = "addlock" if hold else "removelock"
-        return _combine_sudo(*(f"sudo -S zypper --non-interactive {verb} {shlex.quote(n)}"
+        return combine_pkexec(*(f"pkexec /usr/bin/zypper --non-interactive {verb} {shlex.quote(n)}"
                                 for n in pkg_names))
     return None
 
@@ -1106,7 +1158,7 @@ def sync_files_db_cmd():
     dnf/zypper need no such separate step (files_db_available() already
     reports True for them, so this never actually gets called there)."""
     if get_family() == "debian":
-        return _combine_sudo("sudo -S apt-get install -y apt-file", "sudo -S apt-file update")
+        return combine_pkexec("pkexec /usr/bin/apt-get install -y apt-file", "pkexec /usr/bin/apt-file update")
     return None
 
 
@@ -1351,7 +1403,7 @@ def python3_apt_install_cmd():
     regular Debian/Ubuntu package, no PPA or build step needed, unlike
     Arch's paru (which has no official-repo equivalent and must be built
     from the AUR)."""
-    return "sudo -S apt-get install -y python3-apt"
+    return "pkexec /usr/bin/apt-get install -y python3-apt"
 
 
 def dnf_native_install_cmd():
@@ -1361,7 +1413,7 @@ def dnf_native_install_cmd():
     manager since Fedora 41, so this targets its binding rather than the
     older python3-dnf (classic dnf4's binding) — see native.dnf_available(),
     which still accepts either as a fallback if dnf5's isn't present."""
-    return "sudo -S dnf install -y python3-libdnf5"
+    return "pkexec /usr/bin/dnf install -y python3-libdnf5"
 
 
 def config_backup_sources():
@@ -1438,15 +1490,19 @@ def ca_certificates_refresh_cmd():
     """
     fam = get_family()
     if fam == "arch":
-        return ("sudo -S pacman -S --needed --noconfirm "
-                "ca-certificates ca-certificates-mozilla ca-certificates-utils "
-                "&& sudo -S trust extract-compat")
+        return "pkexec /usr/bin/bash -c " + shlex.quote(
+            "pacman -S --needed --noconfirm "
+            "ca-certificates ca-certificates-mozilla ca-certificates-utils "
+            "&& trust extract-compat")
     if fam == "debian":
-        return "sudo -S apt-get install -y --reinstall ca-certificates && sudo -S update-ca-certificates"
+        return "pkexec /usr/bin/bash -c " + shlex.quote(
+            "apt-get install -y --reinstall ca-certificates && update-ca-certificates")
     if fam == "fedora":
-        return "sudo -S dnf reinstall -y ca-certificates && sudo -S update-ca-trust extract"
+        return "pkexec /usr/bin/bash -c " + shlex.quote(
+            "dnf reinstall -y ca-certificates && update-ca-trust extract")
     if fam == "suse":
-        return "sudo -S zypper --non-interactive install --force ca-certificates && sudo -S update-ca-certificates"
+        return "pkexec /usr/bin/bash -c " + shlex.quote(
+            "zypper --non-interactive install --force ca-certificates && update-ca-certificates")
     return None
 
 

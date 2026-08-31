@@ -26,7 +26,6 @@
 ## Table of Contents
 
 - [Overview](#overview)
-- [What's New](#whats-new)
 - [Screenshots](#screenshots)
 - [Features](#features)
 - [Installation](#installation)
@@ -42,32 +41,15 @@
 
 ## Overview
 
-Pachul is a clean, fast GTK4 / libadwaita frontend for `pacman` and the AUR — and, since the multi-distro backend was added, for `apt` (Debian/Ubuntu), `dnf`/`dnf5` (Fedora) and `zypper` (openSUSE) as well. The distro family is detected automatically, so the same app searches, installs, updates and manages packages without touching the terminal — while still giving you full, transparent control: every privileged action runs through a visible terminal panel, so you always see exactly what command is being executed.
+Pachul is a clean, fast GTK4 / libadwaita **multi-distro package manager** with a graphical front end for `pacman` and the AUR on Arch/Manjaro, `apt` on Debian/Ubuntu, `dnf`/`dnf5` on Fedora, and `zypper` on openSUSE. The distro family is detected automatically at startup, so the same app searches, installs, updates and manages packages on any of them without touching the terminal — while still giving you full, transparent control: every privileged action runs through a visible terminal panel, so you always see exactly what command is being executed. Optional native bindings (`python-apt`, `python3-dnf`, `python3-libdnf5`) are used automatically when available for a large speed boost on top of the CLI-based path.
 
-Arch-only tools (Mirror Rater, PKGBUILD viewer, Arch news check, the `pacman.conf` repo editor) only appear on Arch/Manjaro; on other distros their native equivalents are used instead (see [What's New](#whats-new)), or they're simply hidden rather than shown greyed-out.
+On Arch/Manjaro, AUR packages are handled through `yay`, `paru`, `pikaur`, or [**pachuli**](#pachuli) — a minimal custom AUR helper described below — whichever is available; the choice is auto-detected or configurable in Preferences.
+
+Arch-only tools (Mirror Rater, PKGBUILD viewer, Arch news check, the `pacman.conf` repo editor) only appear on Arch/Manjaro; on other distros their native equivalents are used instead (third-party repo management, native downgrade commands, etc. — see [Features](#features)), or they're simply hidden rather than shown greyed-out.
 
 Pachul follows the GNOME Human Interface Guidelines and adapts automatically to your system's light or dark style.
 
 **Repository:** [github.com/wergosam/Pachul](https://github.com/wergosam/Pachul)
-
----
-
-## What's New
-
-- **Multi-distro support** — Pachul now runs natively on **Debian/Ubuntu (`apt`)**, **Fedora (`dnf`/`dnf5`)** and **openSUSE (`zypper`)**, in addition to Arch/Manjaro. The distro family is auto-detected from `/etc/os-release`, and Arch-exclusive tools stay hidden on other distros so the UI only ever shows what's actually supported there.
-- **Native package-manager bindings** — optional `python-apt` / `python3-dnf` / `python3-libdnf5` bindings are used automatically when available for a large speed boost (package-info lookups up to ~30× faster on Debian/Ubuntu), with a transparent fallback to the previous CLI-based path if anything goes wrong.
-- **Downgrade on every distro** — reinstall an older cached `.deb`/`.rpm`, or on Debian/Ubuntu any version still resolvable via `apt-cache madison`, installed through each distro's native downgrade command (`apt-get install --allow-downgrades`, `dnf downgrade`, `zypper install --oldpackage`).
-- **Third-party repository management** — the Repository Manager now also handles **PPAs** (Debian/Ubuntu, incl. modern deb822 `.sources` files), **COPR** (Fedora) and **OBS** repositories (openSUSE), alongside the existing `pacman.conf` editor for Arch.
-- **Generalized GPG & database-lock recovery** — the one-click **Import & Retry** / **Remove Lock & Retry** fixes now recognize and repair signature and lock errors across `apt`, `dnf` and `zypper`, not just `pacman`.
-- **Multi-select batch actions** — tick packages via checkbox (the selection survives search and filter changes) and install, remove, hold, or mark them all as explicit/dependency in one batch instead of one at a time.
-- **File → Package search** — find out which package owns a given file path via `pacman -Fx`, with a one-click prompt to sync the files database (`pacman -Fy`) first if it's missing.
-- **GPG signature-failure recovery** — Pachul recognizes unknown-key and outdated-keyring signature errors in the terminal output and offers a one-click **Import & Retry** or **Update Keyring & Retry** fix, the same way it already handles stale database locks.
-- **Pre-upgrade snapshot safety net** — optionally create a Timeshift or Snapper snapshot automatically before every system upgrade (off by default, since Timeshift's rsync mode can be slow).
-- **Live progress bar** — upgrade/install/remove operations show a real, percentage-based progress bar parsed straight from pacman's own output.
-- **AUR package metadata** — vote count, popularity, maintainer and out-of-date status now appear in the detail panel for AUR packages, pulled live from the official AUR RPC API.
-- **Chaotic-AUR support** — packages from Chaotic-AUR get their own badge and sidebar filter, alongside any other repository configured in `pacman.conf`.
-
-See [Troubleshooting](#troubleshooting) below for the database-lock and GPG-signature fixes in more detail.
 
 ---
 
@@ -101,16 +83,21 @@ See [Troubleshooting](#troubleshooting) below for the database-lock and GPG-sign
 ## Features
 
 ### Package management
-- **Multi-distro backend** — Arch/Manjaro (`pacman`/AUR), Debian/Ubuntu (`apt`), Fedora (`dnf`/`dnf5`) and openSUSE (`zypper`), auto-detected; optional native bindings (`python-apt`, `python3-dnf`, `python3-libdnf5`) speed things up further where available
+- **Multi-distro backend** — Arch/Manjaro (`pacman`/AUR), Debian/Ubuntu (`apt`), Fedora (`dnf`/`dnf5`) and openSUSE (`zypper`), auto-detected; optional native bindings (`python-apt`, `python3-dnf`, `python3-libdnf5`) speed things up further where available (package-info lookups up to ~30× faster on Debian/Ubuntu), with a transparent fallback to the CLI-based path if anything goes wrong
 - **Search** official repositories and the AUR simultaneously, with live result counts
 - **Browse** packages by repository: `core`, `extra`, `multilib`, `aur`, `chaotic-aur`, and any other repo configured in `pacman.conf` — each gets its own sidebar filter and badge automatically
 - **Installed packages** — view, filter and manage everything on your system
 - **AUR / Foreign** packages tracked separately, with source clearly badged
 - **AUR package metadata** — vote count, popularity, maintainer and out-of-date status, pulled live from the AUR RPC API and shown right in the detail panel
-- **Update manager** — see all available updates at a glance and upgrade in one click, or one at a time, with a live percentage progress bar during the operation
+- **Update manager** — see all available updates at a glance and upgrade in one click, or one at a time, with a live percentage progress bar during the operation, parsed straight from the package manager's own output
 - **Multi-select batch actions** — tick packages via checkbox and install, remove, hold, or mark them all as explicit/dependency in one batch; the selection survives search and filter changes
-- **Downgrade** — reinstall an older cached version straight from `/var/cache/pacman/pkg`
-- **Detail panel** — description, dependencies, size, install reason, build/install dates, and full `pacman -Qi` raw output for every package
+- **Downgrade on every distro** — reinstall an older cached `.deb`/`.rpm`/pacman package, or on Debian/Ubuntu any version still resolvable via `apt-cache madison`, through each distro's native downgrade command (`apt-get install --allow-downgrades`, `dnf downgrade`, `zypper install --oldpackage`, or a cached package under `/var/cache/pacman/pkg` on Arch)
+- **Detail panel** — description, dependencies, size, install reason, build/install dates, and full raw package-info output for every package
+
+### AUR helpers (Arch/Manjaro) <a id="pachuli"></a>
+- **yay, paru, pikaur, or pachuli** — whichever is installed is auto-detected and used for AUR search, install, update and remove; the preference order (or an explicit choice) is configurable in Preferences → AUR Helper
+- **pachuli** — a minimal, dependency-free custom AUR helper (`pachuli.py`, pacman/yay-style CLI) covering search, install, update and remove for the AUR, plus a plain-text PKGBUILD preview without building (`-Sp`) and a way to force an AUR build even when a same-named package also exists in a repo (`-a`/`--aur-only`). When present, it's preferred over yay/paru/pikaur; unlike them, its own privilege escalation goes through `pkexec` (`-g`) for a native graphical prompt instead of an internal `sudo` call. If Pachul finds a local `pachuli.py` next to its own files but not yet on your `PATH`, Preferences offers a one-click system-wide install
+- **AUR-ahead-of-repo banner** — flags a package where the AUR version is newer than the one in a sync repo, with a one-click override to build from the AUR anyway
 
 ### Tools
 - Sync Databases (`F5`)
@@ -119,7 +106,7 @@ See [Troubleshooting](#troubleshooting) below for the database-lock and GPG-sign
 - **Rate Mirrors** — geo-aware ranking via `rate-mirrors`, with sort order, HTTPS-only filter, automatic backup and configurable mirror count
 - Find Orphans — bulk-remove packages that are no longer required by anything
 - Clean Cache
-- Manage Repositories — inspect and toggle enabled repos; edit `pacman.conf` directly on Arch, or add/remove **PPAs** (Debian/Ubuntu), **COPR** (Fedora) and **OBS repositories** (openSUSE) on other distros
+- **Third-party repository management** — inspect and toggle enabled repos; edit `pacman.conf` directly on Arch, or add/remove **PPAs** (Debian/Ubuntu, including modern deb822 `.sources` files), **COPR** (Fedora) and **OBS repositories** (openSUSE) on other distros
 - View / Merge Config Files (`.pacnew` / `.pacsave`) with a side-by-side diff view
 - Package History
 - System Info — OS, kernel, hardware, package counts and cache size at a glance
@@ -130,9 +117,9 @@ See [Troubleshooting](#troubleshooting) below for the database-lock and GPG-sign
 - Arch Linux news check before system upgrades, so you never miss a manual-intervention notice
 
 ### Safety & recovery
-- **Pre-upgrade snapshots** — optionally create a Timeshift or Snapper snapshot automatically before every system upgrade, as a safety net if something goes wrong (off by default)
-- **GPG signature-failure recovery** — recognizes unknown-key and outdated-keyring errors and offers a one-click **Import & Retry** or **Update Keyring & Retry** fix
-- **Stale database-lock recovery** — detects a locked pacman database (`db.lck`), confirms (via `fuser`) nothing is genuinely still using it, and offers a one-click **Remove Lock & Retry** fix
+- **Pre-upgrade snapshots** — optionally create a Timeshift or Snapper snapshot automatically before every system upgrade, as a safety net if something goes wrong (off by default, since Timeshift's rsync mode can be slow)
+- **GPG signature-failure recovery** — recognizes unknown-key and outdated-keyring errors across `pacman`, `apt`, `dnf` and `zypper` alike, and offers a one-click **Import & Retry** or **Update Keyring & Retry** fix
+- **Stale database-lock recovery** — detects a locked package database, confirms (via `fuser`) nothing is genuinely still using it, and offers a one-click **Remove Lock & Retry** fix — works across `pacman`, `apt`, `dnf` and `zypper`
 - Confirmation dialogs before destructive actions (configurable)
 
 ### Quality of life
@@ -170,7 +157,7 @@ python3 app.py
 | `gtk4` | GUI toolkit |
 | `libadwaita` | GNOME-style widgets and theming |
 | `pacman` (Arch) / `apt` (Debian, Ubuntu) / `dnf` (Fedora) / `zypper` (openSUSE) | Package backend, whichever matches your distro |
-| `yay`, `paru` or `pikaur` | AUR support on Arch (optional, auto-detected) |
+| `yay`, `paru`, `pikaur` or `pachuli` | AUR support on Arch (optional, auto-detected; see [AUR helpers](#pachuli)) |
 | `python-apt` / `python3-dnf` or `python3-libdnf5` | Optional native bindings for faster package operations on Debian/Ubuntu or Fedora (falls back to CLI automatically if absent) |
 | `rate-mirrors` | Mirror ranking on Arch (optional) |
 | `timeshift` or `snapper` | Pre-upgrade snapshot safety net (optional, either one) |
@@ -239,7 +226,7 @@ pachul/
 
 ## Troubleshooting
 
-- **No AUR results / AUR actions fail** — install `yay`, `paru`, or `pikaur`, or set the helper explicitly in Preferences → AUR Helper.
+- **No AUR results / AUR actions fail** — install `yay`, `paru`, `pikaur`, or your own `pachuli`, or set the helper explicitly in Preferences → AUR Helper.
 - **Background notifications never appear** — check the timer is enabled in Preferences, and that `notify-send` (usually part of `libnotify`) is installed.
 - **Mirror rating tool missing** — install `rate-mirrors` from the AUR; Pachul offers a one-click install button when it's absent.
 - **Language doesn't fully change** — some UI elements are only re-translated after a full restart of Pachul; this is expected.
@@ -289,7 +276,6 @@ This project is licensed under the **GNU General Public License v2.0** — see t
 ## Inhaltsverzeichnis
 
 - [Übersicht](#übersicht)
-- [Neuigkeiten](#neuigkeiten)
 - [Screenshots](#screenshots-1)
 - [Funktionen](#funktionen)
 - [Installation](#installation-1)
@@ -305,30 +291,15 @@ This project is licensed under the **GNU General Public License v2.0** — see t
 
 ## Übersicht
 
-Pachul ist ein schlankes, schnelles GTK4- / libadwaita-Frontend für `pacman` und das AUR. Es ermöglicht das Suchen, Installieren, Aktualisieren und Verwalten von Paketen, ohne das Terminal anzufassen — und behält dabei volle, transparente Kontrolle: Jede privilegierte Aktion läuft über ein sichtbares Terminal-Panel, sodass du immer genau siehst, welcher Befehl ausgeführt wird.
+Pachul ist ein schlankes, schnelles GTK4- / libadwaita-**Multi-Distro-Paketmanager** mit grafischer Oberfläche für `pacman` und das AUR unter Arch/Manjaro, `apt` unter Debian/Ubuntu, `dnf`/`dnf5` unter Fedora und `zypper` unter openSUSE. Die Distro-Familie wird beim Start automatisch erkannt, sodass dieselbe App auf jeder davon Pakete suchen, installieren, aktualisieren und verwalten kann, ohne das Terminal anzufassen — und behält dabei volle, transparente Kontrolle: Jede privilegierte Aktion läuft über ein sichtbares Terminal-Panel, sodass du immer genau siehst, welcher Befehl ausgeführt wird. Optionale native Bindings (`python-apt`, `python3-dnf`, `python3-libdnf5`) werden automatisch genutzt, wenn vorhanden, und bringen zusätzlich zum CLI-basierten Pfad einen deutlichen Geschwindigkeitsschub.
+
+Unter Arch/Manjaro werden AUR-Pakete über `yay`, `paru`, `pikaur` oder [**pachuli**](#pachuli) abgewickelt — einen minimalistischen eigenen AUR-Helfer, weiter unten beschrieben — je nachdem, was verfügbar ist; die Wahl wird automatisch erkannt oder lässt sich in den Einstellungen festlegen.
+
+Rein Arch-spezifische Werkzeuge (Spiegelserver-Bewertung, PKGBUILD-Ansicht, Arch-News-Prüfung, der `pacman.conf`-Editor) erscheinen nur unter Arch/Manjaro; auf anderen Distros kommen stattdessen deren native Entsprechungen zum Einsatz (Drittanbieter-Repository-Verwaltung, native Downgrade-Befehle usw. — siehe [Funktionen](#funktionen)), oder sie werden schlicht ausgeblendet statt ausgegraut angezeigt.
 
 Pachul folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch an den hellen oder dunklen Stil deines Systems an.
 
 **Repository:** [github.com/wergosam/Pachul](https://github.com/wergosam/Pachul)
-
----
-
-## Neuigkeiten
-
-- **Multi-Distro-Unterstützung** — Pachul läuft jetzt nativ auch auf **Debian/Ubuntu (`apt`)**, **Fedora (`dnf`/`dnf5`)** und **openSUSE (`zypper`)**, zusätzlich zu Arch/Manjaro. Die Distro-Familie wird automatisch anhand von `/etc/os-release` erkannt; rein Arch-spezifische Werkzeuge bleiben auf anderen Distros verborgen, sodass die Oberfläche immer nur das zeigt, was dort tatsächlich unterstützt wird.
-- **Native Paketmanager-Anbindung** — optionale `python-apt`- / `python3-dnf`- / `python3-libdnf5`-Bindings werden automatisch genutzt, wenn vorhanden, und bringen einen deutlichen Geschwindigkeitsschub (Paketinfo-Abfragen auf Debian/Ubuntu bis zu ~30× schneller), mit transparentem Rückfall auf den bisherigen CLI-Pfad, falls etwas schiefgeht.
-- **Downgrade auf jeder Distro** — eine ältere zwischengespeicherte `.deb`/`.rpm`-Version neu installieren, auf Debian/Ubuntu zusätzlich jede über `apt-cache madison` noch auflösbare Version, jeweils über den nativen Downgrade-Befehl der jeweiligen Distro (`apt-get install --allow-downgrades`, `dnf downgrade`, `zypper install --oldpackage`).
-- **Drittanbieter-Repository-Verwaltung** — der Repository-Manager beherrscht jetzt auch **PPAs** (Debian/Ubuntu, inkl. moderner deb822-`.sources`-Dateien), **COPR** (Fedora) und **OBS-Repositories** (openSUSE), zusätzlich zum bestehenden `pacman.conf`-Editor für Arch.
-- **Verallgemeinerte GPG- und Datenbank-Sperre-Behebung** — die Ein-Klick-Fixes „Importieren & erneut versuchen" / „Sperre entfernen & erneut versuchen" erkennen und beheben Signatur- und Sperrfehler jetzt auch bei `apt`, `dnf` und `zypper`, nicht nur bei `pacman`.
-- **Mehrfachauswahl-Sammelaktionen** — Pakete per Checkbox ankreuzen (die Auswahl bleibt auch bei Such-/Filteränderungen erhalten) und alle zusammen installieren, entfernen, sperren oder als explizit/Abhängigkeit markieren, statt einzeln.
-- **Datei-→-Paket-Suche** — herausfinden, welches Paket einen bestimmten Dateipfad besitzt (über `pacman -Fx`), mit Ein-Klick-Angebot zum Synchronisieren der Dateien-Datenbank (`pacman -Fy`), falls diese fehlt.
-- **GPG-Signaturfehler-Behebung** — Pachul erkennt unbekannte Schlüssel und veraltete Keyring-Signaturfehler in der Terminal-Ausgabe und bietet einen Ein-Klick-Fix **„Importieren & erneut versuchen"** oder **„Keyring aktualisieren & erneut versuchen"** an — genauso wie bereits bei veralteten Datenbank-Sperren.
-- **Snapshot-Sicherheitsnetz vor Upgrades** — optional automatisch einen Timeshift- oder Snapper-Snapshot vor jedem Systemupgrade erstellen (standardmässig deaktiviert, da Timeshifts Rsync-Modus langsam sein kann).
-- **Live-Fortschrittsbalken** — Upgrade-/Installations-/Entfernungsvorgänge zeigen jetzt einen echten, prozentbasierten Fortschrittsbalken, direkt aus der Ausgabe von Pacman selbst ausgelesen.
-- **AUR-Paketmetadaten** — Stimmenzahl, Popularität, Maintainer und Veraltet-Status erscheinen jetzt in der Detailansicht für AUR-Pakete, live über die offizielle AUR-RPC-API abgerufen.
-- **Chaotic-AUR-Unterstützung** — Pakete aus Chaotic-AUR erhalten ein eigenes Badge und einen eigenen Filter in der Seitenleiste, wie jedes andere in `pacman.conf` konfigurierte Repository auch.
-
-Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten für Details zu den Datenbank-Sperre- und GPG-Signatur-Fixes.
 
 ---
 
@@ -352,16 +323,21 @@ Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten für Details zu den Datenba
 ## Funktionen
 
 ### Paketverwaltung
-- **Multi-Distro-Backend** — Arch/Manjaro (`pacman`/AUR), Debian/Ubuntu (`apt`), Fedora (`dnf`/`dnf5`) und openSUSE (`zypper`), automatisch erkannt; optionale native Bindings (`python-apt`, `python3-dnf`, `python3-libdnf5`) beschleunigen zusätzlich, wo verfügbar
+- **Multi-Distro-Backend** — Arch/Manjaro (`pacman`/AUR), Debian/Ubuntu (`apt`), Fedora (`dnf`/`dnf5`) und openSUSE (`zypper`), automatisch erkannt; optionale native Bindings (`python-apt`, `python3-dnf`, `python3-libdnf5`) beschleunigen zusätzlich, wo verfügbar (Paketinfo-Abfragen auf Debian/Ubuntu bis zu ~30× schneller), mit transparentem Rückfall auf den CLI-basierten Pfad, falls etwas schiefgeht
 - **Suche** gleichzeitig in offiziellen Repositorien und im AUR, mit Live-Trefferzahl
 - **Durchsuchen** nach Repository: `core`, `extra`, `multilib`, `aur`, `chaotic-aur` sowie jedem weiteren, in `pacman.conf` konfigurierten Repository — jedes erhält automatisch einen eigenen Filter und ein eigenes Badge in der Seitenleiste
 - **Installierte Pakete** — alles auf deinem System ansehen, filtern und verwalten
 - **AUR / Fremde** Pakete werden separat erfasst, mit klar erkennbarer Herkunfts-Badge
 - **AUR-Paketmetadaten** — Stimmenzahl, Popularität, Maintainer und Veraltet-Status, live über die AUR-RPC-API abgerufen und direkt in der Detailansicht angezeigt
-- **Update-Verwaltung** — alle verfügbaren Updates auf einen Blick, mit einem Klick alle oder einzeln aktualisieren, mit Live-Fortschrittsbalken in Prozent während des Vorgangs
+- **Update-Verwaltung** — alle verfügbaren Updates auf einen Blick, mit einem Klick alle oder einzeln aktualisieren, mit Live-Fortschrittsbalken in Prozent, direkt aus der Ausgabe des jeweiligen Paketmanagers ausgelesen
 - **Mehrfachauswahl-Sammelaktionen** — Pakete per Checkbox ankreuzen und alle zusammen installieren, entfernen, sperren oder als explizit/Abhängigkeit markieren; die Auswahl bleibt auch bei Such-/Filteränderungen erhalten
-- **Downgrade** — eine ältere zwischengespeicherte Version direkt aus `/var/cache/pacman/pkg` neu installieren
-- **Detailansicht** — Beschreibung, Abhängigkeiten, Größe, Installationsgrund, Build-/Installationsdatum sowie die vollständige `pacman -Qi`-Rohausgabe zu jedem Paket
+- **Downgrade auf jeder Distro** — eine ältere zwischengespeicherte `.deb`-/`.rpm`-/Pacman-Paketversion neu installieren, auf Debian/Ubuntu zusätzlich jede über `apt-cache madison` noch auflösbare Version, jeweils über den nativen Downgrade-Befehl der jeweiligen Distro (`apt-get install --allow-downgrades`, `dnf downgrade`, `zypper install --oldpackage`, oder eine zwischengespeicherte Version unter `/var/cache/pacman/pkg` auf Arch)
+- **Detailansicht** — Beschreibung, Abhängigkeiten, Größe, Installationsgrund, Build-/Installationsdatum sowie die vollständige rohe Paketinfo-Ausgabe zu jedem Paket
+
+### AUR-Helfer (Arch/Manjaro) <a id="pachuli-de"></a>
+- **yay, paru, pikaur oder pachuli** — was immer installiert ist, wird automatisch erkannt und für AUR-Suche, -Installation, -Aktualisierung und -Entfernung genutzt; die Rangfolge (oder eine feste Wahl) lässt sich unter Einstellungen → AUR-Helfer festlegen
+- **pachuli** — ein minimalistischer, abhängigkeitsfreier eigener AUR-Helfer (`pachuli.py`, CLI im pacman-/yay-Stil), der Suche, Installation, Aktualisierung und Entfernung im AUR abdeckt, dazu eine reine PKGBUILD-Textvorschau ohne Bauen (`-Sp`) und eine Möglichkeit, ein AUR-Build gezielt zu erzwingen, auch wenn ein gleichnamiges Paket zusätzlich in einem Repository existiert (`-a`/`--aur-only`). Ist es vorhanden, wird es gegenüber yay/paru/pikaur bevorzugt; anders als diese läuft seine eigene Rechteeskalation über `pkexec` (`-g`) für einen echten grafischen Dialog statt über einen internen `sudo`-Aufruf. Findet Pachul eine lokale `pachuli.py` neben den eigenen Dateien, die aber noch nicht im `PATH` liegt, bieten die Einstellungen eine Ein-Klick-Installation systemweit an
+- **AUR-vor-Repo-Banner** — markiert ein Paket, dessen AUR-Version neuer ist als die eines Sync-Repos, mit einem Ein-Klick-Override, es trotzdem aus dem AUR zu bauen
 
 ### Werkzeuge
 - Datenbanken synchronisieren (`F5`)
@@ -370,7 +346,7 @@ Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten für Details zu den Datenba
 - **Spiegelserver bewerten** — standortbasiertes Ranking über `rate-mirrors`, mit Sortieroptionen, Nur-HTTPS-Filter, automatischer Sicherung und einstellbarer Anzahl der Spiegelserver
 - Waisen finden — nicht mehr benötigte Pakete gesammelt entfernen
 - Cache leeren
-- Repositorien verwalten — aktivierte Repos einsehen und umschalten; unter Arch `pacman.conf` direkt bearbeiten, auf anderen Distros **PPAs** (Debian/Ubuntu), **COPR** (Fedora) und **OBS-Repositories** (openSUSE) hinzufügen/entfernen
+- **Drittanbieter-Repository-Verwaltung** — aktivierte Repos einsehen und umschalten; unter Arch `pacman.conf` direkt bearbeiten, auf anderen Distros **PPAs** (Debian/Ubuntu, inkl. moderner deb822-`.sources`-Dateien), **COPR** (Fedora) und **OBS-Repositories** (openSUSE) hinzufügen/entfernen
 - Konfigurationsdateien anzeigen/zusammenführen (`.pacnew` / `.pacsave`) mit Diff-Ansicht nebeneinander
 - Paketverlauf
 - Systeminformationen — Betriebssystem, Kernel, Hardware, Paketanzahl und Cache-Größe auf einen Blick
@@ -381,9 +357,9 @@ Siehe [Fehlerbehebung](#fehlerbehebung) weiter unten für Details zu den Datenba
 - Arch-Linux-News-Prüfung vor Systemaktualisierungen, damit manuelle Eingriffe nie übersehen werden
 
 ### Sicherheit & Wiederherstellung
-- **Snapshots vor Upgrades** — optional automatisch einen Timeshift- oder Snapper-Snapshot vor jedem Systemupgrade erstellen, als Sicherheitsnetz falls etwas schiefgeht (standardmässig deaktiviert)
-- **GPG-Signaturfehler-Behebung** — erkennt unbekannte Schlüssel und veraltete Keyring-Fehler und bietet einen Ein-Klick-Fix „Importieren & erneut versuchen" oder „Keyring aktualisieren & erneut versuchen" an
-- **Behebung veralteter Datenbank-Sperren** — erkennt eine gesperrte Pacman-Datenbank (`db.lck`), bestätigt per `fuser`, dass wirklich nichts mehr darauf zugreift, und bietet einen Ein-Klick-Fix „Sperre entfernen & erneut versuchen" an
+- **Snapshots vor Upgrades** — optional automatisch einen Timeshift- oder Snapper-Snapshot vor jedem Systemupgrade erstellen, als Sicherheitsnetz falls etwas schiefgeht (standardmässig deaktiviert, da Timeshifts Rsync-Modus langsam sein kann)
+- **GPG-Signaturfehler-Behebung** — erkennt unbekannte Schlüssel und veraltete Keyring-Fehler gleichermassen bei `pacman`, `apt`, `dnf` und `zypper` und bietet einen Ein-Klick-Fix „Importieren & erneut versuchen" oder „Keyring aktualisieren & erneut versuchen" an
+- **Behebung veralteter Datenbank-Sperren** — erkennt eine gesperrte Paketdatenbank, bestätigt per `fuser`, dass wirklich nichts mehr darauf zugreift, und bietet einen Ein-Klick-Fix „Sperre entfernen & erneut versuchen" an — funktioniert bei `pacman`, `apt`, `dnf` und `zypper`
 - Bestätigungsdialoge vor destruktiven Aktionen (einstellbar)
 
 ### Komfortfunktionen
@@ -421,7 +397,7 @@ python3 app.py
 | `gtk4` | GUI-Toolkit |
 | `libadwaita` | GNOME-typische Widgets und Theming |
 | `pacman` (Arch) / `apt` (Debian, Ubuntu) / `dnf` (Fedora) / `zypper` (openSUSE) | Paket-Backend, je nach Distro |
-| `yay`, `paru` oder `pikaur` | AUR-Unterstützung auf Arch (optional, automatisch erkannt) |
+| `yay`, `paru` oder `pikaur` bzw. `pachuli` | AUR-Unterstützung auf Arch (optional, automatisch erkannt; siehe [AUR-Helfer](#pachuli-de)) |
 | `python-apt` / `python3-dnf` bzw. `python3-libdnf5` | Optionale native Bindings für schnellere Paketoperationen auf Debian/Ubuntu bzw. Fedora (fällt automatisch auf CLI zurück, falls nicht vorhanden) |
 | `rate-mirrors` | Spiegelserver-Bewertung auf Arch (optional) |
 | `timeshift` oder `snapper` | Snapshot-Sicherheitsnetz vor Upgrades (optional, eines von beiden) |
@@ -490,7 +466,7 @@ pachul/
 
 ## Fehlerbehebung
 
-- **Keine AUR-Ergebnisse / AUR-Aktionen schlagen fehl** — installiere `yay`, `paru` oder `pikaur`, oder lege den Helfer explizit unter Einstellungen → AUR-Helfer fest.
+- **Keine AUR-Ergebnisse / AUR-Aktionen schlagen fehl** — installiere `yay`, `paru`, `pikaur` oder deinen eigenen `pachuli`, oder lege den Helfer explizit unter Einstellungen → AUR-Helfer fest.
 - **Hintergrund-Benachrichtigungen erscheinen nie** — prüfe, ob der Timer in den Einstellungen aktiviert ist und ob `notify-send` (üblicherweise Teil von `libnotify`) installiert ist.
 - **Werkzeug zur Spiegelserver-Bewertung fehlt** — installiere `rate-mirrors` aus dem AUR; Pachul bietet dafür einen Ein-Klick-Installationsbutton an, falls es fehlt.
 - **Sprache wechselt nicht vollständig** — manche UI-Elemente werden erst nach einem vollständigen Neustart von Pachul neu übersetzt; das ist beabsichtigt.

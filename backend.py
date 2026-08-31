@@ -37,12 +37,9 @@ CACHE_DIR      = Path.home() / ".cache" / "pachul"
 PKG_CACHE      = CACHE_DIR / "packages.json"
 SYNCDB_CACHE   = CACHE_DIR / "syncdb.json"
 INSTALLED_CACHE= CACHE_DIR / "installed.json"
+APP_VERSION    = "2.2.7"   # shown in the About dialog — bump on every release
 CACHE_VERSION  = 2   # bump when the cached package schema changes, to force a rebuild
 SYNCDB_TTL     = 6 * 3600   # 6 hours
-
-# ─── App metadata ───────────────────────────────────────────────────────────
-
-APP_VERSION    = "2.2.6"   # single source of truth — bump here for a release
 
 def _ensure_cache_dir():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -69,7 +66,7 @@ def _write_json(path, data):
 CONFIG_DIR    = Path.home() / ".config" / "pachul"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 _DEFAULT_SETTINGS = {
-    "aur_helper":               "auto",   # auto | yay | paru | pikaur | none
+    "aur_helper":               "auto",   # auto | pachuli | yay | paru | pikaur | none
     "include_aur_updates":      True,
     "confirm_remove":           True,
     "check_updates_on_start":   True,
@@ -169,7 +166,9 @@ _aur_helper_cache = "__unset__"
 def _find_aur_helper():
     """Return the AUR helper to use, honouring the user's preference. Cached.
     The AUR only exists on Arch — on Debian/Fedora/openSUSE this always
-    returns None immediately, without even trying the `which` lookups."""
+    returns None immediately, without even trying the `which` lookups.
+    pachuli (the user's own AUR helper) is tried first under "auto", ahead
+    of yay/paru/pikaur/trizen."""
     if not distro.is_arch():
         return None
     pref = get_setting("aur_helper")
@@ -177,7 +176,7 @@ def _find_aur_helper():
         return None
     global _aur_helper_cache
     if _aur_helper_cache == "__unset__":
-        candidates = [pref] if (pref and pref != "auto") else ("yay", "paru", "pikaur", "trizen")
+        candidates = [pref] if (pref and pref != "auto") else ("pachuli", "yay", "paru", "pikaur", "trizen")
         _aur_helper_cache = None
         for h in candidates:
             _, c = run_command(f"which {h} 2>/dev/null")
@@ -185,6 +184,54 @@ def _find_aur_helper():
                 _aur_helper_cache = h
                 break
     return _aur_helper_cache
+
+
+def _strip_ansi(text):
+    """Strip ANSI/SGR colour escape codes. pachuli (unlike yay/paru) always
+    emits colour codes regardless of whether stdout is a real terminal, so
+    anything captured from it needs this before display or parsing."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text) if text else text
+
+
+def aur_helper_upgrade_cmd(helper):
+    """Full system upgrade (repo + AUR) via `helper`. pachuli routes its own
+    privilege escalation through pkexec (-g), per the user's setup, instead
+    of an internal sudo call."""
+    if helper == "pachuli":
+        return "pachuli -Syu --noconfirm -g"
+    return f"{helper} -Syu --noconfirm"
+
+
+def aur_helper_install_cmd(helper, names, needed=False, noconfirm=True, force_aur=False):
+    """Install one or more AUR package names via `helper`. `names` is a
+    pre-shlex-quoted string of one or more package names.
+
+    noconfirm=False lets the helper's own interactive prompts through —
+    e.g. yay/paru's repo-vs-AUR disambiguation, or pachuli's dependency-
+    provides-conflict question — needed wherever a package that might
+    also exist in a repo is being installed, since that disambiguation
+    doesn't resolve reliably under --noconfirm.
+
+    force_aur=True additionally passes pachuli's -a/--aur-only flag,
+    which is the only way to make it build from the AUR even when a
+    same-named repo package exists (pachuli's own classification
+    otherwise always prefers the repo — see get_pkgbuild()'s note on the
+    same asymmetry). yay/paru resolve this themselves interactively
+    instead via the disambiguation prompt above, so force_aur has no
+    effect for them.
+
+    pachuli always routes its own privilege escalation through pkexec
+    (-g), per the user's setup, instead of an internal sudo call; it
+    also has no --needed flag (it already applies --needed-equivalent
+    logic internally for repo packages, and always (re)builds AUR
+    ones), so that flag is simply dropped for it."""
+    if helper == "pachuli":
+        flags = " -a" if force_aur else ""
+        flags += " --noconfirm" if noconfirm else ""
+        return f"pachuli -S {names}{flags} -g"
+    extra = " --needed" if needed else ""
+    extra += " --noconfirm" if noconfirm else ""
+    return f"{helper} -S{extra} {names}"
 
 
 def paru_installed():
@@ -199,11 +246,37 @@ def get_paru_bootstrap_cmd():
     build_dir = "/tmp/pachul-paru-build"
     return (
         f"rm -rf {build_dir} && "
-        f"sudo -S pacman -S --needed --noconfirm base-devel git && "
+        f"pkexec /usr/bin/pacman -S --needed --noconfirm base-devel git && "
         f"git clone https://aur.archlinux.org/paru.git {build_dir} && "
         f"cd {build_dir} && makepkg -si --noconfirm && "
         f"cd - && rm -rf {build_dir}"
     )
+
+
+def pachuli_installed():
+    return shutil.which("pachuli") is not None
+
+
+def local_pachuli_path(app_dir):
+    """Path to a pachuli.py sitting next to Pachul's own source (app_dir —
+    e.g. a `python app.py` dev checkout, or install.sh/the PKGBUILD's own
+    SRC_DIR before their install step runs), if present. pachuli is the
+    user's own separate project, not part of Pachul itself — most
+    checkouts simply won't have it, which is fine; this only offers
+    something to install when there's actually a file to install."""
+    if not app_dir:
+        return None
+    p = Path(app_dir) / "pachuli.py"
+    return str(p) if p.is_file() else None
+
+
+def get_pachuli_install_cmd(src_path):
+    """Installs a local pachuli.py as `pachuli` to the same directory as
+    the pachul launcher itself (matches install.sh's and the PKGBUILD's
+    own pachuli step), so it lands on PATH immediately — no build step,
+    since it's a plain Python script with its own shebang, just like
+    install.sh's `install -m 755` already does for it."""
+    return f"pkexec install -m 755 {shlex.quote(src_path)} /usr/local/bin/pachuli"
 
 
 def get_aur_rpc_version(pkg_name):
@@ -257,11 +330,11 @@ def check_aur_ahead_of_repo(pkg_name, installed_version):
 # pay for it (no extra subprocess calls at all).
 #
 # Privilege note: flatpak installs/removes are done with `--user` and need no
-# sudo — Flatpak's per-user mode is the common, recommended setup on Arch/
-# Manjaro (unlike distros that pre-configure a writable system-wide
-# installation). Snap fundamentally requires snapd, which always needs root
-# for install/remove/refresh, so those go through the same `sudo -S` terminal
-# flow as pacman actions.
+# elevated privileges — Flatpak's per-user mode is the common, recommended
+# setup on Arch/Manjaro (unlike distros that pre-configure a writable
+# system-wide installation). Snap fundamentally requires snapd, which always
+# needs root for install/remove/refresh, so those go through the same
+# `pkexec` terminal flow as pacman actions.
 
 _flatpak_available_cache = None
 _snap_available_cache = None
@@ -700,9 +773,10 @@ def get_package_info(pkg_name):
     # Not installed and not in the sync DB — for AUR packages, ask a helper.
     helper = _find_aur_helper()
     if helper:
-        out3, code3 = run_command(f"{helper} -Si {q} 2>/dev/null", timeout=30)
+        cmd = f"pachuli -Si {q} -g 2>/dev/null" if helper == "pachuli" else f"{helper} -Si {q} 2>/dev/null"
+        out3, code3 = run_command(cmd, timeout=30)
         if out3 and code3 == 0:
-            return out3
+            return _strip_ansi(out3)
 
     if _is_demo():
         return (f"Name           : {pkg_name}\nVersion        : 1.0.0-1\n"
@@ -747,7 +821,7 @@ def search_file_owner(query):
     """Which package(s) own file paths matching `query` (regex, via `pacman -Fx`).
 
     Returns [{"pkg": "repo/name", "version": "1.0-1", "files": [...]}].
-    Requires the files DB to be synced first (`sudo pacman -Fy`) — callers
+    Requires the files DB to be synced first (`pkexec /usr/bin/pacman -Fy`) — callers
     should check `files_db_available()` and offer that sync if it's missing.
     """
     query = query.strip()
@@ -815,9 +889,10 @@ def check_updates():
         if not (helper and get_setting("include_aur_updates")):
             return []
         results = []
-        aout, acode = run_command(f"{helper} -Qua 2>/dev/null", timeout=90)
+        aur_cmd = "pachuli -Qua -g 2>/dev/null" if helper == "pachuli" else f"{helper} -Qua 2>/dev/null"
+        aout, acode = run_command(aur_cmd, timeout=90)
         if aout and acode == 0:
-            for line in aout.splitlines():
+            for line in _strip_ansi(aout).splitlines():
                 parts = line.strip().split()
                 if len(parts) >= 4:
                     results.append({"name": parts[0], "old": parts[1],
@@ -1067,7 +1142,7 @@ def _get_installed_aur_helpers():
     independent of which one Pachul is currently configured to use, since
     that's a separate question from what's simply installed."""
     found = []
-    for helper in ("yay", "paru", "pikaur", "trizen"):
+    for helper in ("pachuli", "yay", "paru", "pikaur", "trizen"):
         _, code = run_command(f"which {helper} 2>/dev/null")
         if code == 0:
             found.append(helper)
@@ -1203,6 +1278,109 @@ def get_pacman_history(limit=500):
     return entries[:limit]
 
 
+# ─── Real program icons (installed packages, Flatpak downloads) ───────────────
+
+def _parse_desktop_icon(path):
+    """Read the Icon= value out of a .desktop file's [Desktop Entry]
+    section. Returns None if the file can't be read or has no Icon= key."""
+    try:
+        in_entry = False
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line == "[Desktop Entry]":
+                    in_entry = True
+                    continue
+                if line.startswith("[") and line != "[Desktop Entry]":
+                    if in_entry:
+                        break
+                    continue
+                if in_entry and line.startswith("Icon="):
+                    return line[len("Icon="):].strip() or None
+    except Exception:
+        pass
+    return None
+
+
+def build_desktop_icon_map():
+    """Scan installed .desktop files once and map package/app identifier ->
+    icon value (bare theme name or absolute path, straight from Icon=).
+
+    Two sources, handled differently:
+      - Ordinary repo/AUR packages: .desktop files under the system (and
+        user) applications dirs, resolved back to their owning package via
+        pkgmanager.owning_package_for_file() (one pacman/dpkg/rpm query
+        per .desktop file — there are usually only a few dozen to a few
+        hundred of these, so this is cheap enough to do synchronously in
+        a background thread on every full package reload).
+      - Flatpak: exported .desktop files are named exactly after the
+        Flatpak application ID (e.g. org.gimp.GIMP.desktop), which is
+        also what Pachul stores as pkg_source_id — no ownership lookup
+        needed, the filename stem *is* the key.
+
+    Best-effort throughout: any package whose .desktop file is missing,
+    unreadable, or has no Icon= key is simply left out of the map, and
+    callers fall back to the existing symbolic icon set.
+    """
+    import glob
+    mapping = {}
+
+    system_dirs = [
+        "/usr/share/applications",
+        os.path.expanduser("~/.local/share/applications"),
+    ]
+    for d in system_dirs:
+        for path in glob.glob(os.path.join(d, "*.desktop")):
+            icon_val = _parse_desktop_icon(path)
+            if not icon_val:
+                continue
+            pkg = pkgmanager.owning_package_for_file(path)
+            if pkg:
+                mapping.setdefault(pkg, icon_val)
+
+    flatpak_dirs = [
+        "/var/lib/flatpak/exports/share/applications",
+        os.path.expanduser("~/.local/share/flatpak/exports/share/applications"),
+    ]
+    for d in flatpak_dirs:
+        for path in glob.glob(os.path.join(d, "*.desktop")):
+            app_id = os.path.splitext(os.path.basename(path))[0]
+            icon_val = _parse_desktop_icon(path)
+            if icon_val:
+                mapping.setdefault(app_id, icon_val)
+
+    return mapping
+
+
+def fetch_flatpak_icon(app_id):
+    """Best-effort download of a Flatpak app's icon from Flathub's public,
+    unauthenticated icon CDN, cached locally so each app is only fetched
+    once. Returns True if the icon is available locally afterwards
+    (already cached, or freshly downloaded), False if it couldn't be
+    fetched (offline, a non-Flathub remote, or no icon published there) —
+    callers should keep showing the existing symbolic icon in that case.
+    """
+    import urllib.request
+    from icons import FLATPAK_ICON_CACHE_DIR
+    if not app_id:
+        return False
+    dest = FLATPAK_ICON_CACHE_DIR / f"{app_id}.png"
+    if dest.is_file():
+        return True
+    url = f"https://dl.flathub.org/repo/appstream/x86_64/icons/128x128/{app_id}.png"
+    try:
+        FLATPAK_ICON_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        req = urllib.request.Request(url, headers={"User-Agent": "Pachul"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = r.read()
+        tmp = dest.with_suffix(".tmp")
+        tmp.write_bytes(data)
+        tmp.rename(dest)
+        return True
+    except Exception:
+        return False
+
+
 # ─── AUR package metadata (votes / popularity / maintainer) ───────────────────
 
 def get_aur_info(pkg_name):
@@ -1258,9 +1436,9 @@ def build_snapshot_cmd(comment="Pachul: before system upgrade"):
     supported snapshot tool (Timeshift/Snapper) is installed."""
     tool, info = detect_snapshot_tool()
     if tool == "timeshift":
-        return f"sudo -S timeshift --create --comments {shlex.quote(comment)} --scripted"
+        return f"pkexec /usr/bin/timeshift --create --comments {shlex.quote(comment)} --scripted"
     if tool == "snapper":
-        return f"sudo -S snapper -c {shlex.quote(info)} create --description {shlex.quote(comment)}"
+        return f"pkexec /usr/bin/snapper -c {shlex.quote(info)} create --description {shlex.quote(comment)}"
     return None
 
 
@@ -1285,9 +1463,10 @@ def get_pkgbuild(pkg_name):
         return f"# PKGBUILDs only exist on Arch Linux (AUR) — not applicable here.\n"
     helper = _find_aur_helper()
     if helper:
-        out, code = run_command(f"{helper} -Gp {shlex.quote(pkg_name)}", timeout=30)
+        cmd = f"pachuli -Sp {shlex.quote(pkg_name)} -g" if helper == "pachuli" else f"{helper} -Gp {shlex.quote(pkg_name)}"
+        out, code = run_command(cmd, timeout=30)
         if out and code == 0:
-            return out
+            return _strip_ansi(out)
     import urllib.request
     url = f"https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h={pkg_name}"
     try:
@@ -1711,7 +1890,7 @@ def _clamav_db_check():
     return {
         "id": "clamav_db", "name": "ClamAV Virus Definitions",
         "version": (version or "").strip(), "detail": "",
-        "update_cmd": "sudo freshclam",
+        "update_cmd": "pkexec /usr/bin/freshclam",
         "launch_cmd": None,
         "note": "Downloads the latest ClamAV signature database.",
     }
@@ -2186,7 +2365,7 @@ def build_hold_cmd(pkg_name, hold):
     tmp = set_package_ignored(pkg_name, hold)
     if tmp is None:
         return None
-    return f"sudo -S install -m644 {shlex.quote(tmp)} /etc/pacman.conf"
+    return f"pkexec /usr/bin/install -m644 {shlex.quote(tmp)} /etc/pacman.conf"
 
 
 def build_hold_cmd_bulk(pkg_names, hold):
@@ -2196,7 +2375,7 @@ def build_hold_cmd_bulk(pkg_names, hold):
     tmp = set_packages_ignored(pkg_names, hold)
     if tmp is None:
         return None
-    return f"sudo -S install -m644 {shlex.quote(tmp)} /etc/pacman.conf"
+    return f"pkexec /usr/bin/install -m644 {shlex.quote(tmp)} /etc/pacman.conf"
 
 
 def get_downgrade_candidates(pkg_name):
@@ -2218,7 +2397,7 @@ def build_downgrade_cmd(pkg_name, candidate):
     get_downgrade_candidates()."""
     if not distro.is_arch():
         return pkgmanager.downgrade_cmd(pkg_name, candidate)
-    return f"sudo -S pacman -U --noconfirm {shlex.quote(candidate['source'])}"
+    return f"pkexec /usr/bin/pacman -U --noconfirm {shlex.quote(candidate['source'])}"
 
 
 def get_cached_versions(pkg_name):
@@ -2265,6 +2444,29 @@ def search_packages_cmd(query):
             i += 1
         return pkgs
 
+    def parse_pachuli_ss(out):
+        """Parses pachuli's numbered `-Ss` search output (always
+        ANSI-colored, one result per two lines: 'N repo/name version [...]'
+        then an indented description line) into the same shape as
+        parse_pacman_ss above."""
+        pkgs = []
+        lines = _strip_ansi(out).splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            m = re.match(r"^\d+\s+(\S+)/(\S+)\s+(\S+)", line)
+            if m:
+                repo, name, version = m.group(1), m.group(2), m.group(3)
+                has_desc = i + 1 < len(lines) and lines[i + 1].startswith(" ")
+                desc = lines[i + 1].strip() if has_desc else ""
+                pkgs.append({"name": name, "version": version, "repo": repo,
+                             "description": desc, "status": "available",
+                             "foreign": repo.lower() == "aur"})
+                i += 2 if has_desc else 1
+                continue
+            i += 1
+        return pkgs
+
     packages = []
     seen = set()
 
@@ -2297,9 +2499,16 @@ def search_packages_cmd(query):
 
     aur_helper = _find_aur_helper()
     if aur_helper:
-        aur_out, aur_code = run_command(f"{aur_helper} -Ss --aur {qq} 2>/dev/null", timeout=30)
-        if aur_out and aur_code == 0:
-            for p in parse_pacman_ss(aur_out):
+        if aur_helper == "pachuli":
+            # -a/--aur-only skips pachuli's own (redundant) repo search;
+            # -q suppresses its status lines so only result lines remain.
+            aur_out, aur_code = run_command(f"pachuli -Ss {qq} -a -q -g 2>/dev/null", timeout=30)
+            aur_pkgs = parse_pachuli_ss(aur_out) if (aur_out and aur_code == 0) else []
+        else:
+            aur_out, aur_code = run_command(f"{aur_helper} -Ss --aur {qq} 2>/dev/null", timeout=30)
+            aur_pkgs = parse_pacman_ss(aur_out) if (aur_out and aur_code == 0) else []
+        if aur_pkgs:
+            for p in aur_pkgs:
                 if p["name"] not in seen:
                     p["foreign"] = True
                     if p["repo"].lower() not in ("core", "extra", "multilib", "community"):
@@ -2356,13 +2565,13 @@ def find_install_script(app_dir):
 
 
 def build_install_command(app_dir):
-    """sudo -S command that runs install.sh non-interactively, through the
-    exact same terminal/password flow every other privileged action in the
+    """pkexec command that runs install.sh non-interactively, through the
+    exact same terminal/pkexec flow every other privileged action in the
     app already uses — there's only one installation code path to maintain."""
     script = find_install_script(app_dir)
     if not script:
         return None
-    return f"sudo -S bash {shlex.quote(script)}"
+    return f"pkexec /usr/bin/bash {shlex.quote(script)}"
 
 
 def is_autostart_enabled():
@@ -2541,9 +2750,18 @@ def _pachul_icon_path():
 def send_update_notification(n, extra=0):
     """Send a desktop notification about n available package updates,
     plus (optionally) how many enabled "More Update Sources" tools are
-    ready to run alongside the next system upgrade."""
+    ready to run alongside the next system upgrade.
+
+    Returns the notification's id (via notify-send's -p/--print-id) so a
+    caller that keeps running (the tray icon) can later withdraw it with
+    withdraw_notification() once the pending count drops back to 0 —
+    otherwise a stale "N updates available" entry can keep sitting in
+    the desktop's notification history/center long after the updates
+    were actually installed. Returns None if the id couldn't be
+    determined (e.g. notify-send is missing, or too old to support -p),
+    in which case there's simply nothing to withdraw later."""
     if run_command("which notify-send 2>/dev/null")[1] != 0:
-        return
+        return None
     from i18n import tr   # local import: avoids a circular import with i18n.py
     title = tr("Updates Available")
     parts = []
@@ -2557,9 +2775,30 @@ def send_update_notification(n, extra=0):
         parts.append(line.format(n=extra))
     body = " ".join(parts)
     icon = _pachul_icon_path()
-    run_command(
-        f"notify-send --app-name=Pachul --icon={shlex.quote(icon)} "
+    out, code = run_command(
+        f"notify-send --app-name=Pachul --icon={shlex.quote(icon)} -p "
         f"{shlex.quote('Pachul: ' + title)} {shlex.quote(body)}")
+    if code == 0 and out.strip().isdigit():
+        return int(out.strip())
+    return None
+
+
+def withdraw_notification(notif_id):
+    """Close a previously-sent desktop notification by the id
+    send_update_notification() returned, via the freedesktop.org
+    Notifications D-Bus interface — notify-send itself has no way to
+    withdraw a notification after the fact, only the D-Bus interface
+    underneath it does. A no-op if notif_id is None (nothing was ever
+    sent, or the id couldn't be determined) or if the notification was
+    already dismissed/expired on its own; CloseNotification on an
+    already-gone id is harmless."""
+    if notif_id is None:
+        return
+    run_command(
+        "gdbus call --session --dest org.freedesktop.Notifications "
+        "--object-path /org/freedesktop/Notifications "
+        "--method org.freedesktop.Notifications.CloseNotification "
+        f"{int(notif_id)}")
 
 
 def run_update_notification_check():

@@ -382,7 +382,9 @@ STRINGS_DE = {
 
     # Terminal dialog
     "Close": "Schließen",
-    "Password or input — press Enter to send": "Passwort oder Eingabe — Enter zum Senden",
+    "Input for the running command (rarely needed) — press Enter to send": "Eingabe für den laufenden Befehl (selten nötig) — Enter zum Senden",
+    "Show input": "Eingabe anzeigen",
+    "Hide input": "Eingabe verbergen",
     "Send": "Senden",
     "Show/hide input": "Eingabe ein-/ausblenden",
     "(input sent)\n": "(Eingabe gesendet)\n",
@@ -541,6 +543,19 @@ STRINGS_DE = {
         "andere Helfer. Wird aus dem AUR gebaut, genau wie jedes andere AUR-Paket "
         "(benötigt base-devel und git).",
     "Install paru": "paru installieren",
+    "pachuli found but not installed": "pachuli gefunden, aber nicht installiert",
+    "A pachuli.py was found next to Pachul's own files but isn't "
+    "on your PATH yet, so it can't be used as the AUR helper. "
+    "Installs it as-is to /usr/local/bin — same place as the "
+    "pachul launcher itself — no build step, just the one-time "
+    "authentication any system-wide install needs.":
+        "Eine pachuli.py wurde neben den eigenen Dateien von Pachul gefunden, "
+        "steht aber noch nicht im PATH und kann daher nicht als AUR-Helfer "
+        "genutzt werden. Wird unverändert nach /usr/local/bin installiert — "
+        "derselbe Ort wie der pachul-Launcher selbst — kein Bauvorgang nötig, "
+        "nur die einmalige Authentifizierung, die jede systemweite "
+        "Installation braucht.",
+    "Install pachuli": "pachuli installieren",
     "Include AUR in update checks": "AUR bei Update-Prüfungen einbeziehen",
     "Additional Package Sources": "Zusätzliche Paketquellen",
     "Show installed Flatpak/Snap apps alongside pacman packages, and include them when searching. Flatpak installs use --user (no password needed); Snap always needs one, since snapd requires root.":
@@ -773,10 +788,8 @@ STRINGS_DE = {
     # ── Repair System (apt/dpkg), Debian-only ───────────────────────────────
     "Repair System (apt/dpkg)…": "System reparieren (apt/dpkg)…",
     "Repair System": "System reparieren",
-    "These run real apt/dpkg maintenance commands with sudo — read what each "
-    "one does before running it, especially the last one.":
-        "Dies sind echte apt-/dpkg-Wartungsbefehle mit sudo — lies vor dem Ausführen, "
-        "was jeder einzelne tut, besonders den letzten.",
+    'These run real apt/dpkg maintenance commands with root privileges (via pkexec) — read what each one does before running it, especially the last one.':
+        'Dies sind echte apt-/dpkg-Wartungsbefehle mit Root-Rechten (via pkexec) — lies vor dem Ausführen, was jeder einzelne tut, besonders den letzten.',
     "Update, Upgrade & Autoremove": "Update, Upgrade & Autoremove",
     "Refreshes the package index, upgrades everything, then removes packages "
     "no longer needed by anything else.":
@@ -836,10 +849,8 @@ STRINGS_DE = {
 
     # ── Repair System (dnf/rpm), Fedora-only ────────────────────────────────
     "Repair System (dnf/rpm)…": "System reparieren (dnf/rpm)…",
-    "These run real dnf/rpm maintenance commands with sudo — read what each "
-    "one does before running it, especially the last one.":
-        "Dies sind echte dnf-/rpm-Wartungsbefehle mit sudo — lies vor dem Ausführen, "
-        "was jeder einzelne tut, besonders den letzten.",
+    'These run real dnf/rpm maintenance commands with root privileges (via pkexec) — read what each one does before running it, especially the last one.':
+        'Dies sind echte dnf-/rpm-Wartungsbefehle mit Root-Rechten (via pkexec) — lies vor dem Ausführen, was jeder einzelne tut, besonders den letzten.',
     "Refreshes repo metadata, upgrades everything, then removes packages "
     "no longer needed by anything else.":
         "Aktualisiert die Repo-Metadaten, upgradet alles und entfernt anschließend "
@@ -884,10 +895,8 @@ STRINGS_DE = {
 
     # ── Repair System (zypper/rpm), openSUSE-only ───────────────────────────
     "Repair System (zypper/rpm)…": "System reparieren (zypper/rpm)…",
-    "These run real zypper/rpm maintenance commands with sudo — read what "
-    "each one does before running it, especially the last one.":
-        "Dies sind echte zypper-/rpm-Wartungsbefehle mit sudo — lies vor dem "
-        "Ausführen, was jeder einzelne tut, besonders den letzten.",
+    'These run real zypper/rpm maintenance commands with root privileges (via pkexec) — read what each one does before running it, especially the last one.':
+        'Dies sind echte zypper-/rpm-Wartungsbefehle mit Root-Rechten (via pkexec) — lies vor dem Ausführen, was jeder einzelne tut, besonders den letzten.',
     "Update & Upgrade": "Update & Upgrade",
     "Refreshes repo metadata, then installs all available updates.":
         "Aktualisiert die Repo-Metadaten und installiert dann alle verfügbaren "
@@ -905,7 +914,7 @@ STRINGS_DE = {
         "geändert würde, ohne tatsächlich etwas zu ändern.",
 
     # ── Repair System (pacman), Arch-only ───────────────────────────────────
-    "Repair System (pacman)…": "System reparieren (pacman)…",
+    "Repair System (pacman)…": "System reparieren…",
     "These run real pacman/pacman-key commands with sudo — read what each "
     "one does before running it, especially the last one.":
         "Dies sind echte pacman-/pacman-key-Befehle mit sudo — lies vor dem "
@@ -913,35 +922,31 @@ STRINGS_DE = {
     "Standard Maintenance": "Standard-Wartung",
     "Last Resort": "Letzter Ausweg",
     "Force-Refresh & Full Upgrade": "Erzwungenes Neuladen & Vollupgrade",
-    "Runs 'pacman -Syyu' — forces a fresh download of all repo "
-    "databases (ignoring their last-sync timestamps) before "
-    "upgrading, useful when a mirror served stale or corrupt data.":
-        "Führt „pacman -Syyu“ aus — erzwingt einen frischen Download aller "
-        "Repo-Datenbanken (ignoriert deren letzten Sync-Zeitstempel) vor dem "
-        "Upgrade, nützlich wenn ein Mirror veraltete oder beschädigte Daten "
-        "geliefert hat.",
+    "Runs 'pacman -Syyu' with root privileges (via pkexec). Normally pacman only re-downloads a repo's database if its timestamp changed; this ignores that and forces a fresh download of ALL repo databases before upgrading every installed package. Use this when a mirror served you a stale or corrupted database — typical symptoms are pacman reporting packages as up to date that you know aren't, or checksum/signature errors that don't go away with a normal update. Takes longer than a regular sync since nothing is skipped, but makes no changes beyond what -Syu itself would install anyway.":
+        'Führt „pacman -Syyu“ mit Root-Rechten (via pkexec) aus. Normalerweise lädt pacman die Datenbank eines Repos nur neu, wenn sich deren Zeitstempel geändert hat; das hier ignoriert das und erzwingt einen frischen Download ALLER Repo-Datenbanken, bevor jedes installierte Paket aktualisiert wird. Nutze das, wenn ein Mirror veraltete oder beschädigte Daten geliefert hat — typische Anzeichen sind, dass pacman Pakete als aktuell meldet, obwohl du weißt, dass sie es nicht sind, oder Prüfsummen-/Signaturfehler, die auch bei einem normalen Update nicht verschwinden. Dauert länger als ein normaler Sync, da nichts übersprungen wird, ändert aber nichts, was -Syu nicht ohnehin installieren würde.',
     "Check Package Database Consistency": "Paketdatenbank auf Konsistenz prüfen",
-    "Runs 'pacman -Dk' to check the local package database itself "
-    "for internal inconsistencies (separate from checking individual "
-    "installed files).":
-        "Führt „pacman -Dk“ aus, um die lokale Paketdatenbank selbst auf "
-        "interne Inkonsistenzen zu prüfen (unabhängig von der Prüfung "
-        "einzelner installierter Dateien).",
+    "Runs 'pacman -Dk', a fast, read-only check. It only looks at "
+    "pacman's own local database — the dependency graph and package "
+    "metadata under /var/lib/pacman — for internal problems like "
+    "orphaned or duplicate entries. It does NOT look at the actual "
+    "installed files on disk (for that, see 'Search for Packages "
+    "With Missing/Modified Files' below); the two checks are "
+    "independent and catch different kinds of corruption.":
+        "Führt „pacman -Dk“ aus, eine schnelle, rein lesende Prüfung. Sie "
+        "betrachtet nur pacmans eigene lokale Datenbank — den "
+        "Abhängigkeitsgraphen und die Paket-Metadaten unter "
+        "/var/lib/pacman — auf interne Probleme wie verwaiste oder "
+        "doppelte Einträge. Sie prüft NICHT die tatsächlich installierten "
+        "Dateien auf der Festplatte (dafür siehe „Pakete mit fehlenden/"
+        "geänderten Dateien suchen“ weiter unten); die beiden Prüfungen "
+        "sind unabhängig voneinander und finden unterschiedliche Arten "
+        "von Beschädigung.",
     "Reinitialize Keyring": "Keyring neu initialisieren",
-    "Runs 'pacman-key --init' and '--populate archlinux' — a deeper "
-    "fix than the automatic keyring banner elsewhere, for when "
-    "signature errors persist after that lighter fix.":
-        "Führt „pacman-key --init“ und „--populate archlinux“ aus — eine "
-        "tiefergehende Reparatur als das automatische Keyring-Banner an "
-        "anderer Stelle, für den Fall, dass Signaturfehler nach dieser "
-        "leichteren Lösung weiter bestehen.",
+    "Runs 'pacman-key --init' followed by 'pacman-key --populate archlinux' with root privileges (via pkexec). This resets and rebuilds pacman's GPG trust database from scratch and repopulates it with the official Arch Linux master keys. Use it when package signature verification keeps failing even after the lighter, automatic keyring-fix banner shown elsewhere in the app — that banner only imports one specific missing key, while this rebuilds the whole keyring. It talks to a keyserver over the network, so it can take a little while and will fail if you're offline.":
+        'Führt „pacman-key --init“ und danach „pacman-key --populate archlinux“ mit Root-Rechten (via pkexec) aus. Das setzt pacmans GPG-Vertrauensdatenbank komplett zurück, baut sie neu auf und befüllt sie wieder mit den offiziellen Arch-Linux-Hauptschlüsseln. Nutze das, wenn die Signaturprüfung von Paketen weiter fehlschlägt, selbst nachdem das leichtere, automatische Keyring-Fix-Banner an anderer Stelle in der App schon lief — jenes Banner importiert nur einen bestimmten fehlenden Schlüssel, während dies den kompletten Keyring neu aufbaut. Es spricht dabei über das Netzwerk mit einem Keyserver, kann also etwas dauern und schlägt fehl, wenn du offline bist.',
     "Search for Packages With Missing/Modified Files": "Pakete mit fehlenden/geänderten Dateien suchen",
-    "Runs 'pacman -Qkk' with sudo (read-only, no changes are made). "
-    "If any packages come back altered, you'll be asked right away "
-    "which ones to repair.":
-        "Führt „pacman -Qkk“ mit sudo aus (nur lesend, es wird nichts "
-        "verändert). Werden Pakete als verändert gemeldet, wirst du "
-        "sofort gefragt, welche davon repariert werden sollen.",
+    "Runs 'pacman -Qkk' with root privileges (via pkexec) — read-only, no changes are made. Unlike 'Check Package Database Consistency' above, this actually hashes every file every installed package owns and compares it against what the package claims it should be, so it also catches files that were deleted, changed, or have the wrong permissions/ownership. On a full system this can take a couple of minutes. It's normal to see a few 'altered' hits for config files under /etc you've deliberately edited yourself — those aren't corruption, and reinstalling can't fix them since pacman never overwrites a modified config file. If any packages come back altered, you'll be asked right away which ones to repair by reinstalling.":
+        'Führt „pacman -Qkk“ mit Root-Rechten (via pkexec) aus — rein lesend, es wird nichts verändert. Anders als „Paketdatenbank auf Konsistenz prüfen“ oben hasht das tatsächlich jede Datei jedes installierten Pakets und vergleicht sie mit dem, was das Paket erwartet, erkennt also auch gelöschte, geänderte oder mit falschen Rechten/Besitzer versehene Dateien. Auf einem vollen System kann das ein paar Minuten dauern. Es ist normal, ein paar „geänderte“ Treffer bei config-Dateien unter /etc zu sehen, die du selbst bewusst bearbeitet hast — das ist keine Beschädigung, und eine Neuinstallation kann das nicht beheben, da pacman eine geänderte config-Datei nie überschreibt. Werden Pakete als verändert gemeldet, wirst du sofort gefragt, welche davon durch Neuinstallation repariert werden sollen.',
     "Run": "Ausführen",
     "Repair Broken Packages": "Kaputte Pakete reparieren",
     "{n} package(s) with missing or altered files found":
@@ -965,35 +970,53 @@ STRINGS_DE = {
         "die eine Neuinstallation nicht beheben kann.",
     "Select All": "Alle auswählen",
     "Select None": "Keine auswählen",
-    "Last resort for a single package pacman refuses to touch normally "
-    "— removes it while ignoring dependency checks entirely. Only use "
-    "this if the steps above didn't help, and only on the one package "
-    "causing the problem.":
-        "Letzter Ausweg für ein einzelnes Paket, das pacman normal nicht "
-        "anfasst — entfernt es unter vollständigem Ignorieren der "
-        "Abhängigkeitsprüfung. Nur verwenden, wenn die obigen Schritte "
-        "nicht geholfen haben, und nur für das eine Paket, das das Problem "
-        "verursacht.",
+    "Runs 'pacman -Rdd' with root privileges (via pkexec) on the single package name you type in. -Rdd removes it while skipping BOTH dependency checks that pacman normally does: it won't stop you even if other installed packages still depend on this one, and it won't try to remove anything that depends on it either — it only ever touches the one package you named. This is a genuine last resort for a package pacman refuses to touch any other way (e.g. it's stuck half-installed and blocking every other operation); it can leave dependents broken, so only use it on the one package actually causing the problem, after the steps above didn't help, and reinstall it (or whatever needed it) afterwards if you can.":
+        'Führt „pacman -Rdd“ mit Root-Rechten (via pkexec) für genau das eine Paket aus, dessen Namen du eingibst. -Rdd entfernt es und überspringt dabei BEIDE Abhängigkeitsprüfungen, die pacman normalerweise macht: Es hält dich nicht auf, selbst wenn andere installierte Pakete noch von diesem abhängen, und es versucht auch nicht, irgendetwas zu entfernen, das von diesem Paket abhängt — es fasst wirklich nur das eine genannte Paket an. Das ist ein echter letzter Ausweg für ein Paket, das pacman auf keine andere Weise anfasst (z. B. weil es halb installiert feststeckt und jede andere Operation blockiert); es kann abhängige Pakete kaputt zurücklassen, also nur für das eine Paket verwenden, das tatsächlich das Problem verursacht, nachdem die obigen Schritte nicht geholfen haben, und es (bzw. was auch immer es brauchte) danach nach Möglichkeit neu installieren.',
 
     # ── Certificate Checker (Modul 2, cross-distro) ─────────────────────────
     "Certificate Checker": "Zertifikatsprüfung",
     "Check Certificates…": "Zertifikate prüfen…",
     "CA Certificate Bundle": "CA-Zertifikatspaket",
     "Reinstall CA Certificates & Rebuild Trust Store": "CA-Zertifikate neu installieren & Trust Store neu aufbauen",
-    "Reinstalls the ca-certificates package and regenerates the "
-    "system's trust store. Useful if HTTPS connections fail with "
-    "certificate-verification errors that aren't the remote site's "
-    "fault.":
-        "Installiert das ca-certificates-Paket neu und baut den System-Trust-Store "
-        "neu auf. Nützlich, wenn HTTPS-Verbindungen mit Zertifikatsprüfungsfehlern "
-        "fehlschlagen, die nicht an der Gegenstelle liegen.",
+    "Reinstalls the ca-certificates package (the bundle of root "
+    "certificates your system trusts by default) and regenerates the "
+    "system's trust store from it. Use this when HTTPS connections "
+    "fail with certificate-verification errors across multiple, "
+    "otherwise-unrelated sites at once — that pattern points at a "
+    "damaged or outdated local trust store rather than a problem "
+    "with any one remote site. Safe to run any time: it only "
+    "reinstalls the package and rebuilds the store, it doesn't "
+    "remove or add any certificate you didn't already have.":
+        "Installiert das ca-certificates-Paket (das Bündel an Root-Zertifikaten, "
+        "denen dein System standardmäßig vertraut) neu und baut daraus den "
+        "System-Trust-Store neu auf. Nutze das, wenn HTTPS-Verbindungen bei "
+        "mehreren, ansonsten unabhängigen Seiten gleichzeitig mit "
+        "Zertifikatsprüfungsfehlern fehlschlagen — dieses Muster deutet auf "
+        "einen beschädigten oder veralteten lokalen Trust Store hin, nicht auf "
+        "ein Problem bei einer einzelnen Gegenstelle. Jederzeit gefahrlos "
+        "ausführbar: Es installiert nur das Paket neu und baut den Store neu "
+        "auf, entfernt oder fügt aber kein Zertifikat hinzu, das du nicht "
+        "ohnehin schon hattest.",
     "Domain Certificate Expiry": "Domain-Zertifikatsablauf",
     "Checks how many days remain before each domain's TLS "
     "certificate expires — nothing is changed, purely informational.":
         "Prüft, wie viele Tage bis zum Ablauf des TLS-Zertifikats jeder Domain "
         "verbleiben — es wird nichts geändert, rein informativ.",
     "Domains": "Domains",
-    "Comma-separated, e.g. example.com, mail.example.com": "Kommagetrennt, z. B. example.com, mail.example.com",
+    "Opens a real TLS connection to each domain on port 443 and reads "
+    "back the certificate it presents, then reports how many days "
+    "remain until it expires (or how many days ago it already did). "
+    "Comma-separated, e.g. example.com, mail.example.com — each "
+    "domain needs to actually be reachable over the network right "
+    "now, since this isn't a local file check like the one below, "
+    "it's a live connection.":
+        "Öffnet zu jeder Domain eine echte TLS-Verbindung auf Port 443, liest "
+        "das dabei präsentierte Zertifikat aus und meldet dann, wie viele Tage "
+        "bis zum Ablauf verbleiben (oder wie viele Tage der Ablauf schon "
+        "zurückliegt). Kommagetrennt, z. B. example.com, mail.example.com — "
+        "jede Domain muss dafür gerade jetzt übers Netzwerk erreichbar sein, "
+        "denn anders als die Prüfung unten ist das keine lokale Dateiprüfung, "
+        "sondern eine Live-Verbindung.",
     "Domains to check": "Zu prüfende Domains",
     "Check": "Prüfen",
     "Could not retrieve certificate (offline or unreachable?)": "Zertifikat konnte nicht abgerufen werden (offline oder nicht erreichbar?)",
@@ -1002,10 +1025,25 @@ STRINGS_DE = {
     "Valid, {days} days remaining (until {date})": "Gültig, noch {days} Tage (bis {date})",
     "Local Certificates": "Lokale Zertifikate",
     "Show Expired Local Certificates": "Abgelaufene lokale Zertifikate anzeigen",
-    "Read-only: scans /etc/ssl/certs for .pem certificates that have "
-    "already expired.":
-        "Nur lesend: durchsucht /etc/ssl/certs nach bereits abgelaufenen "
-        ".pem-Zertifikaten.",
+    "Read-only: scans every .pem file under /etc/ssl/certs and checks "
+    "its expiry date, without opening any network connection. This "
+    "covers only that one system-wide certificate directory — not "
+    "your browser's own certificate store, not a login keychain, and "
+    "not certificates presented by remote servers (use the Domain "
+    "check above for those). An expired entry here doesn't "
+    "necessarily break anything today, since most software only "
+    "cares about a certificate's validity at the moment it's "
+    "actually used, but it's worth knowing about and cleaning up.":
+        "Nur lesend: prüft jede .pem-Datei unter /etc/ssl/certs auf ihr "
+        "Ablaufdatum, ohne eine Netzwerkverbindung zu öffnen. Das deckt nur "
+        "dieses eine systemweite Zertifikatsverzeichnis ab — nicht den "
+        "eigenen Zertifikatsspeicher deines Browsers, nicht einen Login-"
+        "Schlüsselbund und nicht Zertifikate, die entfernte Server "
+        "präsentieren (dafür die Domain-Prüfung oben nutzen). Ein "
+        "abgelaufener Eintrag hier muss heute noch nichts kaputt machen, da "
+        "die meiste Software die Gültigkeit eines Zertifikats nur im Moment "
+        "seiner tatsächlichen Verwendung prüft — trotzdem gut zu wissen und "
+        "aufzuräumen.",
     "EXPIRED: {cert}": "ABGELAUFEN: {cert}",
     "All local certificates are valid.": "Alle lokalen Zertifikate sind gültig.",
 
@@ -1016,22 +1054,16 @@ STRINGS_DE = {
         "Nicht paketbezogen — allgemeine Datenträger-Bereinigung für das "
         "systemd-Journal, alte Thumbnail-Vorschaubilder und den Papierkorb.",
     "Clean systemd Journal": "systemd-Journal bereinigen",
-    "Shrinks the journal to 500 MB and removes entries older than 4 weeks.":
-        "Verkleinert das Journal auf 500 MB und entfernt Einträge, die älter "
-        "als 4 Wochen sind.",
+    "Runs 'journalctl --vacuum-size=500M' followed by '--vacuum-time=4weeks'. This only vacuums (rotates out and discards) old log entries — it shrinks the journal down to 500 MB total and additionally removes anything older than 4 weeks, whichever removes more; it never touches today's live, currently-being-written log. Needs root privileges (via pkexec) since the journal under /var/log/journal is root-owned. Worth running if disk space is tight and 'journalctl --disk-usage' shows the journal has grown large — otherwise there's no real downside to leaving it, you just lose the ability to look further back in the logs.":
+        'Führt „journalctl --vacuum-size=500M“ und danach „--vacuum-time=4weeks“ aus. Das rotiert und verwirft nur alte Log-Einträge — es verkleinert das Journal insgesamt auf 500 MB und entfernt zusätzlich alles, was älter als 4 Wochen ist, je nachdem, was mehr entfernt; das heutige, gerade geschriebene Live-Log wird dabei nie angefasst. Benötigt Root-Rechte (via pkexec), da das Journal unter /var/log/journal root-Besitz gehört. Lohnt sich, wenn der Speicherplatz knapp wird und „journalctl --disk-usage“ ein groß gewachsenes Journal zeigt — ansonsten gibt es keinen echten Nachteil, es weiter liegen zu lassen, du verlierst nur die Möglichkeit, weiter in die Vergangenheit zu schauen.',
     "Remove Old Thumbnail Previews": "Alte Thumbnail-Vorschaubilder entfernen",
-    "Deletes cached thumbnail images in ~/.cache/thumbnails older than "
-    "30 days. No sudo needed — this only touches your own cache.":
-        "Löscht zwischengespeicherte Thumbnail-Bilder in ~/.cache/thumbnails, "
-        "die älter als 30 Tage sind. Kein sudo nötig — betrifft nur den "
-        "eigenen Cache.",
+    "Deletes cached preview images under ~/.cache/thumbnails that haven't been accessed in the last 30 days — the small generated thumbnails your file manager shows for images, videos, and documents, not the original files themselves. Nothing here is unique data: any thumbnail your file manager still needs gets silently regenerated the next time you browse to that folder, so this is purely reclaiming disk space with no real downside beyond a brief re-generation delay next time. No elevated privileges needed — this only touches your own user cache, never system files.":
+        'Löscht zwischengespeicherte Vorschaubilder unter ~/.cache/thumbnails, auf die in den letzten 30 Tagen nicht zugegriffen wurde — die kleinen, generierten Thumbnails, die dein Dateimanager für Bilder, Videos und Dokumente anzeigt, nicht die Originaldateien selbst. Hier steckt keine einzigartige Information: Jedes Thumbnail, das dein Dateimanager noch braucht, wird beim nächsten Aufruf des Ordners automatisch neu erzeugt — es geht also rein um Speicherplatz zurückzugewinnen, ohne echten Nachteil außer einer kurzen Neuerzeugungs-Verzögerung beim nächsten Mal. Keine erhöhten Rechte nötig — betrifft nur den eigenen Benutzer-Cache, nie Systemdateien.',
     "Done.": "Fertig.",
     "No thumbnail cache found.": "Kein Thumbnail-Cache gefunden.",
     "Empty Trash": "Papierkorb leeren",
-    "Permanently empties your desktop trash/recycle bin (via 'gio "
-    "trash --empty'). No sudo needed.":
-        "Leert den Papierkorb der Desktop-Umgebung endgültig (via „gio trash "
-        "--empty“). Kein sudo nötig.",
+    "Permanently empties your desktop trash/recycle bin via 'gio trash --empty', following the same XDG trash location (usually ~/.local/share/Trash) your file manager already uses — so anything you see in the Trash there is exactly what this removes. Unlike a normal delete, this step is NOT recoverable through the trash/recycle-bin UI afterwards; files not already in the trash are completely unaffected. No elevated privileges needed, since it only ever touches your own account's trash.":
+        'Leert den Papierkorb der Desktop-Umgebung endgültig via „gio trash --empty“ — am selben XDG-Papierkorb-Ort (meist ~/.local/share/Trash), den dein Dateimanager ohnehin schon nutzt, d. h. alles, was du dort im Papierkorb siehst, wird genau dadurch entfernt. Anders als ein normales Löschen ist dieser Schritt danach NICHT über die Papierkorb-Oberfläche wiederherstellbar; Dateien, die noch nicht im Papierkorb liegen, bleiben völlig unberührt. Keine erhöhten Rechte nötig, da es nur den Papierkorb des eigenen Kontos betrifft.',
     "gio not found — nothing to do.": "gio nicht gefunden — nichts zu tun.",
 
     # ── Broken Symlink Finder (Modul 5b, cross-distro) ──────────────────────
@@ -1061,17 +1093,11 @@ STRINGS_DE = {
         "Neuinstallation dieses Pakets behebt den Symlink meist.",
     "Scan": "Scan",
     "Scan Only": "Nur scannen",
-    "Read-only: lists and classifies broken symlinks without deleting "
-    "anything. No sudo needed.":
-        "Nur lesend: listet und klassifiziert kaputte Symlinks, ohne "
-        "irgendetwas zu löschen. Kein sudo nötig.",
+    'Read-only: searches /usr and /etc for symlinks whose target no longer exists, then sorts every one it finds into one of three groups for the report — license-file leftovers (safe), Arch/Manjaro archiso build templates (safe but distro-specific, expected to exist there), and everything else (needs manual review). Nothing is ever deleted by this button, and since it only reads the filesystem, no elevated privileges are needed.':
+        'Nur lesend: durchsucht /usr und /etc nach Symlinks, deren Ziel nicht mehr existiert, und ordnet jeden gefundenen einer von drei Gruppen im Bericht zu — Lizenzdatei-Reste (sicher), Arch/Manjaro-archiso-Bauvorlagen (sicher, aber distro-spezifisch, dort zu erwarten) und alles andere (manuelle Prüfung nötig). Dieser Button löscht niemals etwas, und da er nur das Dateisystem liest, ist keine erhöhte Berechtigung nötig.',
     "Scan & Remove Safe Ones": "Scannen & sichere entfernen",
-    "Same scan, but also deletes the SAFE-category links (license "
-    "leftovers only — archiso templates and anything else are still "
-    "just listed, never touched). Needs sudo.":
-        "Derselbe Scan, löscht aber zusätzlich die SICHER-Kategorie (nur "
-        "Lizenz-Reste — archiso-Vorlagen und alles andere werden weiterhin "
-        "nur aufgelistet, nie angefasst). Benötigt sudo.",
+    "Runs the same scan as above, but this time actually deletes the links it classified as safe — license-file leftovers under /usr/share/licenses only. The archiso-template group and everything in the review group are still just listed, never touched, no matter how many times you run this. Needs root privileges (via pkexec) because /usr/share is owned by root, so the deletion itself requires elevated permissions even though scanning doesn't.":
+        'Führt denselben Scan wie oben aus, löscht diesmal aber tatsächlich die als sicher eingestuften Links — ausschließlich Lizenzdatei-Reste unter /usr/share/licenses. Die archiso-Vorlagen-Gruppe und alles in der Prüfen-Gruppe werden weiterhin nur aufgelistet, egal wie oft du das ausführst. Benötigt Root-Rechte (via pkexec), weil /usr/share root gehört — das Löschen selbst braucht also erhöhte Rechte, auch wenn das Scannen keine braucht.',
     "Clean": "Bereinigen",
 
     # ── Services & Security Check (Modul 7, cross-distro) ───────────────────
@@ -1145,20 +1171,8 @@ STRINGS_DE = {
     # ── Configuration Backup (Modul 6, distro-spezifische Dateiliste) ──────
     "Configuration Backup": "Konfigurationsbackup",
     "Configuration Backup…": "Konfigurationsbackup…",
-    "Creates a compressed archive of your system's identity and boot "
-    "configuration (fstab, hostname, bootloader, package-manager "
-    "config, …) plus a plain-text list of explicitly-installed "
-    "packages, so a fresh install can be brought back to a similar "
-    "state. Only the last 5 archives are kept; older ones are removed "
-    "automatically. No sudo needed — these files are normally "
-    "world-readable.":
-        "Erstellt ein komprimiertes Archiv der System-Identitäts- und "
-        "Boot-Konfiguration (fstab, Hostname, Bootloader, "
-        "Paketmanager-Konfiguration, …) sowie eine Textliste der explizit "
-        "installierten Pakete, damit eine Neuinstallation wieder in einen "
-        "ähnlichen Zustand gebracht werden kann. Es werden nur die letzten "
-        "5 Archive behalten; ältere werden automatisch entfernt. Kein "
-        "sudo nötig — diese Dateien sind normalerweise für alle lesbar.",
+    "Creates a compressed archive of your system's identity and boot configuration (fstab, hostname, bootloader, package-manager config, …) plus a plain-text list of explicitly-installed packages, so a fresh install can be brought back to a similar state. Only the last 5 archives are kept; older ones are removed automatically. No elevated privileges needed — these files are normally world-readable.":
+        'Erstellt ein komprimiertes Archiv der System-Identitäts- und Boot-Konfiguration (fstab, Hostname, Bootloader, Paketmanager-Konfiguration, …) sowie eine Textliste der explizit installierten Pakete, damit eine Neuinstallation wieder in einen ähnlichen Zustand gebracht werden kann. Es werden nur die letzten 5 Archive behalten; ältere werden automatisch entfernt. Keine erhöhten Rechte nötig — diese Dateien sind normalerweise für alle lesbar.',
     "Backup Folder": "Backup-Ordner",
     "Included If Present": "Enthalten, falls vorhanden",
     "Also saves the list of explicitly-installed packages.":
@@ -1501,7 +1515,9 @@ STRINGS_FR = {
 
     # Terminal dialog
     "Close": "Fermer",
-    "Password or input — press Enter to send": "Mot de passe ou saisie — Entrée pour envoyer",
+    "Input for the running command (rarely needed) — press Enter to send": "Saisie pour la commande en cours (rarement nécessaire) — Entrée pour envoyer",
+    "Show input": "Afficher la saisie",
+    "Hide input": "Masquer la saisie",
     "Send": "Envoyer",
     "Show/hide input": "Afficher/masquer la saisie",
     "(input sent)\n": "(saisie envoyée)\n",
@@ -2117,7 +2133,9 @@ STRINGS_IT = {
 
     # Terminal dialog
     "Close": "Chiudi",
-    "Password or input — press Enter to send": "Password o input — premi Invio per inviare",
+    "Input for the running command (rarely needed) — press Enter to send": "Input per il comando in esecuzione (raramente necessario) — Invio per inviare",
+    "Show input": "Mostra input",
+    "Hide input": "Nascondi input",
     "Send": "Invia",
     "Show/hide input": "Mostra/nascondi input",
     "(input sent)\n": "(input inviato)\n",

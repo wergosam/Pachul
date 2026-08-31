@@ -89,6 +89,10 @@ _INTERVAL_SECONDS = {"hourly": 3600, "6h": 6 * 3600, "daily": 24 * 3600}
 class PachulTray:
     def __init__(self):
         self._prev_count = None
+        # Id of the last "N updates available" notification we sent
+        # (None if we haven't sent one, or already withdrew it) — see
+        # _apply_result() and backend.withdraw_notification().
+        self._notif_id = None
 
         self.indicator = AppIndicator3.Indicator.new(
             APP_ID, ICON_PATH, AppIndicator3.IndicatorCategory.SYSTEM_SERVICES)
@@ -156,13 +160,29 @@ class PachulTray:
         n = len(updates)
         if n > 0:
             self.indicator.set_label(str(n), "")
+            # Not every StatusNotifierItem host renders the text label set
+            # above (stock GNOME Shell's AppIndicator extension in
+            # particular often doesn't) — but the hover tooltip is
+            # supported essentially everywhere, so update it too as a
+            # fallback that keeps the count visible either way.
+            self.indicator.set_icon_full(
+                ICON_PATH, tr("{n} update(s) available.").format(n=n))
             self.status_item.set_label(tr("{n} update(s) available.").format(n=n))
             if (notify_on_new and n != self._prev_count
                     and backend.get_setting("notify_updates")):
-                backend.send_update_notification(n)
+                self._notif_id = backend.send_update_notification(n)
         else:
             self.indicator.set_label("", "")
+            self.indicator.set_icon_full(ICON_PATH, tr("System is up to date"))
             self.status_item.set_label(tr("System is up to date"))
+            # The pending count just dropped to 0 (updates got installed,
+            # whether via the main window, the CLI, or somewhere else
+            # entirely) — withdraw any notification we'd sent earlier so
+            # a stale "N updates available" entry doesn't keep sitting in
+            # the desktop's notification history after the fact.
+            if self._notif_id is not None:
+                backend.withdraw_notification(self._notif_id)
+                self._notif_id = None
         self._prev_count = n
         return False
 

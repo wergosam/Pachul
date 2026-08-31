@@ -10,7 +10,36 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Gio, GObject, Pango
 
 from i18n import tr
-from icons import themed_image, get_icon_texture
+from icons import (themed_image, get_icon_texture,
+                    resolve_desktop_icon_paintable, get_flatpak_icon_paintable)
+
+# Populated once per full package reload by window.py (see
+# backend.build_desktop_icon_map()) — maps pkg_name/Flatpak-app-id to that
+# program's own Icon= value from its .desktop file. Empty until the first
+# background scan completes, so early binds simply fall through to the
+# existing symbolic icon set below; nothing here is required for the app
+# to function.
+INSTALLED_ICON_MAP = {}
+
+
+def set_installed_icon_map(mapping):
+    global INSTALLED_ICON_MAP
+    INSTALLED_ICON_MAP = mapping or {}
+
+
+def resolve_real_icon_paintable(pkg, size=22):
+    """Try to find pkg's own real icon (installed repo/AUR program via the
+    system icon theme, or a locally cached Flatpak download). Returns None
+    if nothing is available yet — callers fall back to the symbolic icon
+    set exactly as before."""
+    if pkg.pkg_repo == "flatpak" and pkg.pkg_source_id:
+        tex = get_flatpak_icon_paintable(pkg.pkg_source_id, size)
+        if tex is not None:
+            return tex
+    icon_val = INSTALLED_ICON_MAP.get(pkg.pkg_source_id or pkg.pkg_name)
+    if icon_val:
+        return resolve_desktop_icon_paintable(icon_val, size)
+    return None
 
 # ─── Icon helper ──────────────────────────────────────────────────────────────
 # Icons are rendered directly from our own inline SVG set (icons.py) instead
@@ -244,11 +273,15 @@ class PackageRowContent(Gtk.Box):
         if pkg:
             pkg._bound_widget = self
 
-        tex = get_icon_texture(pkg_icon(pkg.pkg_name), 22)
-        if tex is not None:
-            self.icon.set_from_paintable(tex)
+        real_tex = resolve_real_icon_paintable(pkg, 22)
+        if real_tex is not None:
+            self.icon.set_from_paintable(real_tex)
         else:
-            self.icon.set_from_icon_name(pkg_icon(pkg.pkg_name))
+            tex = get_icon_texture(pkg_icon(pkg.pkg_name), 22)
+            if tex is not None:
+                self.icon.set_from_paintable(tex)
+            else:
+                self.icon.set_from_icon_name(pkg_icon(pkg.pkg_name))
         self.name_label.set_label(pkg.pkg_name)
         self.desc_label.set_label(pkg.pkg_description or "")
         self.desc_label.set_visible(bool(pkg.pkg_description))
