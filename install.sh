@@ -25,6 +25,7 @@ DESKTOP_DIR="/usr/share/applications"
 ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
 POLICY_DIR="/usr/share/polkit-1/actions"
 ICON_ID="io.github.wergosam.pachul"
+BW_ICON_ID="io_github_wergosam_pachul_bw"
 DESKTOP_FILE="${DESKTOP_DIR}/${ICON_ID}.desktop"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -82,6 +83,7 @@ for f in "${PY_MODULES[@]}"; do
     [[ -f "${SRC_DIR}/${f}" ]] || MISSING_FILES+=("$f")
 done
 [[ -f "${SRC_DIR}/${ICON_ID}.svg" ]] || MISSING_FILES+=("${ICON_ID}.svg")
+[[ -f "${SRC_DIR}/${BW_ICON_ID}.svg" ]] || MISSING_FILES+=("${BW_ICON_ID}.svg")
 
 if [[ ${#MISSING_FILES[@]} -gt 0 ]]; then
     die "Missing files in ${SRC_DIR}:\n$(printf '   • %s\n' "${MISSING_FILES[@]}")"
@@ -143,6 +145,8 @@ install -d "$DATA_DIR"
 for f in "${PY_MODULES[@]}"; do
     install -m 644 "${SRC_DIR}/${f}" "${DATA_DIR}/${f}"
 done
+install -m 644 "${SRC_DIR}/${ICON_ID}.svg" "${DATA_DIR}/${ICON_ID}.svg"
+install -m 644 "${SRC_DIR}/${BW_ICON_ID}.svg" "${DATA_DIR}/${BW_ICON_ID}.svg"
 success "Modules installed."
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -251,6 +255,7 @@ info "Installing icon…"
 
 install -d "$ICON_DIR"
 install -m 644 "${SRC_DIR}/${ICON_ID}.svg" "${ICON_DIR}/${ICON_ID}.svg"
+install -m 644 "${SRC_DIR}/${BW_ICON_ID}.svg" "${ICON_DIR}/${BW_ICON_ID}.svg"
 gtk-update-icon-cache -f -t /usr/share/icons/hicolor &>/dev/null || true
 success "Icon installed."
 

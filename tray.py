@@ -58,8 +58,8 @@ from i18n import tr
 
 APP_ID = "pachul-tray"
 
-# Directory containing io.github.wergosam.pachul.svg — same layout in a
-# source checkout (right next to tray.py) and after installation
+# Directory containing io_github_wergosam_pachul_bw.svg — same layout in
+# a source checkout (right next to tray.py) and after installation
 # (both land in /usr/share/pachul/, see PKGBUILD).
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -79,7 +79,12 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # both lookups entirely: there's no name left for either AppIndicator or
 # Plasma to re-resolve. backend.py's _pachul_icon_path() already uses
 # this same trick for notify-send icons.
-ICON_PATH = os.path.join(APP_DIR, "io.github.wergosam.pachul.svg")
+#
+# The tray uses the black-and-white variant rather than the main
+# (transparent) app icon: most system trays render monochrome/symbolic
+# icons best at small sizes, and a single-tone glyph stays legible across
+# both light and dark panel themes.
+ICON_PATH = os.path.join(APP_DIR, "io_github_wergosam_pachul_bw.svg")
 
 # Mirrors backend._TIMER_INTERVALS (hourly | 6h | daily) used by the
 # systemd --user timer, so both mechanisms honour the same setting.

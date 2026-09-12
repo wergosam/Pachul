@@ -16,13 +16,14 @@ mit Platzhaltern einfach `.format(...)` nach `tr(...)` anhängen, z. B.:
 
 Die Sprache wird über backend.get_setting("language") persistiert und kann
 zur Laufzeit mit set_language() geändert werden. Da GTK4-Widgets nach dem
-Bau ihren Text nicht automatisch neu abfragen, baut pachulWindow bei einem
-Sprachwechsel im Einstellungen-Dialog seine komplette Oberfläche einmal
-neu auf (siehe pachulWindow._rebuild_for_language_change() in window.py),
-damit auch länger lebende Widgets (Seitenleiste, Menü, Kopfzeile, leere
-Zustände) den neuen Text sofort zeigen. Dialoge und Paketzeilen sind davon
-ohnehin nicht betroffen, da sie bei jedem Öffnen/Neuladen frisch mit tr()
-aufgebaut werden.
+Bau ihren Text nicht automatisch neu abfragen, baut pachulWindow bei jeder
+Einstellungsänderung (Sprache, Flatpak/Snap, ...) im Einstellungen-Dialog
+seine komplette Oberfläche einmal neu auf (siehe
+pachulWindow._rebuild_ui_preserving_state() in window.py), damit auch
+länger lebende Widgets (Seitenleiste, Menü, Kopfzeile, leere Zustände) den
+neuen Text bzw. neue/entfernte Seitenleisten-Einträge sofort zeigen.
+Dialoge und Paketzeilen sind davon ohnehin nicht betroffen, da sie bei
+jedem Öffnen/Neuladen frisch mit tr() aufgebaut werden.
 """
 
 import backend
@@ -110,7 +111,14 @@ STRINGS_DE = {
     "Updates": "Updates",
     "Installed": "Installiert",
     "New Packages": "Neue Pakete",
+    "New AUR Packages": "Neue AUR-Pakete",
+    "New Flatpak Packages": "Neue Flatpak-Pakete",
+    "New Chaotic-AUR Packages": "Neue Chaotic-AUR-Pakete",
     "AUR / Foreign": "AUR / Fremd",
+    "NEW": "NEU",
+    "INSTALLED PACKAGES": "INSTALLIERTE PAKETE",
+    "All Installed Packages": "Alle installierten Pakete",
+    "All New Packages": "Alle neuen Pakete",
     "REPOSITORIES": "REPOSITORIES",
     "TOOLS": "WERKZEUGE",
     "Check Updates": "Updates prüfen",
@@ -556,6 +564,21 @@ STRINGS_DE = {
         "nur die einmalige Authentifizierung, die jede systemweite "
         "Installation braucht.",
     "Install pachuli": "pachuli installieren",
+    "Build dependency prompts still use sudo": "Abhängigkeits-Abfragen beim Bauen laufen noch über sudo",
+    "While building an AUR package, makepkg installs any missing "
+    "dependencies itself — outside pachuli/yay/paru's own pkexec "
+    "or sudo call — and always does so via a plain sudo prompt in "
+    "the terminal panel, by default. This points /etc/makepkg.conf "
+    "at pkexec instead, so that step gets a native graphical "
+    "prompt too, same as the rest of every upgrade.":
+        "Beim Bauen eines AUR-Pakets installiert makepkg fehlende Abhängigkeiten "
+        "selbst — unabhängig vom eigenen pkexec- oder sudo-Aufruf von "
+        "pachuli/yay/paru — und fragt dafür standardmässig immer über eine "
+        "einfache sudo-Abfrage im Terminal-Panel nach. Dies trägt in "
+        "/etc/makepkg.conf stattdessen pkexec ein, sodass auch dieser "
+        "Schritt einen echten grafischen Dialog erhält, wie der Rest jedes "
+        "Updates.",
+    "Use pkexec for build dependencies": "pkexec für Build-Abhängigkeiten verwenden",
     "Include AUR in update checks": "AUR bei Update-Prüfungen einbeziehen",
     "Additional Package Sources": "Zusätzliche Paketquellen",
     "Show installed Flatpak/Snap apps alongside pacman packages, and include them when searching. Flatpak installs use --user (no password needed); Snap always needs one, since snapd requires root.":
@@ -1249,7 +1272,14 @@ STRINGS_FR = {
     "Updates": "Mises à jour",
     "Installed": "Installés",
     "New Packages": "Nouveaux paquets",
+    "New AUR Packages": "Nouveaux paquets AUR",
+    "New Flatpak Packages": "Nouveaux paquets Flatpak",
+    "New Chaotic-AUR Packages": "Nouveaux paquets Chaotic-AUR",
     "AUR / Foreign": "AUR / Externe",
+    "NEW": "NOUVEAU",
+    "INSTALLED PACKAGES": "PAQUETS INSTALLÉS",
+    "All Installed Packages": "Tous les paquets installés",
+    "All New Packages": "Tous les nouveaux paquets",
     "REPOSITORIES": "DÉPÔTS",
     "TOOLS": "OUTILS",
     "Check Updates": "Vérifier les mises à jour",
@@ -1867,7 +1897,14 @@ STRINGS_IT = {
     "Updates": "Aggiornamenti",
     "Installed": "Installati",
     "New Packages": "Nuovi pacchetti",
+    "New AUR Packages": "Nuovi pacchetti AUR",
+    "New Flatpak Packages": "Nuovi pacchetti Flatpak",
+    "New Chaotic-AUR Packages": "Nuovi pacchetti Chaotic-AUR",
     "AUR / Foreign": "AUR / Esterni",
+    "NEW": "NUOVO",
+    "INSTALLED PACKAGES": "PACCHETTI INSTALLATI",
+    "All Installed Packages": "Tutti i pacchetti installati",
+    "All New Packages": "Tutti i pacchetti nuovi",
     "REPOSITORIES": "REPOSITORY",
     "TOOLS": "STRUMENTI",
     "Check Updates": "Controlla aggiornamenti",

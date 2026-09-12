@@ -44,7 +44,9 @@ from backend import (run_command, get_orphans, get_system_info,
                      get_tool_updates, paru_installed, get_paru_bootstrap_cmd,
                      get_ignored_packages, build_hold_cmd_bulk, APP_VERSION,
                      aur_helper_install_cmd, pachuli_installed, local_pachuli_path,
-                     get_pachuli_install_cmd)
+                     get_pachuli_install_cmd, makepkg_pkexec_configured,
+                     get_makepkg_pkexec_cmd, pachuli_update_available,
+                     local_pachuli_version, installed_pachuli_version)
 from i18n import tr, get_language, set_language
 from icons import themed_image, themed_paintable
 
@@ -4846,16 +4848,29 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
         aur_group.add(paru_row)
 
     local_pachuli = local_pachuli_path(app_dir)
-    if local_pachuli and not pachuli_installed():
+    if local_pachuli and pachuli_update_available(local_pachuli):
+        pachuli_missing = not pachuli_installed()
         pachuli_row = Adw.ActionRow()
-        pachuli_row.set_title(tr("pachuli found but not installed"))
-        pachuli_row.set_subtitle(tr(
-            "A pachuli.py was found next to Pachul's own files but isn't "
-            "on your PATH yet, so it can't be used as the AUR helper. "
-            "Installs it as-is to /usr/local/bin — same place as the "
-            "pachul launcher itself — no build step, just the one-time "
-            "authentication any system-wide install needs."))
-        pachuli_btn = Gtk.Button(label=tr("Install pachuli"))
+        if pachuli_missing:
+            pachuli_row.set_title(tr("pachuli found but not installed"))
+            pachuli_row.set_subtitle(tr(
+                "A pachuli.py was found next to Pachul's own files but isn't "
+                "on your PATH yet, so it can't be used as the AUR helper. "
+                "Installs it as-is to /usr/local/bin — same place as the "
+                "pachul launcher itself — no build step, just the one-time "
+                "authentication any system-wide install needs."))
+            pachuli_btn = Gtk.Button(label=tr("Install pachuli"))
+        else:
+            pachuli_row.set_title(tr("Newer pachuli available"))
+            pachuli_row.set_subtitle(tr(
+                "A newer pachuli.py ({new}) was found next to Pachul's own "
+                "files than the one currently installed ({old}). Updating "
+                "replaces /usr/local/bin/pachuli with this version — no "
+                "build step, just the one-time authentication any "
+                "system-wide install needs."
+            ).format(new=local_pachuli_version(local_pachuli),
+                     old=installed_pachuli_version()))
+            pachuli_btn = Gtk.Button(label=tr("Update pachuli"))
         pachuli_btn.add_css_class("suggested-action")
         pachuli_btn.set_valign(Gtk.Align.CENTER)
 
@@ -4864,10 +4879,34 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
                 return
             btn.set_sensitive(False)
             run_terminal_fn(get_pachuli_install_cmd(local_pachuli),
-                             tr("Install pachuli"), parent=dlg)
+                             pachuli_btn.get_label(), parent=dlg)
         pachuli_btn.connect("clicked", _on_install_pachuli)
         pachuli_row.add_suffix(pachuli_btn)
         aur_group.add(pachuli_row)
+
+    if distro.is_arch() and not makepkg_pkexec_configured():
+        makepkg_row = Adw.ActionRow()
+        makepkg_row.set_title(tr("Build dependency prompts still use sudo"))
+        makepkg_row.set_subtitle(tr(
+            "While building an AUR package, makepkg installs any missing "
+            "dependencies itself — outside pachuli/yay/paru's own pkexec "
+            "or sudo call — and always does so via a plain sudo prompt in "
+            "the terminal panel, by default. This points /etc/makepkg.conf "
+            "at pkexec instead, so that step gets a native graphical "
+            "prompt too, same as the rest of every upgrade."))
+        makepkg_btn = Gtk.Button(label=tr("Use pkexec for build dependencies"))
+        makepkg_btn.add_css_class("suggested-action")
+        makepkg_btn.set_valign(Gtk.Align.CENTER)
+
+        def _on_configure_makepkg(btn):
+            if not run_terminal_fn:
+                return
+            btn.set_sensitive(False)
+            run_terminal_fn(get_makepkg_pkexec_cmd(),
+                             tr("Configure makepkg"), parent=dlg)
+        makepkg_btn.connect("clicked", _on_configure_makepkg)
+        makepkg_row.add_suffix(makepkg_btn)
+        aur_group.add(makepkg_row)
 
     inc_row = Adw.SwitchRow()
     inc_row.set_title(tr("Include AUR in update checks"))

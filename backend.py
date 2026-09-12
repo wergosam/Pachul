@@ -37,9 +37,19 @@ CACHE_DIR      = Path.home() / ".cache" / "pachul"
 PKG_CACHE      = CACHE_DIR / "packages.json"
 SYNCDB_CACHE   = CACHE_DIR / "syncdb.json"
 INSTALLED_CACHE= CACHE_DIR / "installed.json"
+FLATPAK_REMOTE_CACHE = CACHE_DIR / "flatpak_remote.json"
+AUR_NAMES_CACHE = CACHE_DIR / "aur_names.json"
+SNAP_CATALOG_CACHE = CACHE_DIR / "snap_catalog.json"
 APP_VERSION    = "2.2.7"   # shown in the About dialog — bump on every release
-CACHE_VERSION  = 2   # bump when the cached package schema changes, to force a rebuild
+CACHE_VERSION  = 4   # bump when the cached package schema changes, to force a rebuild
 SYNCDB_TTL     = 6 * 3600   # 6 hours
+FLATPAK_REMOTE_TTL = 6 * 3600   # same cadence as pacman's syncdb
+# packages.gz changes constantly in aggregate (packages come and go every
+# day), but any single refresh is just as informative a day later, and the
+# AUR explicitly asks bulk consumers of this dump not to poll it more often
+# than once every 24h.
+AUR_NAMES_TTL = 24 * 3600
+SNAP_CATALOG_TTL = 6 * 3600   # same cadence as the Flatpak remote catalog
 
 def _ensure_cache_dir():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -270,6 +280,39 @@ def local_pachuli_path(app_dir):
     return str(p) if p.is_file() else None
 
 
+def local_pachuli_version(local_path):
+    """Version der lokalen pachuli.py (siehe local_pachuli_path()), oder
+    None, falls keine gefunden/gelesen werden konnte."""
+    if not local_path:
+        return None
+    return _read_version_const(local_path, "VERSION")
+
+
+def installed_pachuli_version():
+    """Version des aktuell auf PATH installierten `pachuli`, oder None,
+    falls nicht installiert oder die Version nicht gelesen werden
+    konnte."""
+    path = shutil.which("pachuli")
+    if not path:
+        return None
+    return _read_version_const(path, "VERSION")
+
+
+def pachuli_update_available(local_path):
+    """True, wenn eine lokale pachuli.py existiert und entweder noch gar
+    nicht installiert ist, oder eine neuere Version als die aktuell
+    installierte hat. Braucht _read_version_const()/_version_newer()
+    weiter unten in dieser Datei (Pachul-Selbst-Installations-Abschnitt) —
+    beide sind bewusst generisch gehalten und nicht pachul-spezifisch."""
+    local_v = local_pachuli_version(local_path)
+    if not local_v:
+        return False
+    installed_v = installed_pachuli_version()
+    if installed_v is None:
+        return True
+    return _version_newer(local_v, installed_v)
+
+
 def get_pachuli_install_cmd(src_path):
     """Installs a local pachuli.py as `pachuli` to the same directory as
     the pachul launcher itself (matches install.sh's and the PKGBUILD's
@@ -277,6 +320,47 @@ def get_pachuli_install_cmd(src_path):
     since it's a plain Python script with its own shebang, just like
     install.sh's `install -m 755` already does for it."""
     return f"pkexec install -m 755 {shlex.quote(src_path)} /usr/local/bin/pachuli"
+
+
+MAKEPKG_CONF_PATH = "/etc/makepkg.conf"
+
+
+def makepkg_pkexec_configured():
+    """True if /etc/makepkg.conf already points PACMAN_AUTH at pkexec.
+
+    makepkg (called by pachuli/yay/paru/pikaur alike while building an AUR
+    package) installs missing build/runtime dependencies itself, entirely
+    outside any of those helpers' own privilege escalation — by default it
+    always shells out to plain `sudo` for that one step, regardless of
+    whether the helper's *own* upgrade/install call went through pkexec.
+    Since pacman 6.1, makepkg.conf's PACMAN_AUTH lets that step use pkexec
+    (or another tool) instead; this only checks whether it already does."""
+    try:
+        content = Path(MAKEPKG_CONF_PATH).read_text()
+    except OSError:
+        return False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("PACMAN_AUTH=") and "pkexec" in stripped:
+            return True
+    return False
+
+
+def get_makepkg_pkexec_cmd():
+    """Pkexec command that points /etc/makepkg.conf's PACMAN_AUTH at
+    pkexec, rewriting an existing (possibly commented-out) PACMAN_AUTH
+    line in place if one is present, or appending a fresh one otherwise —
+    run through `bash -c` since it needs a conditional, not a single
+    command. See makepkg_pkexec_configured() for why this setting exists
+    at all."""
+    script = (
+        f"if grep -q '^#\\?PACMAN_AUTH=' {MAKEPKG_CONF_PATH}; then "
+        f"sed -i 's|^#\\?PACMAN_AUTH=.*|PACMAN_AUTH=(/usr/bin/pkexec)|' {MAKEPKG_CONF_PATH}; "
+        f"else "
+        f"echo 'PACMAN_AUTH=(/usr/bin/pkexec)' >> {MAKEPKG_CONF_PATH}; "
+        f"fi"
+    )
+    return f"pkexec /usr/bin/bash -c {shlex.quote(script)}"
 
 
 def get_aur_rpc_version(pkg_name):
@@ -356,61 +440,213 @@ def snap_available():
     return _snap_available_cache
 
 
+def _load_flatpak_remote_cache():
+    """Return the cached flatpak-remote index if it's fresh enough."""
+    if _file_age(FLATPAK_REMOTE_CACHE) < FLATPAK_REMOTE_TTL:
+        data = _read_json(FLATPAK_REMOTE_CACHE)
+        if data:
+            return data
+    return None
+
+
+def _build_flatpak_remote_index():
+    """Every app/runtime available on ANY configured Flatpak remote (not
+    just installed ones) — {app_id: {"name", "version", "description"}}.
+    Cached with its own TTL like pacman's syncdb: `flatpak remote-ls`
+    has to be run once per configured remote (Flathub alone lists several
+    thousand entries), which is far too slow to redo on every package-list
+    load. Genuinely offline-safe: if there are no remotes configured, or
+    the command fails/times out, this just yields an empty index — same
+    empty-result shape either way, nothing for callers to special-case."""
+    remotes_out, _ = run_command("flatpak remotes --columns=name 2>/dev/null", timeout=10)
+    remotes = [r.strip() for r in (remotes_out or "").splitlines() if r.strip()]
+    index = {}
+    for remote in remotes:
+        # --all: same reasoning as get_flatpak_packages()'s own --all —
+        # without it, locale/debug/source extensions are silently missing
+        # from here even though flatpak update would still offer them.
+        out, code = run_command(
+            f"flatpak remote-ls {shlex.quote(remote)} --all "
+            "--columns=application,name,version,description 2>/dev/null", timeout=90)
+        if not out or code != 0:
+            continue
+        for line in out.splitlines():
+            parts = line.split("\t")
+            app_id = parts[0].strip() if parts else ""
+            if not app_id or app_id in index:  # first remote wins (usually flathub anyway)
+                continue
+            name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else app_id
+            version = parts[2].strip() if len(parts) > 2 else ""
+            desc = parts[3].strip() if len(parts) > 3 else ""
+            index[app_id] = {"name": name, "version": version, "description": desc}
+    _write_json(FLATPAK_REMOTE_CACHE, index)
+    return index
+
+
 def get_flatpak_packages():
-    """Installed Flatpak apps *and* runtimes, in the same dict shape
-    get_packages() uses. Runtimes (e.g. "org.gnome.Platform") are included
-    deliberately, not just apps — Pamac and other Flatpak-aware tools list
-    them too, and they can have their own pending updates that would
-    otherwise be invisible in the package list even though they're counted.
-    `--all` is required for that: `flatpak list` hides locale and debug
+    """Every Flatpak app/runtime worth showing — both installed *and*
+    available-but-not-installed, in the same dict shape get_packages()
+    uses (mirrors how pacman packages merge installed + syncdb below).
+    Runtimes (e.g. "org.gnome.Platform") are included deliberately, not
+    just apps — Pamac and other Flatpak-aware tools list them too, and
+    they can have their own pending updates that would otherwise be
+    invisible in the package list even though they're counted. `--all`
+    is required for that: `flatpak list` hides locale and debug
     extensions (e.g. "org.gnome.Platform.Locale") by default, same as
     remote-ls — without it those never show up here even though
     get_flatpak_updates() (which also uses --all) counts them as pending.
-    `source_id` carries the Flatpak ref ID (e.g. "org.gimp.GIMP"),
-    which is what the actual install/uninstall commands need — pkg_name
-    stays the friendly display name."""
+    `source_id` carries the Flatpak ref ID (e.g. "org.gimp.GIMP"), which
+    is what the actual install/uninstall commands need — pkg_name stays
+    the friendly display name."""
     if not (get_setting("flatpak_enabled") and flatpak_available()):
         return []
     out, code = run_command(
         "flatpak list --all --columns=application,name,version 2>/dev/null", timeout=15)
-    if not out or code != 0:
-        return []
-    items = []
-    for line in out.splitlines():
-        parts = line.split("\t")
-        app_id = parts[0].strip() if parts else ""
-        if not app_id:
-            continue
-        name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else app_id
-        version = parts[2].strip() if len(parts) > 2 else ""
-        items.append({
-            "name": name, "version": version, "repo": "flatpak",
-            "status": "installed", "description": "", "foreign": False,
-            "source_id": app_id,
-        })
-    return items
+    items = {}
+    if out and code == 0:
+        for line in out.splitlines():
+            parts = line.split("\t")
+            app_id = parts[0].strip() if parts else ""
+            if not app_id:
+                continue
+            name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else app_id
+            version = parts[2].strip() if len(parts) > 2 else ""
+            items[app_id] = {
+                "name": name, "version": version, "repo": "flatpak",
+                "status": "installed", "description": "", "foreign": False,
+                "source_id": app_id,
+            }
+
+    # Layer the (cached) remote catalog on top: fills in everything not
+    # already installed as "available", and backfills a description for
+    # installed entries (flatpak list itself doesn't provide one).
+    remote_index = _load_flatpak_remote_cache()
+    if remote_index is None:
+        remote_index = _build_flatpak_remote_index()
+    for app_id, info in remote_index.items():
+        if app_id in items:
+            if not items[app_id]["description"]:
+                items[app_id]["description"] = info.get("description", "")
+        else:
+            items[app_id] = {
+                "name": info.get("name", app_id), "version": info.get("version", ""),
+                "repo": "flatpak", "status": "available",
+                "description": info.get("description", ""), "foreign": False,
+                "source_id": app_id,
+            }
+    return list(items.values())
+
+
+def _load_snap_catalog_cache():
+    """Return the cached Snap Store catalog index if it's fresh enough."""
+    if _file_age(SNAP_CATALOG_CACHE) < SNAP_CATALOG_TTL:
+        data = _read_json(SNAP_CATALOG_CACHE)
+        if data:
+            return data
+    return None
+
+
+def _build_snap_catalog_index():
+    """Every snap available in the Snap Store, browsable by category —
+    {name: {"name", "version", "description"}}. Cached like Flatpak's
+    remote catalog (_build_flatpak_remote_index()), for the same reason:
+    walking every category is too slow to redo on every package-list load.
+
+    Unlike Flatpak (remote-ls) or the AUR (packages.gz), there's no CLI
+    command or single bulk dump for "every available snap" — `snap find`
+    requires a search term, and the Snap Store's own HTTP API
+    (api.snapcraft.io) hard-caps every /v2/snaps/find call at 100 results,
+    with no page/offset parameter to go beyond that — this is a documented
+    API limitation, not something we're choosing not to use. The one lever
+    that's actually available: results are also implicitly split into
+    "featured" and non-featured per category, so querying featured=true
+    and featured=false separately roughly doubles coverage versus one
+    mixed call. That's still bounded (up to ~200/category, not the
+    literal full catalog the AUR/Flatpak indexes are), but it's the
+    practical ceiling the public API allows — good enough for a "browse
+    what's new" list without turning into thousands of uncategorized,
+    low-signal entries anyway.
+
+    Best-effort: returns {} on any failure (offline, API changed shape,
+    timeout, …) rather than raising — same offline-safety guarantee as
+    _build_flatpak_remote_index()/_build_aur_names_index()."""
+    import json as _json
+    import urllib.request
+    import urllib.error
+    import urllib.parse
+    headers = {"Snap-Device-Series": "16", "User-Agent": "Pachul"}
+    try:
+        req = urllib.request.Request(
+            "https://api.snapcraft.io/v2/snaps/categories", headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            cat_data = _json.loads(resp.read().decode("utf-8", errors="replace"))
+        categories = [c["name"] for c in cat_data.get("categories", []) if c.get("name")]
+    except (urllib.error.URLError, OSError, ValueError, KeyError):
+        return {}
+
+    index = {}
+    for cat in categories:
+        for featured in ("true", "false"):
+            url = ("https://api.snapcraft.io/v2/snaps/find?"
+                    + urllib.parse.urlencode({
+                        "category": cat, "featured": featured,
+                        "fields": "title,summary,version",
+                    }))
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = _json.loads(resp.read().decode("utf-8", errors="replace"))
+            except (urllib.error.URLError, OSError, ValueError):
+                continue  # one bad request shouldn't lose every other one
+            for result in data.get("results", []):
+                snap = result.get("snap", {})
+                name = snap.get("name", "")
+                if not name or name in index:
+                    continue
+                index[name] = {
+                    "name": snap.get("title") or name,
+                    "version": snap.get("version", ""),
+                    "description": snap.get("summary", ""),
+                }
+    _write_json(SNAP_CATALOG_CACHE, index)
+    return index
 
 
 def get_snap_packages():
-    """Installed Snap packages, in the same dict shape get_packages() uses."""
+    """Every Snap worth showing — both installed *and* available-but-not-
+    installed, in the same dict shape get_packages() uses (mirrors
+    get_flatpak_packages()'s installed+catalog merge above)."""
     if not (get_setting("snap_enabled") and snap_available()):
         return []
     out, code = run_command("snap list 2>/dev/null", timeout=15)
-    if not out or code != 0:
-        return []
-    lines = out.splitlines()
-    items = []
-    for line in lines[1:]:  # first line is the "Name Version Rev ..." header
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        name, version = parts[0], parts[1]
-        items.append({
-            "name": name, "version": version, "repo": "snap",
-            "status": "installed", "description": "", "foreign": False,
-            "source_id": name,
-        })
-    return items
+    items = {}
+    if out and code == 0:
+        for line in out.splitlines()[1:]:  # first line is the "Name Version Rev ..." header
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            name, version = parts[0], parts[1]
+            items[name] = {
+                "name": name, "version": version, "repo": "snap",
+                "status": "installed", "description": "", "foreign": False,
+                "source_id": name,
+            }
+
+    catalog = _load_snap_catalog_cache()
+    if catalog is None:
+        catalog = _build_snap_catalog_index()
+    for name, info in catalog.items():
+        if name in items:
+            if not items[name]["description"]:
+                items[name]["description"] = info.get("description", "")
+        else:
+            items[name] = {
+                "name": info.get("name", name), "version": info.get("version", ""),
+                "repo": "snap", "status": "available",
+                "description": info.get("description", ""), "foreign": False,
+                "source_id": name,
+            }
+    return list(items.values())
 
 
 def search_flatpak(query):
@@ -603,6 +839,50 @@ def _build_syncdb(installed_set):
 
 # ─── Main package list ────────────────────────────────────────────────────────
 
+def _load_aur_names_cache():
+    """Return the cached full AUR package-name list if it's fresh enough."""
+    if _file_age(AUR_NAMES_CACHE) < AUR_NAMES_TTL:
+        data = _read_json(AUR_NAMES_CACHE)
+        if data:
+            return data
+    return None
+
+
+def _build_aur_names_index():
+    """Every package name currently in the AUR (tens of thousands), fetched
+    from the AUR's own packages.gz dump — a plain, one-name-per-line list
+    with no metadata. That's deliberate: it's the lightweight way to get
+    the *full* catalog without hammering the RPC API once per package, and
+    it's exactly what POPULAR_AUR_PACKAGES's own comment already noted —
+    a real version/description for an available-but-not-installed AUR
+    package isn't knowable without querying the AUR directly, so this
+    leaves both blank for every name here. get_aur_info() already fetches
+    the real thing on demand once a specific package's details are
+    actually opened — doing that upfront for ~90k packages just to
+    populate a browse list isn't remotely worth it.
+
+    Best-effort: returns [] on any failure (offline, AUR unreachable,
+    malformed response, …) rather than raising — same offline-safety
+    guarantee as _build_flatpak_remote_index()."""
+    import gzip
+    import urllib.request
+    import urllib.error
+    try:
+        req = urllib.request.Request(
+            "https://aur.archlinux.org/packages.gz",
+            headers={"User-Agent": "Pachul"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = gzip.decompress(resp.read())
+    except (urllib.error.URLError, OSError, EOFError):
+        return []
+    names = [
+        line.strip() for line in raw.decode("utf-8", errors="replace").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    _write_json(AUR_NAMES_CACHE, names)
+    return names
+
+
 def _merge_into_list(installed_pkgs, syncdb, aur_set):
     """Combine installed + syncdb + popular AUR into the final package list."""
     all_pkgs = dict(installed_pkgs)
@@ -625,16 +905,24 @@ def _merge_into_list(installed_pkgs, syncdb, aur_set):
                 "foreign": False,
             }
 
-    # Popular AUR packages are injected only for discoverability, and only
-    # on Arch — the AUR doesn't exist on Debian/Fedora/openSUSE. Their real
-    # version is unknown without querying the AUR, so leave it blank rather
-    # than show the hardcoded (and quickly stale) value from POPULAR_AUR_PACKAGES.
+    # Popular AUR packages are injected first (only on Arch), with their
+    # curated descriptions, for nicer-looking discoverability entries —
+    # then the full AUR catalog (aur_set, see _build_aur_names_index())
+    # fills in everything else, blank description/version and all. Order
+    # matters here only in that popular packages keep their nicer
+    # description instead of being overwritten by a blank one.
     if distro.is_arch():
         for name, _version, desc in POPULAR_AUR_PACKAGES:
             if name not in all_pkgs:
                 all_pkgs[name] = {
                     "name": name, "version": "", "repo": "aur",
                     "status": "available", "description": desc, "foreign": True,
+                }
+        for name in aur_set:
+            if name not in all_pkgs:
+                all_pkgs[name] = {
+                    "name": name, "version": "", "repo": "aur",
+                    "status": "available", "description": "", "foreign": True,
                 }
 
     return list(all_pkgs.values())
@@ -703,18 +991,28 @@ def get_packages():
         if syncdb is None:
             syncdb = _build_syncdb(set(installed_pkgs))
 
+        # Step 3b — full AUR name catalog (Arch only; own cache/TTL, same
+        # idea as syncdb just above)
+        aur_names = []
+        if distro.is_arch():
+            aur_names = _load_aur_names_cache()
+            if aur_names is None:
+                aur_names = _build_aur_names_index()
+
         # Step 4 — merge
-        packages = _merge_into_list(installed_pkgs, syncdb, set())
+        packages = _merge_into_list(installed_pkgs, syncdb, set(aur_names))
 
         # Step 5 — save cache (pacman packages only — Flatpak/Snap are merged
         # in fresh below every time, so they're never stale in this cache)
         _write_json(PKG_CACHE, {"version": CACHE_VERSION, "fingerprint": fingerprint,
                                 "packages": packages})
 
-    # Flatpak/Snap are independent, opt-in sources — queried fresh each call
-    # (cheap: usually a handful to a few dozen packages) rather than folded
-    # into the pacman fingerprint cache above, and are no-ops entirely when
-    # disabled or not installed.
+    # Flatpak/Snap are independent, opt-in sources, queried fresh each call
+    # rather than folded into the pacman fingerprint cache above, and are
+    # no-ops entirely when disabled or not installed. "Fresh" only means the
+    # *installed* set (`flatpak list`, `snap list` are both cheap) — Flatpak's
+    # available-package catalog is itself cached separately, with its own TTL
+    # (see _load_flatpak_remote_cache()), since that one genuinely isn't cheap.
     return packages + get_flatpak_packages() + get_snap_packages()
 
 
@@ -2227,6 +2525,21 @@ def get_enabled_auto_update_commands():
 PACMAN_CONF = Path("/etc/pacman.conf")
 
 
+def chaotic_aur_configured():
+    """Whether chaotic-aur is set up as a repo in /etc/pacman.conf. A
+    plain file read rather than a `pacman -Sl`/`pacman -Sy` subprocess
+    call, since this is checked at sidebar-build time (window.py's
+    _build_sidebar()) — before packages, and thus pacman's sync
+    databases, are necessarily loaded at all."""
+    if not distro.is_arch():
+        return False
+    try:
+        content = PACMAN_CONF.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return bool(re.search(r"^\[chaotic-aur\]", content, re.MULTILINE))
+
+
 def get_ignored_packages():
     """Set of packages currently held back from upgrades — via IgnorePkg
     in pacman.conf on Arch, or the matching native hold/lock mechanism
@@ -2556,6 +2869,71 @@ def is_pachul_installed():
     return shutil.which("pachul") is not None and os.path.isfile(INSTALL_DESKTOP_FILE)
 
 
+# Wo die installierten Python-Module landen, je nach Installationsart —
+# install.sh's DATA_DIR bzw. der PKGBUILD's $pkgdir/usr/share/$pkgname.
+INSTALLED_PACHUL_DIRS = ("/usr/local/share/pachul", "/usr/share/pachul")
+
+
+def _read_version_const(path, const_name):
+    """Liest eine `NAME = "x.y.z"`-Konstante direkt aus einer Python-Datei,
+    ohne sie auszuführen — das funktioniert auch dann noch zuverlässig,
+    wenn die betreffende Datei selbst kaputt/veraltet ist (genau der
+    Fall, den ein Versions-Check abfangen soll), und ohne für eine
+    GUI-App wie Pachul extra einen Prozess zu starten, nur um an die
+    Versionsnummer zu kommen."""
+    try:
+        content = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = re.search(rf'^{re.escape(const_name)}\s*=\s*["\']([\d.]+)', content, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def _parse_version(v):
+    """Parst einen Punkt-getrennten Versions-String wie '2.1.0' in ein
+    Tupel aus Ints für den Vergleich. Nicht-numerische Anteile (z.B. ein
+    '-dev'-Suffix) werden ignoriert; ein leerer/ungültiger String ergibt
+    (0,), sodass er gegenüber jeder echten Version als "älter" gilt."""
+    if not v:
+        return (0,)
+    parts = re.findall(r"\d+", v)
+    return tuple(int(p) for p in parts) or (0,)
+
+
+def _version_newer(a, b):
+    """True, wenn Version a > Version b (beide als 'x.y.z'-Strings, z.B.
+    aus _read_version_const())."""
+    return _parse_version(a) > _parse_version(b or "")
+
+
+def installed_pachul_version():
+    """Version der aktuell systemweit installierten Pachul-Kopie, oder
+    None, falls keine gefunden wird. Liest APP_VERSION direkt aus der
+    installierten backend.py statt die App zu starten."""
+    for d in INSTALLED_PACHUL_DIRS:
+        v = _read_version_const(os.path.join(d, "backend.py"), "APP_VERSION")
+        if v:
+            return v
+    return None
+
+
+def pachul_update_available(app_dir):
+    """True, wenn Pachul systemweit installiert ist, die gerade laufende
+    Kopie (app_dir — z.B. ein frisch gezogener/entpackter Checkout) aber
+    eine neuere APP_VERSION mitbringt als die installierte. False bei
+    einer ganz frischen (noch nie installierten) Kopie — dafür ist
+    is_pachul_installed()/_maybe_offer_install()'s bestehender
+    "Install"-Zweig zuständig — und auch dann, wenn die installierte
+    Version aus irgendeinem Grund nicht gelesen werden konnte (im
+    Zweifel lieber nichts anfassen)."""
+    if not is_pachul_installed():
+        return False
+    installed_v = installed_pachul_version()
+    if installed_v is None:
+        return False
+    return _version_newer(APP_VERSION, installed_v)
+
+
 def find_install_script(app_dir):
     """install.sh sits next to app.py only in a source checkout — an
     already-installed copy under /usr/local/share/pachul never ships it,
@@ -2579,29 +2957,30 @@ def is_autostart_enabled():
 
 
 def _resolve_icon_path(app_dir=None):
-    """Absolute path to the app icon — never a bare icon-theme name.
-    Both install.sh and the AUR PKGBUILD install the icon to the same
-    system-wide hicolor path, so that's checked first (works regardless
-    of a dev checkout still being around); a source checkout next to
-    app_dir is the fallback for a not-yet-installed run. Used for the
-    autostart .desktop's Icon= key: AppIndicator/Ayatana auto-populates
-    the tray's SNI "DesktopEntry" property from this file, and Plasma's
-    system tray resolves ITS OWN icon from that file's Icon= key by name
-    — via Plasma's own icon cache, independent of whatever tray.py sets
-    via set_icon_full(). A bare name there raced against Plasma's cache
-    and fell back to the generic "applications-other" icon a few seconds
-    in; an absolute path bypasses that lookup entirely, the same fix
-    already applied to tray.py's own icon and to
-    backend.py's own _pachul_icon_path() for notify-send.
+    """Absolute path to the tray's black-and-white icon — never a bare
+    icon-theme name. Both install.sh and the AUR PKGBUILD install the
+    icon to the same system-wide hicolor path, so that's checked first
+    (works regardless of a dev checkout still being around); a source
+    checkout next to app_dir is the fallback for a not-yet-installed run.
+    Used for the autostart .desktop's Icon= key: AppIndicator/Ayatana
+    auto-populates the tray's SNI "DesktopEntry" property from this file,
+    and Plasma's system tray resolves ITS OWN icon from that file's
+    Icon= key by name — via Plasma's own icon cache, independent of
+    whatever tray.py sets via set_icon_full(). A bare name there raced
+    against Plasma's cache and fell back to the generic
+    "applications-other" icon a few seconds in; an absolute path bypasses
+    that lookup entirely, the same fix already applied to tray.py's own
+    icon and to backend.py's own _pachul_icon_path() for notify-send.
     """
-    system_path = f"/usr/share/icons/hicolor/scalable/apps/{INSTALL_ICON_ID}.svg"
+    bw_name = "io_github_wergosam_pachul_bw"
+    system_path = f"/usr/share/icons/hicolor/scalable/apps/{bw_name}.svg"
     if os.path.isfile(system_path):
         return system_path
     if app_dir:
-        checkout_path = os.path.join(app_dir, f"{INSTALL_ICON_ID}.svg")
+        checkout_path = os.path.join(app_dir, f"{bw_name}.svg")
         if os.path.isfile(checkout_path):
             return checkout_path
-    return INSTALL_ICON_ID  # last-resort fallback to the old by-name behaviour
+    return bw_name  # last-resort fallback to the old by-name behaviour
 
 
 def set_autostart_enabled(enabled, app_dir=None):
@@ -2732,19 +3111,24 @@ def disable_update_timer():
 
 
 def _pachul_icon_path():
-    """Absolute path to Pachul's own icon file, checked directly rather
-    than resolved by name through an icon theme — works both in a source
-    checkout (icon sits right next to this file) and once installed
-    system-wide (install.sh's ICON_DIR). Falls back to the bare name only
-    if the file genuinely can't be found anywhere."""
-    name = "io.github.wergosam.pachul"
+    """Absolute path to Pachul's tray/notification icon file (the
+    black-and-white variant), checked directly rather than resolved by
+    name through an icon theme — works both in a source checkout (icon
+    sits right next to this file) and once installed system-wide
+    (install.sh's ICON_DIR). Falls back to the bare name only if the file
+    genuinely can't be found anywhere. Only used by
+    send_update_notification(), which is only ever called from the tray
+    (tray.py) — the main window's own notification code
+    (window.py's _notify_updates()) points at the main app icon
+    directly."""
+    name = "io_github_wergosam_pachul_bw"
     local = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{name}.svg")
     if os.path.isfile(local):
         return local
     system_path = f"/usr/share/icons/hicolor/scalable/apps/{name}.svg"
     if os.path.isfile(system_path):
         return system_path
-    return name
+    return name  # last-resort fallback to the old by-name behaviour
 
 
 def send_update_notification(n, extra=0):

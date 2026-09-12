@@ -21,10 +21,12 @@ from backend import (
     invalidate_cache, invalidate_syncdb_cache, get_explicit_packages,
     get_ignored_packages, build_hold_cmd, build_hold_cmd_bulk, get_setting, save_settings,
     build_snapshot_cmd, flatpak_available, snap_available,
-    is_pachul_installed, build_install_command,
+    is_pachul_installed, build_install_command, pachul_update_available,
     get_enabled_auto_update_commands, check_aur_ahead_of_repo,
     build_desktop_icon_map, fetch_flatpak_icon,
     aur_helper_upgrade_cmd, aur_helper_install_cmd, _find_aur_helper,
+    pachuli_installed, local_pachuli_path, get_pachuli_install_cmd,
+    pachuli_update_available,
 )
 from models import (
     PackageItem, NavRow, REPO_BADGE_CLASS, pkg_icon, make_package_listview,
@@ -448,7 +450,7 @@ class pachulWindow(Adw.ApplicationWindow):
         self.set_size_request(900, 560)
         self._all_packages     = []
         self._selected_pkg     = None
-        self._current_filter   = "not_installed"  # matches the "New Packages" row _build_sidebar()
+        self._current_filter   = "not_installed"  # matches the "New" section's "Packages" row, _build_sidebar()
                                           # selects by default (nav_listbox.select_row() below
                                           # doesn't fire row-activated, so this has to be set here too)
         self._search_query     = ""      # current text in the always-visible search entry
@@ -489,23 +491,41 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _maybe_offer_install(self):
         """Offer to run install.sh if Pachul is running from a source
-        checkout that was never installed system-wide. A no-op once
-        installed (or when there's no install.sh next to this copy, e.g.
-        an installed copy itself, which doesn't ship one)."""
-        if is_pachul_installed():
+        checkout that either:
+        - was never installed system-wide, or
+        - IS already installed, but this checkout carries a newer
+          APP_VERSION than the installed copy (e.g. after pulling recent
+          changes into a dev checkout while an older install lingers).
+        A no-op once installed at the same-or-newer version, or when
+        there's no install.sh next to this copy (e.g. an installed copy
+        itself, which doesn't ship one)."""
+        installed = is_pachul_installed()
+        if installed and not pachul_update_available(APP_DIR):
             return False
         cmd = build_install_command(APP_DIR)
         if not cmd:
             return False
 
         d = Adw.AlertDialog()
-        d.set_heading(tr("Install Pachul?"))
-        d.set_body(tr(
-            "Pachul isn't installed system-wide yet. Installing adds an "
-            "app-menu entry and the pachul / pachul-tray commands, and "
-            "installs any missing dependencies — this needs your password."))
+        if installed:
+            d.set_heading(tr("Update Pachul?"))
+            d.set_body(tr(
+                "A newer version of Pachul was found in this checkout "
+                "than the one currently installed system-wide. Updating "
+                "replaces the installed files with this version — this "
+                "needs your password."))
+            action_label = tr("Update")
+            success_toast = tr("Pachul updated.")
+        else:
+            d.set_heading(tr("Install Pachul?"))
+            d.set_body(tr(
+                "Pachul isn't installed system-wide yet. Installing adds an "
+                "app-menu entry and the pachul / pachul-tray commands, and "
+                "installs any missing dependencies — this needs your password."))
+            action_label = tr("Install")
+            success_toast = tr("Pachul installed — available from the app menu from now on.")
         d.add_response("skip", tr("Not Now"))
-        d.add_response("install", tr("Install"))
+        d.add_response("install", action_label)
         d.set_response_appearance("install", Adw.ResponseAppearance.SUGGESTED)
         d.set_default_response("install")
         d.set_close_response("skip")
@@ -513,9 +533,8 @@ class pachulWindow(Adw.ApplicationWindow):
         def _on_response(_dlg, resp):
             if resp == "install":
                 run_terminal_dialog(
-                    self, cmd, tr("Install Pachul"),
-                    on_success=lambda: self._toast(
-                        tr("Pachul installed — available from the app menu from now on.")))
+                    self, cmd, action_label,
+                    on_success=lambda: self._toast(success_toast))
         d.connect("response", _on_response)
         d.present(self)
         return False   # GLib.idle_add: run once
@@ -689,7 +708,8 @@ class pachulWindow(Adw.ApplicationWindow):
             stats_box.append(card)
         outer.append(stats_box)
 
-        # Browse
+        # Top level: "All Packages" and "Updates" first, per explicit
+        # request — everything else lives in the sections below.
         self.nav_listbox = Gtk.ListBox()
         self.nav_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.nav_listbox.add_css_class("navigation-sidebar")
@@ -697,29 +717,33 @@ class pachulWindow(Adw.ApplicationWindow):
         self.nav_listbox.connect("row-activated", self._on_nav_selected)
 
         self._nav_rows = {}
-        browse_items = [
-            ("not_installed", "list-add-symbolic",                  tr("New Packages"),   0,    "count-new"),
-            ("all",           "view-list-symbolic",                 tr("All Packages"),   None, None),
-            ("installed",     "emblem-ok-symbolic",                 tr("Installed"),      0,    None),
-            ("updates",       ICON_UPDATE_AVAILABLE,               tr("Updates"),         0,    "count-update"),
+        top_items = [
+            ("all",     "view-list-symbolic",   tr("All Packages"), None, None),
+            ("updates", ICON_UPDATE_AVAILABLE,  tr("Updates"),       0,    "count-update"),
         ]
-        for key, icon, label, cnt, badge_cls in browse_items:
+        for key, icon, label, cnt, badge_cls in top_items:
             row = NavRow(icon, label, cnt, badge_cls)
             self.nav_listbox.append(row)
             self._nav_rows[key] = row
-        self.nav_listbox.select_row(self.nav_listbox.get_row_at_index(0))
         outer.append(self.nav_listbox)
 
-        # Repositories
+        # "New" section: everything not yet installed, browsable by source
+        # — grouped under one header so individual labels don't each need
+        # to repeat "New" themselves. Per-repo rows here mirror the
+        # "Installed Packages" section below one-for-one (same repo, same
+        # icon, same label) — built together from the same pre-seed list
+        # so the two sections can't drift apart, and kept in sync
+        # afterwards by the same dynamic-discovery loop in
+        # _update_sidebar_counts().
         outer.append(self._separator())
-        outer.append(self._sidebar_header(tr("REPOSITORIES")))
-        self.repo_listbox = Gtk.ListBox()
-        self.repo_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self.repo_listbox.add_css_class("navigation-sidebar")
-        self.repo_listbox.set_margin_start(5); self.repo_listbox.set_margin_end(5)
-        self.repo_listbox.connect("row-activated", self._on_repo_nav_selected)
+        outer.append(self._sidebar_header(tr("NEW")))
+        self.new_listbox = Gtk.ListBox()
+        self.new_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.new_listbox.add_css_class("navigation-sidebar")
+        self.new_listbox.set_margin_start(5); self.new_listbox.set_margin_end(5)
+        self.new_listbox.connect("row-activated", self._on_new_nav_selected)
 
-        self._repo_nav_rows = {}
+        self._new_nav_rows = {}
         self._repo_icon_map = {
             "core":      "drive-harddisk-symbolic",
             "extra":     "folder-symbolic",
@@ -731,16 +755,53 @@ class pachulWindow(Adw.ApplicationWindow):
             "snap":      "package-x-generic-symbolic",
             "chaotic-aur": "folder-remote-symbolic",
         }
-        # core/extra/multilib/aur are pre-seeded so the sidebar isn't empty
-        # before the first package list loads — but those names are Arch's
-        # own repo layout specifically. On other distros, real repo/category
-        # rows (however they're actually named) appear organically as
-        # packages load, via the same dynamic _repo_nav_rows mechanism.
+        # Repos pre-seeded in both sections regardless of whether any
+        # package from them has loaded yet — core/extra/multilib/aur are
+        # Arch's own repo layout specifically; Flatpak is opt-in
+        # (flatpak_enabled setting) and only meaningful once the flatpak
+        # binary is actually present. Everything else (chaotic-aur, snap,
+        # any other repo/category) appears organically in both sections
+        # together, once packages load, via the same dynamic
+        # _repo_nav_rows/_new_nav_rows mechanism in _update_sidebar_counts().
+        preseed_repos = []
         if distro.is_arch():
-            for key in ("core", "extra", "multilib", "aur"):
-                row = NavRow(self._repo_icon_map[key], key, 0, "count-badge")
-                self.repo_listbox.append(row)
-                self._repo_nav_rows[key] = row
+            preseed_repos += ["core", "extra", "multilib", "aur"]
+        if get_setting("flatpak_enabled") and flatpak_available():
+            preseed_repos.append("flatpak")
+
+        row = NavRow("list-add-symbolic", tr("All New Packages"), 0, "count-new")
+        self.new_listbox.append(row)
+        self._new_nav_rows["not_installed"] = row
+        for key in preseed_repos:
+            row = NavRow(self._repo_icon_map[key], key, 0, "count-new")
+            self.new_listbox.append(row)
+            self._new_nav_rows[f"new:{key}"] = row
+        self.new_listbox.select_row(self._new_nav_rows["not_installed"])
+        outer.append(self.new_listbox)
+
+        # Installed Packages (was "Repositories" — renamed since every row
+        # here, "All Installed Packages" included, is about what's already
+        # on the system, browsable by where it came from).
+        outer.append(self._separator())
+        outer.append(self._sidebar_header(tr("INSTALLED PACKAGES")))
+        self.repo_listbox = Gtk.ListBox()
+        self.repo_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.repo_listbox.add_css_class("navigation-sidebar")
+        self.repo_listbox.set_margin_start(5); self.repo_listbox.set_margin_end(5)
+        self.repo_listbox.connect("row-activated", self._on_repo_nav_selected)
+
+        self._repo_nav_rows = {}
+        # "All Installed Packages" always comes first in this section,
+        # regardless of distro — it's the "installed" browse filter
+        # (status installed/update), just relocated here from the top
+        # section and relabelled to match its new context.
+        installed_row = NavRow("emblem-ok-symbolic", tr("All Installed Packages"), 0, None)
+        self.repo_listbox.append(installed_row)
+        self._repo_nav_rows["installed"] = installed_row
+        for key in preseed_repos:
+            row = NavRow(self._repo_icon_map[key], key, 0, "count-badge")
+            self.repo_listbox.append(row)
+            self._repo_nav_rows[key] = row
         outer.append(self.repo_listbox)
 
         # Tools
@@ -1121,9 +1182,13 @@ class pachulWindow(Adw.ApplicationWindow):
         not_installed = total - installed
         self.stat_total._num.set_label(str(total))
         self.stat_aur._num.set_label(str(foreign))
-        self._nav_rows["installed"].set_count(installed)
-        self._nav_rows["not_installed"].set_count(not_installed)
+        self._repo_nav_rows["installed"].set_count(installed)
+        self._new_nav_rows["not_installed"].set_count(not_installed)
 
+        # Discover repos dynamically, exactly as before — except a newly-
+        # seen repo now gets a row in *both* sections at once (Installed
+        # Packages: installed/updated only; New: not-yet-installed only),
+        # so the two stay in lockstep with no separate wiring per repo.
         seen_repos = set(
             p.get("repo", "").lower() for p in self._all_packages
             if p.get("repo", "") not in ("local", "")
@@ -1131,13 +1196,38 @@ class pachulWindow(Adw.ApplicationWindow):
         for repo_key in sorted(seen_repos):
             if repo_key not in self._repo_nav_rows:
                 icon = self._repo_icon_map.get(repo_key, "folder-symbolic")
-                new_row = NavRow(icon, repo_key, 0, "count-badge")
-                self.repo_listbox.append(new_row)
-                self._repo_nav_rows[repo_key] = new_row
+                row = NavRow(icon, repo_key, 0, "count-badge")
+                self.repo_listbox.append(row)
+                self._repo_nav_rows[repo_key] = row
+            new_key = f"new:{repo_key}"
+            if new_key not in self._new_nav_rows:
+                icon = self._repo_icon_map.get(repo_key, "folder-symbolic")
+                row = NavRow(icon, repo_key, 0, "count-new")
+                self.new_listbox.append(row)
+                self._new_nav_rows[new_key] = row
+
+        always_visible = ("core", "extra", "multilib", "aur", "flatpak")
         for repo_key, nav_row in self._repo_nav_rows.items():
-            count = sum(1 for p in self._all_packages if p.get("repo", "").lower() == repo_key)
-            nav_row.set_count(count)
-            nav_row.set_visible(count > 0 or repo_key in ("core", "extra", "multilib", "aur"))
+            if repo_key == "installed":
+                continue  # handled above — "installed" is a status filter,
+                          # not an actual repo name, and lives in this same
+                          # dict only for its Installed Packages section spot
+            installed_count = sum(
+                1 for p in self._all_packages
+                if p.get("repo", "").lower() == repo_key and p["status"] in ("installed", "update")
+            )
+            nav_row.set_count(installed_count)
+            nav_row.set_visible(installed_count > 0 or repo_key in always_visible)
+
+            new_row = self._new_nav_rows.get(f"new:{repo_key}")
+            if new_row is not None:
+                new_count = sum(
+                    1 for p in self._all_packages
+                    if p.get("repo", "").lower() == repo_key
+                    and p["status"] not in ("installed", "update")
+                )
+                new_row.set_count(new_count)
+                new_row.set_visible(new_count > 0 or repo_key in always_visible)
 
     # ── Filtering ─────────────────────────────────────────────────────────────
 
@@ -1145,12 +1235,15 @@ class pachulWindow(Adw.ApplicationWindow):
     def _pkg_matches_filter(pkg, filt):
         """True if pkg should be shown under sidebar filter `filt`.
 
-        `filt` is either one of the special keys (installed/not_installed/
-        aur/updates) or a literal repo name. Repo names are matched generically —
-        not against a hardcoded shortlist — so any repo discovered at
-        runtime (chaotic-aur, testing, community, flatpak, snap, …) is
-        filterable as soon as it gets a sidebar row, with no extra wiring
-        needed here per repo.
+        `filt` is one of the special keys (installed/not_installed/aur/
+        updates/all), a literal repo name (the "Installed Packages"
+        section — installed/updated packages from that repo only), or
+        "new:<repo>" (the "New" section's per-repo rows — not-yet-
+        installed packages from that repo only). Repo names are matched
+        generically — not against a hardcoded shortlist — so any repo
+        discovered at runtime (chaotic-aur, testing, community, flatpak,
+        snap, …) is filterable in both sections as soon as it gets a
+        sidebar row, with no extra wiring needed here per repo.
         """
         if filt == "installed":
             return pkg["status"] in ("installed", "update")
@@ -1162,7 +1255,11 @@ class pachulWindow(Adw.ApplicationWindow):
             return pkg.get("status") == "update"
         if filt in (None, "all"):
             return True
-        return pkg.get("repo", "").lower() == filt
+        if filt.startswith("new:"):
+            return (pkg.get("repo", "").lower() == filt[4:]
+                    and pkg["status"] not in ("installed", "update"))
+        return (pkg.get("repo", "").lower() == filt
+                and pkg["status"] in ("installed", "update"))
 
     @staticmethod
     def _pkg_matches_search(pkg, query):
@@ -1304,6 +1401,7 @@ class pachulWindow(Adw.ApplicationWindow):
         return False
 
     def _on_nav_selected(self, listbox, row):
+        self.new_listbox.unselect_all()
         self.repo_listbox.unselect_all()
         # Clicking any sidebar entry (Updates, Installed, orphans, …) is a
         # fresh navigation away from whatever package/batch was shown
@@ -1322,8 +1420,20 @@ class pachulWindow(Adw.ApplicationWindow):
         self._update_action_bar_mode()
         self._apply_filter()
 
+    def _on_new_nav_selected(self, listbox, row):
+        self.nav_listbox.unselect_all()
+        self.repo_listbox.unselect_all()
+        self.detail_panel.stack.set_visible(False)
+        keys = list(self._new_nav_rows.keys())
+        idx  = row.get_index()
+        if idx < len(keys):
+            self._current_filter = keys[idx]
+        self._update_action_bar_mode()
+        self._apply_filter()
+
     def _on_repo_nav_selected(self, listbox, row):
         self.nav_listbox.unselect_all()
+        self.new_listbox.unselect_all()
         self.detail_panel.stack.set_visible(False)
         keys = list(self._repo_nav_rows.keys())
         idx  = row.get_index()
@@ -1498,22 +1608,6 @@ class pachulWindow(Adw.ApplicationWindow):
         self._set_status_pill(panel, pkg.pkg_status, pkg.pkg_foreign)
 
         panel.stack.set_visible(True)
-
-    def _bg_fetch_detail_flatpak_icon(self, panel, pkg):
-        ok = fetch_flatpak_icon(pkg.pkg_source_id)
-        if ok and self._alive:
-            GLib.idle_add(self._on_detail_flatpak_icon_fetched, panel, pkg)
-
-    def _on_detail_flatpak_icon_fetched(self, panel, pkg):
-        # Only swap the icon in if this panel is still showing the same
-        # package — the user may have clicked something else in the
-        # meantime while the download was in flight.
-        if panel._current_pkg_name != pkg.pkg_name:
-            return False
-        tex = get_flatpak_icon_paintable(pkg.pkg_source_id, 58)
-        if tex is not None:
-            panel.icon.set_from_paintable(tex)
-        return False
         panel.stack.set_visible_child_name("detail")
         for row in panel.info_rows.values():
             if isinstance(row, Adw.ActionRow):
@@ -1533,6 +1627,8 @@ class pachulWindow(Adw.ApplicationWindow):
                     f"Description    : {pkg.pkg_description or '—'}\n"
                     f"Install Reason : {source_label}\n"
                 )
+                if pkg.pkg_repo == "flatpak" and pkg.pkg_source_id:
+                    info += f"URL            : https://flathub.org/apps/{pkg.pkg_source_id}\n"
                 files = []
             else:
                 info  = get_package_info(pkg.pkg_name)
@@ -1540,6 +1636,22 @@ class pachulWindow(Adw.ApplicationWindow):
             if self._alive:
                 GLib.idle_add(self._populate_detail, panel, info, files)
         threading.Thread(target=worker, daemon=True).start()
+
+    def _bg_fetch_detail_flatpak_icon(self, panel, pkg):
+        ok = fetch_flatpak_icon(pkg.pkg_source_id)
+        if ok and self._alive:
+            GLib.idle_add(self._on_detail_flatpak_icon_fetched, panel, pkg)
+
+    def _on_detail_flatpak_icon_fetched(self, panel, pkg):
+        # Only swap the icon in if this panel is still showing the same
+        # package — the user may have clicked something else in the
+        # meantime while the download was in flight.
+        if panel._current_pkg_name != pkg.pkg_name:
+            return False
+        tex = get_flatpak_icon_paintable(pkg.pkg_source_id, 58)
+        if tex is not None:
+            panel.icon.set_from_paintable(tex)
+        return False
 
     def _populate_detail(self, panel, raw, files):
         panel.raw_text.set_label(raw)
@@ -1780,7 +1892,18 @@ class pachulWindow(Adw.ApplicationWindow):
         self._do_upgrade()
 
     def _do_upgrade(self):
+        # Set below, before _after() actually runs, if this upgrade run
+        # also had to install pachuli first — read inside the closure at
+        # call time, so the later assignment is still visible here.
+        install_pachuli_cmd = None
+
         def _after():
+            if install_pachuli_cmd:
+                # pachuli is on the system now — drop backend's cached
+                # helper lookup (see _get_aur_helper() above) so the very
+                # next AUR action picks it up instead of still reporting
+                # whatever helper was resolved before this run.
+                save_settings({})
             self._updates = []
             self.stat_updates._num.set_label("0")
             self._nav_rows["updates"].set_count(0)
@@ -1806,6 +1929,24 @@ class pachulWindow(Adw.ApplicationWindow):
         # /etc/pacman.conf uniformly (core, extra, multilib, chaotic-aur,
         # ...) — there's no per-repo command needed for those.
         helper = self._get_aur_helper()
+
+        # pachuli is preferred under "auto" (see _find_aur_helper()), and
+        # can also be pinned explicitly. Until now this only handled
+        # pachuli being completely missing from PATH (silently falling
+        # back to something else under "auto", or to no AUR helper at
+        # all when pinned) — it now also picks up a newer local
+        # pachuli.py sitting next to Pachul's own files than whatever is
+        # currently installed, and reinstalls it as the first step of
+        # this very upgrade run, instead of requiring a separate manual
+        # trip to Preferences first either way.
+        pref = get_setting("aur_helper")
+        if distro.is_arch() and pref in ("auto", "pachuli"):
+            local_pachuli = local_pachuli_path(APP_DIR)
+            if local_pachuli and pachuli_update_available(local_pachuli):
+                install_pachuli_cmd = get_pachuli_install_cmd(local_pachuli)
+                if not pachuli_installed():
+                    helper = "pachuli"
+
         if helper:
             main_cmd = aur_helper_upgrade_cmd(helper)
         elif distro.is_arch():
@@ -1915,6 +2056,14 @@ class pachulWindow(Adw.ApplicationWindow):
 
         if aux_plain_steps:
             cmd = f"{{ {cmd}; }}; _RC=$?; {_best_effort(aux_plain_steps)}; exit $_RC"
+
+        if install_pachuli_cmd:
+            # Its own separate `pkexec install ...` call, run first and
+            # gating everything after it — same reasoning as the
+            # snapshot gate above: if pachuli can't be installed, don't
+            # proceed as if it were, since main_cmd already assumes it's
+            # there (aur_helper_upgrade_cmd("pachuli")).
+            cmd = f"{install_pachuli_cmd} && {cmd}"
 
         self._run_terminal(cmd, tr("System Upgrade"), on_success=_after)
 
@@ -2074,27 +2223,31 @@ class pachulWindow(Adw.ApplicationWindow):
         new_lang = get_language()
         if new_lang != self._current_lang:
             self._current_lang = new_lang
-            self._rebuild_for_language_change()
-            return
-        # Any other setting (AUR helper, include-AUR, Flatpak/Snap toggles,
-        # ...) can affect what shows up in the package list and/or the
-        # update set — just reload everything. Cheap, and keeps this
-        # generic instead of tracking exactly which setting changed.
-        if self._alive:
-            self._load_packages()
-            threading.Thread(target=self._bg_check_updates, daemon=True).start()
+        # Any setting (AUR helper, include-AUR, Flatpak/Snap toggles,
+        # language, ...) can affect what shows up in the package list
+        # and/or the update set — and, since the Flatpak toggle, can also
+        # add/remove sidebar rows ("New Flatpak Packages", the flatpak
+        # repo row) that _build_sidebar() only otherwise evaluates once
+        # at construction time. A full chrome rebuild covers both cases
+        # uniformly instead of tracking exactly which setting changed.
+        self._rebuild_ui_preserving_state()
 
-    def _rebuild_for_language_change(self):
+    def _rebuild_ui_preserving_state(self):
         """Rebuild the whole window so already-built chrome (sidebar, menu,
-        headerbar, tooltips, empty-state pages, ...) picks up the new
-        language immediately. Dialogs and the package-row/detail content
-        already do this on their own next open/refresh, since they call
-        tr() fresh every time they're built — it's specifically the
-        long-lived widgets built once in _build_ui() that otherwise
-        wouldn't update without restarting the app.
+        headerbar, tooltips, empty-state pages, ...) picks up whatever
+        changed — a new language (tr() is only re-evaluated when widgets
+        are (re)built), or a sidebar row that a settings toggle just
+        added or removed (e.g. Flatpak's "New Flatpak Packages" row and
+        its Repositories entry, which _build_sidebar() otherwise only
+        evaluates once at construction time). Dialogs and the package-
+        row/detail content already handle this on their own next open/
+        refresh, since they call tr() fresh every time they're built —
+        it's specifically the long-lived widgets built once in
+        _build_ui() that otherwise wouldn't update without restarting
+        the app.
 
         Best-effort: restores which sidebar view (all/installed/updates/
-        repo) was active, and the search text if any was entered.
+        repo/...) was active, and the search text if any was entered.
         The exact selected package and open detail view are not restored
         (the list reloads asynchronously and re-matching a selection into
         that isn't worth the added complexity) — a minor, deliberate
@@ -2108,13 +2261,28 @@ class pachulWindow(Adw.ApplicationWindow):
 
         row = self._nav_rows.get(filt)
         if row is not None:
+            self.new_listbox.unselect_all()
             self.repo_listbox.unselect_all()
             self.nav_listbox.select_row(row)
         else:
-            row = self._repo_nav_rows.get(filt)
+            row = self._new_nav_rows.get(filt)
             if row is not None:
                 self.nav_listbox.unselect_all()
-                self.repo_listbox.select_row(row)
+                self.repo_listbox.unselect_all()
+                self.new_listbox.select_row(row)
+            else:
+                row = self._repo_nav_rows.get(filt)
+                if row is not None:
+                    self.nav_listbox.unselect_all()
+                    self.new_listbox.unselect_all()
+                    self.repo_listbox.select_row(row)
+                else:
+                    # The filter that was active no longer has a matching row
+                    # (e.g. "new:flatpak" after Flatpak got turned back off)
+                    # — fall back to the default view instead of silently
+                    # keeping a now-orphaned filter active.
+                    filt = "not_installed"
+                    self.new_listbox.select_row(self._new_nav_rows[filt])
         self._current_filter = filt
         self._update_action_bar_mode()
         if query:
@@ -2732,6 +2900,8 @@ class pachulWindow(Adw.ApplicationWindow):
                         f"Description    : {pkg.pkg_description or '—'}\n"
                         f"Install Reason : {source_label}\n"
                     )
+                    if pkg.pkg_repo == "flatpak" and pkg.pkg_source_id:
+                        info += f"URL            : https://flathub.org/apps/{pkg.pkg_source_id}\n"
                     files = []
                 else:
                     info  = get_package_info(pkg.pkg_name)
