@@ -1235,22 +1235,23 @@ class pachulWindow(Adw.ApplicationWindow):
     def _pkg_matches_filter(pkg, filt):
         """True if pkg should be shown under sidebar filter `filt`.
 
-        `filt` is one of the special keys (installed/not_installed/aur/
-        updates/all), a literal repo name (the "Installed Packages"
-        section — installed/updated packages from that repo only), or
-        "new:<repo>" (the "New" section's per-repo rows — not-yet-
-        installed packages from that repo only). Repo names are matched
-        generically — not against a hardcoded shortlist — so any repo
-        discovered at runtime (chaotic-aur, testing, community, flatpak,
-        snap, …) is filterable in both sections as soon as it gets a
-        sidebar row, with no extra wiring needed here per repo.
+        `filt` is one of the special keys (installed/not_installed/updates/
+        all), a literal repo name (the "Installed Packages" section —
+        installed/updated packages from that repo only), or "new:<repo>"
+        (the "New" section's per-repo rows — not-yet-installed packages
+        from that repo only). Repo names are matched generically — not
+        against a hardcoded shortlist — so any repo discovered at runtime
+        (chaotic-aur, testing, community, flatpak, snap, …) is filterable
+        in both sections as soon as it gets a sidebar row, with no extra
+        wiring needed here per repo. "aur" is one such repo name, not a
+        special key of its own — every foreign package's repo is always
+        set to "aur" (see backend.py's merge logic), so the generic
+        repo-name match below already covers it correctly.
         """
         if filt == "installed":
             return pkg["status"] in ("installed", "update")
         if filt == "not_installed":
             return pkg["status"] not in ("installed", "update")
-        if filt == "aur":
-            return pkg.get("foreign", False)
         if filt == "updates":
             return pkg.get("status") == "update"
         if filt in (None, "all"):
