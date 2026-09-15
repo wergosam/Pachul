@@ -29,6 +29,7 @@ GTK4 app — see optdepends in PKGBUILD):
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -131,6 +132,20 @@ class PachulTray:
 
         self._run_check(notify_on_new=True)
         self._schedule_next()
+
+        # Lets the main window (or anything else) ask for an immediate
+        # re-check right after it finishes its own upgrade, instead of
+        # this tray icon sitting on a stale "N updates available" count
+        # until its own periodic timer next fires — see backend.py's
+        # notify_tray_recheck(), which sends this via `pkill -SIGUSR1`.
+        # notify_on_new=False: an upgrade just happened, so a fresh
+        # notification about it would be redundant, not a genuinely new
+        # discovery — same reasoning as the "Check for Updates" menu
+        # item above. Returning True keeps the handler installed for
+        # every future SIGUSR1, not just the first one.
+        GLib.unix_signal_add(
+            GLib.PRIORITY_DEFAULT, signal.SIGUSR1,
+            lambda: (self._run_check(notify_on_new=False), True)[-1])
 
     def _open_pachul(self):
         """Launch the main window — the installed `pachul` launcher if

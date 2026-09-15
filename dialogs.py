@@ -4972,31 +4972,138 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
         page.add(dnf_group)
 
     # Additional package sources
-    from backend import flatpak_available, snap_available
+    from backend import (flatpak_available, snap_available,
+                          invalidate_flatpak_available_cache,
+                          invalidate_snap_available_cache)
     extra_group = Adw.PreferencesGroup()
     extra_group.set_title(tr("Additional Package Sources"))
     extra_group.set_description(tr(
         "Show installed Flatpak/Snap apps alongside pacman packages, and include them when searching. "
         "Flatpak installs use --user (no password needed); Snap always needs one, since snapd requires root."))
 
-    fp_row = Adw.SwitchRow()
-    fp_row.set_title("Flatpak")
-    fp_row.set_active(s.get("flatpak_enabled", False))
-    if not flatpak_available():
-        fp_row.set_subtitle(tr("flatpak isn't installed"))
-        fp_row.set_sensitive(False)
-    fp_row.connect("notify::active", lambda r, _: (
-        save_settings({"flatpak_enabled": r.get_active()}), on_changed()))
+    def _resolve_flatpak_install():
+        return pkgmanager.flatpak_install_cmd(), tr("flatpak isn't installed")
+
+    def _resolve_snap_install():
+        if distro.is_arch():
+            # snapd isn't in the official Arch repos (AUR-only), so this
+            # goes through pachuli specifically — same -S/-g invocation as
+            # every other AUR install in this app (see
+            # aur_helper_install_cmd()'s pachuli branch) — rather than
+            # whatever helper is currently configured in the AUR section
+            # above, since pachuli is wanted here regardless.
+            local_pachuli = local_pachuli_path(app_dir)
+            if not (pachuli_installed() or local_pachuli):
+                return None, tr(
+                    "snap isn't installed (AUR-only on Arch — install pachuli above first)")
+            cmd = aur_helper_install_cmd("pachuli", shlex.quote("snapd"), noconfirm=True)
+            if not pachuli_installed():
+                # pachuli isn't on PATH yet, but a local pachuli.py sits
+                # next to Pachul's own files (see the AUR section above) —
+                # bootstrap it first, then use it for snapd itself.
+                cmd = f"{get_pachuli_install_cmd(local_pachuli)} && {cmd}"
+            return cmd, tr("snap isn't installed (AUR-only on Arch — installs snapd via pachuli)")
+        return pkgmanager.snap_install_cmd(), tr("snap isn't installed")
+
+    def _pkgsource_row(title, setting_key, available_fn, invalidate_fn, resolve_install,
+                        uninstall_cmd_fn, uninstall_heading, uninstall_body,
+                        install_title, uninstall_title):
+        """SwitchRow for an optional package source (Flatpak/Snap) with a
+        single button that installs it when absent and uninstalls it when
+        present, refreshing itself live once the terminal command
+        succeeds — availability here is just a cheap `which` check cached
+        in backend.py, so no restart or dialog reopen is needed."""
+        row = Adw.SwitchRow()
+        row.set_title(title)
+        row.set_active(s.get(setting_key, False))
+        row.connect("notify::active", lambda r, _: (
+            save_settings({setting_key: r.get_active()}), on_changed()))
+
+        btn = Gtk.Button()
+        btn.set_valign(Gtk.Align.CENTER)
+        row.add_suffix(btn)
+
+        def _refresh():
+            avail = available_fn()
+            # Only disable the row's own switch when the package is absent
+            # — NOT row.set_sensitive(), which would also grey out (and
+            # make unclickable) the Install/Uninstall button added as a
+            # suffix below, since GTK propagates a container's
+            # insensitivity down to its children regardless of their own
+            # sensitive property.
+            switch_widget = row.get_activatable_widget()
+            if switch_widget is not None:
+                switch_widget.set_sensitive(avail)
+            else:
+                row.set_sensitive(avail)
+            btn.remove_css_class("suggested-action")
+            btn.remove_css_class("destructive-action")
+            if avail:
+                row.set_subtitle("")
+                btn.set_label(tr("Uninstall"))
+                btn.add_css_class("destructive-action")
+                btn.set_sensitive(bool(uninstall_cmd_fn() and run_terminal_fn))
+            else:
+                cmd, subtitle = resolve_install()
+                row.set_subtitle(subtitle)
+                btn.set_label(tr("Install"))
+                btn.add_css_class("suggested-action")
+                btn.set_sensitive(bool(cmd and run_terminal_fn))
+
+        def _after_success():
+            invalidate_fn()
+            _refresh()
+
+        def _on_click(_btn):
+            if not run_terminal_fn:
+                return
+            if available_fn():
+                cmd = uninstall_cmd_fn()
+                if not cmd:
+                    return
+                d = Adw.AlertDialog()
+                d.set_heading(uninstall_heading)
+                d.set_body(uninstall_body)
+                d.add_response("cancel", tr("Cancel"))
+                d.add_response("uninstall", tr("Uninstall"))
+                d.set_response_appearance("uninstall", Adw.ResponseAppearance.DESTRUCTIVE)
+                d.set_default_response("cancel")
+                d.set_close_response("cancel")
+
+                def _on_response(_d, r):
+                    if r == "uninstall":
+                        btn.set_sensitive(False)
+                        run_terminal_fn(cmd, uninstall_title, parent=dlg,
+                                         on_success=_after_success)
+                d.connect("response", _on_response)
+                d.present(dlg)
+            else:
+                cmd, _subtitle = resolve_install()
+                if not cmd:
+                    return
+                btn.set_sensitive(False)
+                run_terminal_fn(cmd, install_title, parent=dlg, on_success=_after_success)
+
+        btn.connect("clicked", _on_click)
+        _refresh()
+        return row
+
+    fp_row = _pkgsource_row(
+        "Flatpak", "flatpak_enabled", flatpak_available, invalidate_flatpak_available_cache,
+        _resolve_flatpak_install, pkgmanager.flatpak_uninstall_cmd,
+        tr("Uninstall Flatpak?"),
+        tr("Removes the flatpak package. Any Flatpak apps installed through "
+           "it will stop working until it's reinstalled."),
+        tr("Install Flatpak"), tr("Uninstall Flatpak"))
     extra_group.add(fp_row)
 
-    sn_row = Adw.SwitchRow()
-    sn_row.set_title("Snap")
-    sn_row.set_active(s.get("snap_enabled", False))
-    if not snap_available():
-        sn_row.set_subtitle(tr("snap isn't installed"))
-        sn_row.set_sensitive(False)
-    sn_row.connect("notify::active", lambda r, _: (
-        save_settings({"snap_enabled": r.get_active()}), on_changed()))
+    sn_row = _pkgsource_row(
+        "Snap", "snap_enabled", snap_available, invalidate_snap_available_cache,
+        _resolve_snap_install, pkgmanager.snap_uninstall_cmd,
+        tr("Uninstall Snap?"),
+        tr("Removes snapd. Any Snap apps installed through it will stop "
+           "working until it's reinstalled."),
+        tr("Install Snap"), tr("Uninstall Snap"))
     extra_group.add(sn_row)
     page.add(extra_group)
 

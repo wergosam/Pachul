@@ -1416,6 +1416,78 @@ def dnf_native_install_cmd():
     return "pkexec /usr/bin/dnf install -y python3-libdnf5"
 
 
+def flatpak_install_cmd():
+    """Installs the `flatpak` package itself, so the opt-in Flatpak
+    package source in Preferences (see backend.py's flatpak_available()/
+    flatpak_enabled) has something to turn on. A plain official-repo
+    install on every family we support — Flatpak ships in Arch's
+    extra repo, Debian/Ubuntu's repos, Fedora's repos and openSUSE's
+    repos alike, no extra remote or PPA needed anywhere."""
+    fam = get_family()
+    if fam == "arch":
+        return "pkexec /usr/bin/pacman -S --needed --noconfirm flatpak"
+    if fam == "debian":
+        return "pkexec /usr/bin/apt-get install -y flatpak"
+    if fam == "fedora":
+        return "pkexec /usr/bin/dnf install -y flatpak"
+    if fam == "suse":
+        return "pkexec /usr/bin/zypper --non-interactive install flatpak"
+    return None
+
+
+def snap_install_cmd():
+    """Installs snapd, the daemon Snap needs (see backend.py's
+    snap_available()/snap_enabled). Returns None on Arch/Manjaro: unlike
+    Flatpak, snapd isn't in the official Arch repos at all — it's
+    AUR-only there — so this deliberately doesn't reach for an AUR
+    helper on someone's behalf. Preferences only shows the install
+    button when this returns a real command."""
+    fam = get_family()
+    if fam == "debian":
+        return "pkexec /usr/bin/apt-get install -y snapd"
+    if fam == "fedora":
+        return "pkexec /usr/bin/dnf install -y snapd"
+    if fam == "suse":
+        return "pkexec /usr/bin/zypper --non-interactive install snapd"
+    return None  # Arch/Manjaro: snapd is AUR-only, not offered here
+
+
+def flatpak_uninstall_cmd():
+    """Removes the `flatpak` package (see flatpak_install_cmd()). Unlike
+    Snap, this covers Arch/Manjaro too — Flatpak is a normal official-repo
+    package everywhere it's offered, so taking it off again is the same
+    plain removal regardless of family, with no AUR-specific handling
+    needed either way."""
+    fam = get_family()
+    if fam == "arch":
+        return "pkexec /usr/bin/pacman -R --noconfirm flatpak"
+    if fam == "debian":
+        return "pkexec /usr/bin/apt-get remove -y flatpak"
+    if fam == "fedora":
+        return "pkexec /usr/bin/dnf remove -y flatpak"
+    if fam == "suse":
+        return "pkexec /usr/bin/zypper --non-interactive remove flatpak"
+    return None
+
+
+def snap_uninstall_cmd():
+    """Removes snapd (see snap_install_cmd()). Once it's actually
+    installed — whether it got there via pachuli/AUR on Arch or the
+    native package manager elsewhere — snapd is just a normal installed
+    package from pacman's point of view, so removal needs no AUR-specific
+    handling even on Arch, unlike installation."""
+    fam = get_family()
+    if fam == "arch":
+        return "pkexec /usr/bin/pacman -R --noconfirm snapd"
+    if fam == "debian":
+        return "pkexec /usr/bin/apt-get remove -y snapd"
+    if fam == "fedora":
+        return "pkexec /usr/bin/dnf remove -y snapd"
+    if fam == "suse":
+        return "pkexec /usr/bin/zypper --non-interactive remove snapd"
+    return None
+
+
 def config_backup_sources():
     """List of config paths worth backing up, per distro family — only
     entries that actually exist on this system are used by the caller

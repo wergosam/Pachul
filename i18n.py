@@ -585,6 +585,20 @@ STRINGS_DE = {
         "Zeigt installierte Flatpak-/Snap-Apps zusammen mit Pacman-Paketen an und bezieht sie in die Suche mit ein. Flatpak-Installationen laufen über --user (kein Passwort nötig); bei Snap wird immer eines benötigt, da snapd Root-Rechte braucht.",
     "flatpak isn't installed": "flatpak ist nicht installiert",
     "snap isn't installed": "snap ist nicht installiert",
+    "snap isn't installed (AUR-only on Arch — installs snapd via pachuli)":
+        "snap ist nicht installiert (auf Arch nur über AUR — installiert snapd über pachuli)",
+    "snap isn't installed (AUR-only on Arch — install pachuli above first)":
+        "snap ist nicht installiert (auf Arch nur über AUR — installiere zuerst pachuli weiter oben)",
+    "Install Flatpak": "Flatpak installieren",
+    "Install Snap": "Snap installieren",
+    "Uninstall Flatpak": "Flatpak deinstallieren",
+    "Uninstall Snap": "Snap deinstallieren",
+    "Uninstall Flatpak?": "Flatpak deinstallieren?",
+    "Removes the flatpak package. Any Flatpak apps installed through it will stop working until it's reinstalled.":
+        "Entfernt das Paket flatpak. Darüber installierte Flatpak-Apps funktionieren erst wieder, wenn es neu installiert wird.",
+    "Uninstall Snap?": "Snap deinstallieren?",
+    "Removes snapd. Any Snap apps installed through it will stop working until it's reinstalled.":
+        "Entfernt snapd. Darüber installierte Snap-Apps funktionieren erst wieder, wenn es neu installiert wird.",
     "Flatpak (user installation)": "Flatpak (Benutzer-Installation)",
     "Snap package": "Snap-Paket",
     "Behaviour": "Verhalten",
@@ -1701,6 +1715,20 @@ STRINGS_FR = {
     "Show installed Flatpak/Snap apps alongside pacman packages, and include them when searching. Flatpak installs use --user (no password needed); Snap always needs one, since snapd requires root.":
         "Affiche les applications Flatpak/Snap installées à côté des paquets pacman, et les inclut dans la recherche. Les installations Flatpak utilisent --user (aucun mot de passe requis) ; Snap en demande toujours un, car snapd nécessite les droits root.",
     "flatpak isn't installed": "flatpak n'est pas installé",
+    "snap isn't installed (AUR-only on Arch — installs snapd via pachuli)":
+        "snap n'est pas installé (uniquement via AUR sous Arch — installe snapd via pachuli)",
+    "snap isn't installed (AUR-only on Arch — install pachuli above first)":
+        "snap n'est pas installé (uniquement via AUR sous Arch — installez d'abord pachuli ci-dessus)",
+    "Install Flatpak": "Installer Flatpak",
+    "Install Snap": "Installer Snap",
+    "Uninstall Flatpak": "Désinstaller Flatpak",
+    "Uninstall Snap": "Désinstaller Snap",
+    "Uninstall Flatpak?": "Désinstaller Flatpak ?",
+    "Removes the flatpak package. Any Flatpak apps installed through it will stop working until it's reinstalled.":
+        "Supprime le paquet flatpak. Les applications Flatpak installées via celui-ci cesseront de fonctionner jusqu'à sa réinstallation.",
+    "Uninstall Snap?": "Désinstaller Snap ?",
+    "Removes snapd. Any Snap apps installed through it will stop working until it's reinstalled.":
+        "Supprime snapd. Les applications Snap installées via celui-ci cesseront de fonctionner jusqu'à sa réinstallation.",
     "snap isn't installed": "snap n'est pas installé",
     "Flatpak (user installation)": "Flatpak (installation utilisateur)",
     "Snap package": "Paquet Snap",
@@ -2327,6 +2355,20 @@ STRINGS_IT = {
         "Mostra le app Flatpak/Snap installate insieme ai pacchetti pacman e le include nelle ricerche. Le installazioni Flatpak usano --user (nessuna password richiesta); Snap ne richiede sempre una, poiché snapd necessita di privilegi di root.",
     "flatpak isn't installed": "flatpak non è installato",
     "snap isn't installed": "snap non è installato",
+    "snap isn't installed (AUR-only on Arch — installs snapd via pachuli)":
+        "snap non è installato (su Arch disponibile solo via AUR — installa snapd tramite pachuli)",
+    "snap isn't installed (AUR-only on Arch — install pachuli above first)":
+        "snap non è installato (su Arch disponibile solo via AUR — installa prima pachuli qui sopra)",
+    "Install Flatpak": "Installa Flatpak",
+    "Install Snap": "Installa Snap",
+    "Uninstall Flatpak": "Disinstalla Flatpak",
+    "Uninstall Snap": "Disinstalla Snap",
+    "Uninstall Flatpak?": "Disinstallare Flatpak?",
+    "Removes the flatpak package. Any Flatpak apps installed through it will stop working until it's reinstalled.":
+        "Rimuove il pacchetto flatpak. Le app Flatpak installate tramite esso smetteranno di funzionare finché non viene reinstallato.",
+    "Uninstall Snap?": "Disinstallare Snap?",
+    "Removes snapd. Any Snap apps installed through it will stop working until it's reinstalled.":
+        "Rimuove snapd. Le app Snap installate tramite esso smetteranno di funzionare finché non viene reinstallato.",
     "Flatpak (user installation)": "Flatpak (installazione utente)",
     "Snap package": "Pacchetto Snap",
     "Behaviour": "Comportamento",

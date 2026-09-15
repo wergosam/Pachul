@@ -26,7 +26,7 @@ from backend import (
     build_desktop_icon_map, fetch_flatpak_icon,
     aur_helper_upgrade_cmd, aur_helper_install_cmd, _find_aur_helper,
     pachuli_installed, local_pachuli_path, get_pachuli_install_cmd,
-    pachuli_update_available,
+    pachuli_update_available, notify_tray_recheck,
 )
 from models import (
     PackageItem, NavRow, REPO_BADGE_CLASS, pkg_icon, make_package_listview,
@@ -1915,6 +1915,10 @@ class pachulWindow(Adw.ApplicationWindow):
             # wieder die reguläre Ansicht (inkl. "Keine Updates"-Platzhalter,
             # falls auf der Updates-Seite), statt dass die Mitte leer bleibt.
             self._load_packages()
+            # Nudge any running tray icon to re-check right now instead of
+            # leaving it on whatever stale count it last saw until its own
+            # periodic timer fires — see notify_tray_recheck()'s docstring.
+            notify_tray_recheck()
 
         def _strip(c):
             return c[len("pkexec "):] if c and c.startswith("pkexec ") else c
@@ -2211,13 +2215,15 @@ class pachulWindow(Adw.ApplicationWindow):
         show_preferences(self, self._on_settings_changed, app_dir=APP_DIR,
                           run_terminal_fn=self._run_terminal_reset_aur_helper)
 
-    def _run_terminal_reset_aur_helper(self, cmd, title, parent=None):
+    def _run_terminal_reset_aur_helper(self, cmd, title, parent=None, on_success=None):
         # After installing an AUR helper (e.g. paru) from Preferences, drop
         # backend's cached lookup — now the only one, see _get_aur_helper()
         # — so the very next AUR action picks it up instead of still
         # reporting "no helper" for the rest of this session.
         def _after():
             save_settings({})   # side effect: resets backend's _aur_helper_cache
+            if on_success:
+                on_success()
         self._run_terminal(cmd, title, on_success=_after, parent=parent)
 
     def _on_settings_changed(self):
@@ -2850,6 +2856,12 @@ class pachulWindow(Adw.ApplicationWindow):
                 p["status"] = "installed"
                 p.pop("new_version", None)
         self._apply_filter()
+        if n == 0:
+            # Every pending update just got cleared this way too (not only
+            # via the "Update All" path in _do_upgrade()) — nudge any
+            # running tray icon so it doesn't sit on a stale count; see
+            # notify_tray_recheck()'s docstring.
+            notify_tray_recheck()
 
     def _refresh_selected_pkg(self):
         if not self._selected_pkg:

@@ -40,7 +40,7 @@ INSTALLED_CACHE= CACHE_DIR / "installed.json"
 FLATPAK_REMOTE_CACHE = CACHE_DIR / "flatpak_remote.json"
 AUR_NAMES_CACHE = CACHE_DIR / "aur_names.json"
 SNAP_CATALOG_CACHE = CACHE_DIR / "snap_catalog.json"
-APP_VERSION    = "2.2.8"   # shown in the About dialog — bump on every release
+APP_VERSION    = "2.2.10"   # shown in the About dialog — bump on every release
 CACHE_VERSION  = 4   # bump when the cached package schema changes, to force a rebuild
 SYNCDB_TTL     = 6 * 3600   # 6 hours
 FLATPAK_REMOTE_TTL = 6 * 3600   # same cadence as pacman's syncdb
@@ -432,12 +432,28 @@ def flatpak_available():
     return _flatpak_available_cache
 
 
+def invalidate_flatpak_available_cache():
+    """Call after installing/removing the flatpak package itself, so the
+    next flatpak_available() check re-probes instead of returning the
+    stale cached result from earlier in this run."""
+    global _flatpak_available_cache
+    _flatpak_available_cache = None
+
+
 def snap_available():
     global _snap_available_cache
     if _snap_available_cache is None:
         _, code = run_command("which snap 2>/dev/null")
         _snap_available_cache = (code == 0)
     return _snap_available_cache
+
+
+def invalidate_snap_available_cache():
+    """Call after installing/removing snapd, so the next snap_available()
+    check re-probes instead of returning the stale cached result from
+    earlier in this run."""
+    global _snap_available_cache
+    _snap_available_cache = None
 
 
 def _load_flatpak_remote_cache():
@@ -3056,6 +3072,15 @@ def stop_tray():
     start_tray(), used when autostart is turned off in Preferences."""
     run_command("pkill -f 'tray[.]py' 2>/dev/null")
     return True
+
+
+def notify_tray_recheck():
+    """Ask any running pachul-tray process to immediately re-check for
+    updates via SIGUSR1, instead of leaving its tray label/tooltip showing
+    a stale count until its own periodic timer next fires. Called right
+    after a successful upgrade in the main window — a no-op (silently)
+    if no tray process is currently running."""
+    run_command("pkill -SIGUSR1 -f 'tray[.]py' 2>/dev/null")
 
 
 # ─── Background update-check (systemd --user timer) ───────────────────────────

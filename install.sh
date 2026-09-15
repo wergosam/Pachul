@@ -139,6 +139,41 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 #  2. Install application modules
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Clear out stale icon files from an earlier installation first. `install`
+# below overwrites an existing file without complaint on its own — but a
+# reinstall that happens via a package manager instead (e.g. the AUR
+# package built from PKGBUILD) can abort with a "file already exists,
+# owned by no package" conflict if these same three paths are already
+# sitting there from a previous install.sh run (or an older release that
+# used a different icon filename here, e.g. the now-unused
+# "_transparent" variant). Removing them ourselves first — regardless of
+# which of DATA_DIR/ICON_DIR they're in, or how they got there — means
+# the install below (and any later package-manager install of the same
+# paths) always starts from a clean slate instead of tripping over
+# leftovers.
+STALE_ICON_FILES=(
+    "io_github_wergosam_pachul_bw.svg"
+    "io_github_wergosam_pachul_transparent.svg"
+    "io.github.wergosam.pachul.svg"
+)
+info "Checking for icon files left over from a previous installation…"
+FOUND_STALE=0
+for dir in "$DATA_DIR" "$ICON_DIR"; do
+    for f in "${STALE_ICON_FILES[@]}"; do
+        # -e alone misses a dangling symlink (a target that no longer
+        # exists but the link itself still does) — -L catches that case
+        # too, same reasoning as app.py's own os.path.lexists() check.
+        if [[ -e "${dir}/${f}" || -L "${dir}/${f}" ]]; then
+            rm -f "${dir}/${f}"
+            info "Removed existing ${dir}/${f}"
+            FOUND_STALE=1
+        fi
+    done
+done
+[[ $FOUND_STALE -eq 1 ]] && success "Stale icon files removed." \
+    || info "No stale icon files found."
+
 info "Installing Pachul modules to ${DATA_DIR}…"
 
 install -d "$DATA_DIR"
