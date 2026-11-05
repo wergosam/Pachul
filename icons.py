@@ -94,6 +94,26 @@ def get_flatpak_icon_paintable(app_id, size=22):
 # ─── Icon definitions ─────────────────────────────────────────────────────────
 
 ICON_SVGS = {
+    "pachul-details-symbolic": """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16"><g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.4"/><line x1="9.6" y1="2.8" x2="9.6" y2="13.2"/><line x1="11.3" y1="5.6" x2="12.6" y2="5.6"/><line x1="11.3" y1="8" x2="12.6" y2="8"/></g></svg>""",
+
+    "pachul-sort-symbolic": """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16"><g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="4" x2="9.5" y2="4"/><line x1="2" y1="8" x2="7.5" y2="8"/><line x1="2" y1="12" x2="5.5" y2="12"/><path d="M12.5 3.5 V12.5 M10.5 10.5 L12.5 12.5 L14.5 10.5"/></g></svg>""",
+
+    "hammer-wrench-symbolic": """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24"><g fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" stroke-linecap="butt"><path transform="translate(12 12) rotate(45)" d="M-7.6 -5.6 Q-6.6 -9.4 -2.2 -9.1 H2.6 V-9.7 H5.3 V-5.3 H2.6 V-5.9 H1.15 V-2.6 M1.15 2.6 V9.0 A1.15 1.15 0 0 1 -1.15 9.0 V2.6 M-1.15 -2.6 V-5.9 Q-4.7 -6.9 -7.6 -5.6"/></g><g fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round" stroke-linecap="round"><path transform="translate(12 12) rotate(-45)" d="M-1 -10.228 V-7.9 H1 V-10.228 A3 3 0 0 1 1.4 -4.747 V4.747 A3 3 0 0 1 1 10.228 V7.9 H-1 V10.228 A3 3 0 0 1 -1.4 4.747 V-4.747 A3 3 0 0 1 -1 -10.228 Z"/></g></svg>""",
+
+    "weather-clear-symbolic": """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+        <circle cx="8" cy="8" r="3" fill="currentColor"/>
+        <g stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+            <line x1="8" y1="1.2" x2="8" y2="3"/><line x1="8" y1="13" x2="8" y2="14.8"/>
+            <line x1="1.2" y1="8" x2="3" y2="8"/><line x1="13" y1="8" x2="14.8" y2="8"/>
+            <line x1="3.2" y1="3.2" x2="4.5" y2="4.5"/><line x1="11.5" y1="11.5" x2="12.8" y2="12.8"/>
+            <line x1="3.2" y1="12.8" x2="4.5" y2="11.5"/><line x1="11.5" y1="4.5" x2="12.8" y2="3.2"/>
+        </g>
+    </svg>""",
+
+    "weather-clear-night-symbolic": """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+        <path d="M13.6 9.6 A6 6 0 1 1 6.4 2.4 A4.8 4.8 0 0 0 13.6 9.6 Z" fill="currentColor"/>
+    </svg>""",
+
     "dialog-password-symbolic": """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
         <rect x="3" y="6" width="10" height="7" rx="1" fill="currentColor"/>
         <rect x="5" y="3" width="6" height="4" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/>
@@ -436,6 +456,64 @@ def get_icon_texture(name, size=18):
     return _texture_for(name, size, _icon_color())
 
 
+# ─── Farbe live an die tatsächliche Vordergrundfarbe anpassen ─────────────────
+# Die Textur wird beim Erzeugen mit einer festen Farbe gerendert. Stimmt die
+# Annahme "hell/dunkel" in diesem Moment nicht (z.B. beim ersten Aufbau der
+# Oberfläche, bevor der Stil final steht), wären die Icons fast weiss auf
+# hellem Grund — also praktisch unsichtbar. Darum wird die Farbe nach dem
+# Einblenden (map) und bei jedem Hell/Dunkel-Wechsel aus der echten CSS-Farbe
+# des Widgets neu bestimmt.
+
+import weakref
+_TRACKED_ICONS = weakref.WeakSet()
+_STYLE_HOOKED = False
+
+
+def _widget_color_hex(widget):
+    """Echte Vordergrundfarbe des Widgets als #rrggbb (GTK >= 4.10), sonst None."""
+    try:
+        c = widget.get_color()
+        return "#%02x%02x%02x" % (round(c.red * 255), round(c.green * 255),
+                                  round(c.blue * 255))
+    except Exception:
+        return None
+
+
+def _refresh_icon(img):
+    spec = getattr(img, "_pachul_icon", None)
+    if spec is None:
+        return
+    name, size = spec
+    color = _widget_color_hex(img) or _icon_color()
+    if getattr(img, "_pachul_color", None) == color:
+        return
+    tex = _texture_for(name, size, color)
+    if tex is not None:
+        img._pachul_color = color
+        img.set_from_paintable(tex)
+        img.set_pixel_size(size)
+
+
+def _refresh_all_icons(*_):
+    for img in list(_TRACKED_ICONS):
+        _refresh_icon(img)
+
+
+def _track_icon_color(img, name, size):
+    global _STYLE_HOOKED
+    img._pachul_icon = (name, size)
+    img._pachul_color = _icon_color()
+    _TRACKED_ICONS.add(img)
+    img.connect("map", _refresh_icon)
+    if not _STYLE_HOOKED:
+        _STYLE_HOOKED = True
+        try:
+            Adw.StyleManager.get_default().connect(
+                "notify::dark", lambda *_: GLib.idle_add(_refresh_all_icons))
+        except Exception:
+            pass
+
+
 def themed_image(icon_names, size=18):
     """Drop-in replacement for building a Gtk.Image from an icon name (or a
     list of fallback names, kept for compatibility with existing call
@@ -449,6 +527,7 @@ def themed_image(icon_names, size=18):
         if tex is not None:
             img = Gtk.Image.new_from_paintable(tex)
             img.set_pixel_size(size)
+            _track_icon_color(img, name, size)
             return img
     gicon = Gio.ThemedIcon.new_from_names(list(icon_names))
     img = Gtk.Image.new_from_gicon(gicon)

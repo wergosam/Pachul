@@ -6,7 +6,7 @@ Application-wide CSS and style loading.
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Gdk
+from gi.repository import Gtk, Gdk, Adw
 
 CSS = """
 /* ── Nav rows ── */
@@ -21,6 +21,10 @@ CSS = """
     font-weight: 600;
     font-size: 0.88rem;
 }
+
+/* ── Package titles: ein Punkt kleiner (Standard 11pt → 10pt, title-2 15pt → 14pt) ── */
+.pkg-name  { font-size: 0.91rem; }
+.pkg-title { font-size: 1.27rem; }
 
 /* ── Package rows ── */
 .pkg-row { border-radius: 6px; margin: 1px 8px; }
@@ -216,8 +220,35 @@ CSS = """
 }
 
 /* ── Misc ── */
-.install-btn { border-radius: 8px; font-weight: 600; }
-.remove-btn  { border-radius: 8px; font-weight: 600; }
+/* Alle Buttons: gleiche runde Form wie Installieren/Deinstallieren.
+   Ausgenommen: Flat-/Icon-/Kreis-/Toggle-Buttons und Fenster-Knöpfe. */
+button.install-btn, button.remove-btn, button.hold-btn, button.pill-btn,
+button.suggested-action, button.destructive-action,
+button:not(.flat):not(.circular):not(.image-button):not(.titlebutton):not(.toggle):not(.suggested-action):not(.destructive-action) {
+    border-radius: 999px;
+    font-weight: 600;
+    padding-left: 14px; padding-right: 14px;
+}
+.install-btn label, .remove-btn label, .hold-btn label, .pill-btn label,
+button.suggested-action label, button.destructive-action label,
+button:not(.flat):not(.circular):not(.image-button):not(.titlebutton):not(.toggle):not(.suggested-action):not(.destructive-action) label {
+    font-size: 0.91rem;  /* alle Text-Buttons gleich gross wie "Installieren" */
+}
+button.suggested-action, button.destructive-action,
+button:not(.flat):not(.circular):not(.image-button):not(.titlebutton):not(.toggle):not(.suggested-action):not(.destructive-action) {
+    font-size: 0.91rem;
+}
+/* Menüpunkte in der Titelleiste (Pakete, Werkzeuge …): 1 Punkt kleiner */
+button.header-menu-btn, button.header-menu-btn label { font-size: 0.91rem; }
+/* Aktions-Buttons mit Text (Neu installieren, Downgrade, Ignorieren): Rahmen immer sichtbar */
+button.pill-btn.flat {
+    border: 1px solid alpha(currentColor, 0.35);
+    background-image: none;
+    box-shadow: none;
+}
+button.pill-btn.flat:hover { background-color: alpha(currentColor, 0.08); }
+button.pill-btn.flat:active { background-color: alpha(currentColor, 0.14); }
+button.pill-btn.flat:disabled { border-color: alpha(currentColor, 0.18); }
 .orphan-row  { border-left: 3px solid alpha(#e66100, 0.6); }
 
 progressbar.success trough progress { background: #2ec27e; }
@@ -248,6 +279,36 @@ progressbar trough progress { border-radius: 999px; }
     color: alpha(@window_fg_color, 0.72);
 }
 
+/* ── Switches: smaller, soft light-blue instead of the strong accent blue ── */
+switch {
+    padding: 0;
+    margin: 0;
+    min-height: 0;
+    min-width: 0;
+    border-radius: 999px;
+}
+switch slider {
+    min-width: 16px;
+    min-height: 16px;
+    margin: 2px;
+    border-radius: 999px;
+}
+
+switch:checked,
+switch:checked:hover,
+switch:checked:backdrop {
+    background-color: #E3F6FE;
+    background-image: none;
+    border: 1px solid #8CC4E0;
+    color: #3A5F73;
+}
+switch:checked slider,
+switch:checked:backdrop slider {
+    background-color: #4A86A8;
+    background-image: none;
+    border-color: #4A86A8;
+}
+
 /* Help dialog: function-description subtitle text — same opacity-reset
    fix, kept a touch darker still since these are the primary readable
    content of that dialog, not a secondary hint. */
@@ -257,8 +318,65 @@ progressbar trough progress { border-radius: 999px; }
 }
 """
 
+# Nur im hellen Modus: sanfte, helle, klare Farben für Installieren/Deinstallieren.
+LIGHT_CSS = """
+/* Grün: Hauptaktion (Installieren, Speichern, OK …) */
+button.suggested-action {
+    background-image: none;
+    background-color: #c9f0dc;
+    color: #1b6b45;
+    border: 1px solid #a9e2c3;
+    box-shadow: none;
+}
+button.suggested-action:hover { background-color: #b8eacf; }
+button.suggested-action:active { background-color: #a9e2c3; }
+/* Rosé: zerstörerische Aktion (Deinstallieren, Entfernen …) */
+button.destructive-action {
+    background-image: none;
+    background-color: #fcd9dc;
+    color: #a3262f;
+    border: 1px solid #f6bcc1;
+    box-shadow: none;
+}
+button.destructive-action:hover { background-color: #fac8cc; }
+button.destructive-action:active { background-color: #f6bcc1; }
+/* Hellblau: alle übrigen Text-Buttons (Schließen, Abbrechen, Neu installieren, Ignorieren …) */
+button.pill-btn.flat,
+button:not(.flat):not(.circular):not(.image-button):not(.titlebutton):not(.toggle):not(.suggested-action):not(.destructive-action) {
+    background-image: none;
+    background-color: #e6eff9;
+    color: #2c5278;
+    border: 1px solid #cddff0;
+    box-shadow: none;
+}
+button.pill-btn.flat:hover,
+button:not(.flat):not(.circular):not(.image-button):not(.titlebutton):not(.toggle):not(.suggested-action):not(.destructive-action):hover { background-color: #d8e7f6; }
+button.pill-btn.flat:active,
+button:not(.flat):not(.circular):not(.image-button):not(.titlebutton):not(.toggle):not(.suggested-action):not(.destructive-action):active { background-color: #cddff0; }
+"""
+
+
 def load_css():
+    display = Gdk.Display.get_default()
     p = Gtk.CssProvider()
     p.load_from_data(CSS.encode())
     Gtk.StyleContext.add_provider_for_display(
-        Gdk.Display.get_default(), p, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        display, p, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    # Pastellfarben der Buttons nur im hellen Modus aktiv; folgt dem Umschalter live.
+    light = Gtk.CssProvider()
+    light.load_from_data(LIGHT_CSS.encode())
+    state = {"on": False}
+
+    def _sync(*_):
+        dark = Adw.StyleManager.get_default().get_dark()
+        if not dark and not state["on"]:
+            Gtk.StyleContext.add_provider_for_display(
+                display, light, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+            state["on"] = True
+        elif dark and state["on"]:
+            Gtk.StyleContext.remove_provider_for_display(display, light)
+            state["on"] = False
+
+    Adw.StyleManager.get_default().connect("notify::dark", _sync)
+    _sync()

@@ -132,7 +132,7 @@ class PackageItem(GObject.Object):
     __gtype_name__ = 'PachulPackageItem'
 
     def __init__(self, name, version, repo="local", status="installed",
-                 description="", foreign=False, source_id=None):
+                 description="", foreign=False, source_id=None, new_version=""):
         super().__init__()
         self.pkg_name        = name
         self.pkg_version     = version
@@ -145,11 +145,38 @@ class PackageItem(GObject.Object):
         # remove commands need, kept separate from pkg_name so the display
         # name can stay human-friendly. None for ordinary pacman packages.
         self.pkg_source_id   = source_id
+        # Version an "update" package would be upgraded to (empty if none
+        # known — e.g. Flatpak remotes that publish no version string).
+        self.pkg_new_version = new_version or ""
         # Temporärer UI-Backpointer, damit wir beim Klicken das Widget direkt refashen können
         self._bound_widget   = None
 
 
 # ─── Shared selection state ────────────────────────────────────────────────
+
+def version_text(item):
+    """Version label for a package: "installed → available" while an update
+    is pending and its new version is known, else just the version."""
+    cur = item.pkg_version or ""
+    new = getattr(item, "pkg_new_version", "") or ""
+    if item.pkg_status == "update" and new and new != cur:
+        return f"{cur} → {new}" if cur else f"→ {new}"
+    return cur
+
+
+def selection_key(item):
+    """Unique key identifying one list entry in the checkbox selection.
+
+    pkg_name alone is NOT unique: Flatpak/Snap entries use a friendly
+    display name, and several entries can share one (runtimes in different
+    branches, extensions, ...). Keying the selection by that name made such
+    rows share one checkbox, counted them once ("Remove (2740)" for 2741
+    rows) and — worse — acted on only one of them. Pacman/AUR names are
+    unique, so those keep the plain name."""
+    if item.pkg_repo in ("flatpak", "snap"):
+        return f"{item.pkg_repo}:{item.pkg_source_id or item.pkg_name}"
+    return item.pkg_name
+
 
 class ListSelectionState:
     """Shared mutable checkbox-selection state for a package ListView's row
@@ -163,7 +190,7 @@ class ListSelectionState:
     __slots__ = ("selected",)
 
     def __init__(self):
-        self.selected = set()    # set of selected pkg_name strings
+        self.selected = set()    # set of selection_key() strings
 
 
 # ─── Package list row (virtualized ListView) ─────────────────────────────────
@@ -227,6 +254,7 @@ class PackageRowContent(Gtk.Box):
         self.name_label = Gtk.Label()
         self.name_label.set_halign(Gtk.Align.START)
         self.name_label.add_css_class("body")
+        self.name_label.add_css_class("pkg-name")
         self.name_label.set_ellipsize(Pango.EllipsizeMode.END)
         attrs = Pango.AttrList()
         attrs.insert(Pango.attr_weight_new(Pango.Weight.SEMIBOLD))
@@ -307,7 +335,7 @@ class PackageRowContent(Gtk.Box):
         self.repo_badge.set_label(repo_str.upper())
         self.repo_badge.add_css_class(REPO_BADGE_CLASS.get(repo_str.lower(), "badge-local"))
 
-        self.ver_label.set_label(pkg.pkg_version or "")
+        self.ver_label.set_label(version_text(pkg))
 
     def update_selection_visuals(self):
         """Reflects whether this row's package is checked. The checkbox
@@ -315,7 +343,7 @@ class PackageRowContent(Gtk.Box):
         changes."""
         if not self.pkg or not self.sel_state:
             return
-        is_selected = self.pkg.pkg_name in self.sel_state.selected
+        is_selected = selection_key(self.pkg) in self.sel_state.selected
         self.checkbox_mark.set_visible(is_selected)
         if is_selected:
             self.checkbox.add_css_class("pkg-checkbox-checked")
@@ -331,7 +359,7 @@ class PackageRowContent(Gtk.Box):
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
         if not self.pkg or self.sel_state is None:
             return
-        name = self.pkg.pkg_name
+        name = selection_key(self.pkg)
         if name in self.sel_state.selected:
             self.sel_state.selected.discard(name)
         else:

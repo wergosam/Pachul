@@ -5,8 +5,10 @@ entry, detail panel, filtering, and all action handlers.
 """
 
 import os
+import re
 import shlex
 import threading
+import time
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -17,7 +19,7 @@ import distro
 import pkgmanager
 from backend import (
     get_packages, get_package_info, get_package_files,
-    check_updates, search_packages_cmd, run_command,
+    check_updates, search_packages_cmd, run_command, get_aur_info,
     invalidate_cache, invalidate_syncdb_cache, get_explicit_packages,
     get_ignored_packages, build_hold_cmd, build_hold_cmd_bulk, get_setting, save_settings,
     build_snapshot_cmd, flatpak_available, snap_available,
@@ -26,12 +28,14 @@ from backend import (
     build_desktop_icon_map, fetch_flatpak_icon,
     aur_helper_upgrade_cmd, aur_helper_install_cmd, _find_aur_helper,
     pachuli_installed, local_pachuli_path, get_pachuli_install_cmd,
+    makepkg_auth_needs_setup, get_makepkg_pkexec_cmd,
     pachuli_update_available, notify_tray_recheck,
+    startup_health_checks, aur_meta_is_fresh, refresh_aur_meta, apply_aur_meta,
 )
 from models import (
     PackageItem, NavRow, REPO_BADGE_CLASS, pkg_icon, make_package_listview,
     make_icon, set_button_icon, ListSelectionState, set_installed_icon_map,
-    resolve_real_icon_paintable,
+    resolve_real_icon_paintable, selection_key, version_text,
 )
 from icons import (themed_image, themed_paintable, get_icon_texture,
                     get_flatpak_icon_paintable)
@@ -57,6 +61,8 @@ ICON_CLEAN_CACHE = [
     "user-trash-symbolic", "folder-symbolic",
 ]
 from i18n import tr, get_language
+import localpkg
+from toolshub import show_tools_dialog, show_packages_dialog
 from dialogs import (
     run_terminal_dialog,
     show_sync_db_dialog,
@@ -75,6 +81,7 @@ from dialogs import (
     show_clean_cache_dialog,
     show_import_pkgs_dialog,
     show_import_pkgs_intro,
+    show_install_local_dialog,
     show_export_pkgs_intro,
     show_hold_dialog,
     show_mark_asdeps_dialog,
@@ -88,6 +95,7 @@ from dialogs import (
     show_ignored_packages_dialog,
     show_preferences,
     show_help_dialog,
+    show_startup_healthcheck_dialog,
 )
 
 
@@ -119,6 +127,7 @@ class DetailPanel:
         self._files_query = ""     # current Files-tab filter text (lowercased)
         self._files_loading = False
         self._current_pkg_name = None   # guards async icon fetch races
+        self.on_visibility = None  # set by the window: called with True when the panel gets shown
         self._build(action_btn, on_install, on_remove, on_reinstall, on_downgrade, on_hold)
 
     def _build(self, action_btn, on_install, on_remove, on_reinstall, on_downgrade, on_hold=None):
@@ -202,6 +211,7 @@ class DetailPanel:
         title_col.set_hexpand(True); title_col.set_valign(Gtk.Align.CENTER)
         self.name = Gtk.Label(label=tr("Package"))
         self.name.set_halign(Gtk.Align.START); self.name.add_css_class("title-2")
+        self.name.add_css_class("pkg-title")
         title_col.append(self.name)
         self.desc = Gtk.Label(label=tr("Description"))
         self.desc.set_halign(Gtk.Align.START); self.desc.add_css_class("body")
@@ -260,7 +270,7 @@ class DetailPanel:
             None, tr("Ignore Updates"),
             callback=on_hold)
         self.btn_hold.set_sensitive(False)
-        self.btn_hold.add_css_class("flat")
+        self.btn_hold.add_css_class("flat"); self.btn_hold.add_css_class("hold-btn")
         for btn in (self.btn_install, self.btn_remove, self.btn_reinstall,
                     self.btn_downgrade, self.btn_hold):
             flow_child = Gtk.FlowBoxChild()
@@ -418,6 +428,12 @@ class DetailPanel:
         self.files_model.splice(0, self.files_model.get_n_items(), paths)
         self._update_files_count()
 
+    def reveal(self):
+        """Show the panel and tell the window, so the Details button follows."""
+        self.stack.set_visible(True)
+        if self.on_visibility:
+            self.on_visibility(True)
+
     # ── Batch selection display ──────────────────────────────────────────────
 
     def show_batch(self, pkg_names):
@@ -438,7 +454,7 @@ class DetailPanel:
             row.add_prefix(icon)
             self.batch_listbox.append(row)
 
-        self.stack.set_visible(True)
+        self.reveal()
         self.stack.set_visible_child_name("batch")
 
 
@@ -457,7 +473,16 @@ class pachulWindow(Adw.ApplicationWindow):
         self._updates          = None
         self._search_timer     = None   # GLib source id for debounced search
         self._alive            = True   # set False on close to stop background workers
+        self._startup_health_checked = False  # runs backend.startup_health_checks() once per session
+        self._healthcheck_render = None       # set while the Startup Check dialog is open (see _on_done)
         self._current_lang     = get_language()
+        # Sort order of the package list (persisted in settings.json) and
+        # whether the detail panel is currently shown (not persisted — it
+        # starts hidden and opens on the first package click).
+        _sk = get_setting("pkg_sort_key")
+        self._sort_key         = _sk if _sk in self.SORT_KEYS else "name"
+        self._sort_desc        = bool(get_setting("pkg_sort_desc"))
+        self._detail_enabled   = False
         # Whether "Hold/Unhold" (pacman IgnorePkg / apt-mark hold / zypper
         # lock) and "Mark as Explicit/Dependency" (pacman -D --asexplicit/
         # --asdeps / apt-mark manual|auto / dnf mark) have a real backend
@@ -468,6 +493,7 @@ class pachulWindow(Adw.ApplicationWindow):
         self._hold_supported = distro.is_arch() or distro.get_family() in ("debian", "suse")
         self._mark_reason_supported = distro.is_arch() or distro.get_family() in ("debian", "fedora")
         self.connect("close-request", self._on_close_request)
+        self._setup_view_actions(app)
         self._build_ui()
         self._load_packages()
         GLib.idle_add(self._maybe_offer_install)
@@ -483,6 +509,123 @@ class pachulWindow(Adw.ApplicationWindow):
         deselect_all_action.connect("activate", self._on_deselect_all)
         self.add_action(deselect_all_action)
         app.set_accels_for_action("win.deselect_all", ["<Ctrl><Shift>a"])
+
+    # ── Sorting + detail-panel switch ────────────────────────────────────────
+
+    SORT_KEYS = ("name", "description", "version", "repo", "status", "selected")
+
+    def _setup_view_actions(self, app):
+        """Stateful window actions: win.sort_by (radio), win.sort_desc and
+        win.toggle_details (Ctrl+D). They live on the window, so they survive
+        _rebuild_ui_preserving_state(); the widgets bound to them are simply
+        rebuilt and pick up the current state."""
+        sort_by = Gio.SimpleAction.new_stateful(
+            "sort_by", GLib.VariantType.new("s"),
+            GLib.Variant.new_string(self._sort_key))
+        sort_by.connect("change-state", self._on_sort_by_changed)
+        self.add_action(sort_by)
+
+        sort_desc = Gio.SimpleAction.new_stateful(
+            "sort_desc", None, GLib.Variant.new_boolean(self._sort_desc))
+        sort_desc.connect("change-state", self._on_sort_desc_changed)
+        self.add_action(sort_desc)
+
+        toggle = Gio.SimpleAction.new_stateful(
+            "toggle_details", None, GLib.Variant.new_boolean(self._detail_enabled))
+        toggle.connect("change-state", self._on_toggle_details)
+        self.add_action(toggle)
+        app.set_accels_for_action("win.toggle_details", ["<Ctrl>d"])
+
+    def _sort_state(self):
+        return (self._sort_key, self._sort_desc)
+
+    @staticmethod
+    def _version_sort_key(version):
+        """Natural ordering for version strings (1.9 < 1.10, 2:1.0 > 1:9.9).
+        An approximation of the package managers' own comparison — good
+        enough for sorting a list. Numbers rank above letters (1.0rc1 < 1.0)."""
+        parts = re.findall(r"\d+|[A-Za-z]+", version or "")
+        return [(1, int(t)) if t.isdigit() else (0, t.lower()) for t in parts]
+
+    @staticmethod
+    def _sort_packages(pkgs, key, desc, selected=frozenset()):
+        """Return `pkgs` sorted by name / description / version / repository /
+        status / checked-first. `selected` is a snapshot of the checkbox
+        selection (selection_key values) for the "selected" order.
+        Status order: pending updates first, then installed, then the rest."""
+        def by_name(p):
+            return p["name"].lower()
+        if key == "description":
+            def keyfunc(p):
+                d = (p.get("description") or "").strip().lower()
+                return (d == "", d, by_name(p))     # empty descriptions last
+        elif key == "version":
+            keyfunc = lambda p: (pachulWindow._version_sort_key(p.get("version")), by_name(p))
+        elif key == "repo":
+            keyfunc = lambda p: ((p.get("repo") or "").lower(), by_name(p))
+        elif key == "status":
+            order = {"update": 0, "installed": 1}
+            keyfunc = lambda p: (order.get(p.get("status"), 2), by_name(p))
+        elif key == "selected":
+            def keyfunc(p):
+                if p.get("repo") in ("flatpak", "snap"):
+                    k = f"{p['repo']}:{p.get('source_id') or p['name']}"
+                else:
+                    k = p["name"]
+                return (0 if k in selected else 1, by_name(p))
+        else:
+            keyfunc = by_name
+        return sorted(pkgs, key=keyfunc, reverse=desc)
+
+    def _on_sort_by_changed(self, action, value):
+        key = value.get_string()
+        if key not in self.SORT_KEYS:
+            return
+        action.set_state(value)
+        if key == self._sort_key:
+            return
+        self._sort_key = key
+        save_settings({"pkg_sort_key": key})
+        self._apply_filter()
+
+    def _on_sort_desc_changed(self, action, value):
+        action.set_state(value)
+        self._sort_desc = value.get_boolean()
+        save_settings({"pkg_sort_desc": self._sort_desc})
+        self._apply_filter()
+
+    def _sync_details_state(self, shown):
+        """Keep the Details button (win.toggle_details) in step with whether
+        the detail panel is actually visible."""
+        self._detail_enabled = shown
+        act = self.lookup_action("toggle_details")
+        if act is not None and act.get_state().get_boolean() != shown:
+            act.set_state(GLib.Variant.new_boolean(shown))
+
+    def _hide_detail_panel(self):
+        """Hide the detail panel (back to the plain list view)."""
+        self.detail_panel.stack.set_visible(False)
+        self._sync_details_state(False)
+
+    def _on_toggle_details(self, action, value):
+        """Details button: off = hide the panel and return to the list view;
+        on = show it again. Clicking a package always opens it as well."""
+        shown = value.get_boolean()
+        action.set_state(value)
+        self._detail_enabled = shown
+        if not shown:
+            self.detail_panel.stack.set_visible(False)
+            return
+        # Switched on: show the current selection, or the placeholder.
+        if self.pkg_sel_state.selected:
+            self._update_batch_action_bar()
+            return
+        item = self.pkg_selection.get_selected_item()
+        if item is not None:
+            self._on_pkg_activated(item)
+        else:
+            self.detail_panel.stack.set_visible_child_name("empty")
+            self.detail_panel.stack.set_visible(True)
 
     def _on_close_request(self, *_):
         self._alive = False
@@ -569,95 +712,48 @@ class pachulWindow(Adw.ApplicationWindow):
         self.content_hdr.set_show_back_button(False)
         self.content_hdr.set_show_title(False)
 
+        # Header bar: five text entries instead of the former tools icon
+        # and hamburger menu — Packages (package actions), Tools (opens the
+        # searchable tools hub, Ctrl+T), Settings (opens preferences),
+        # Help and About. Every tool is reachable via toolshub.py.
         right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        menu_btn = Gtk.MenuButton()
-        menu_btn.set_child(themed_image("open-menu-symbolic", 18))
-        menu_btn.add_css_class("image-button")
-        menu_btn.add_css_class("flat")
-        menu = Gio.Menu()
-        menu.append(tr("Sync Databases"),       "app.sync")
-        menu.append(tr("Check for Updates"),    "app.check_updates")
-        menu.append(tr("Refresh List"),         "app.refresh")
 
-        menu.append_section(None, Gio.Menu())
-        menu.append(tr("Manage Repositories…"), "app.manage_repos")
-        if distro.is_arch():
-            # Rate Mirrors edits pacman.d/mirrorlist directly — Fedora and
-            # openSUSE both already auto-select the fastest mirror via
-            # their own infrastructure (mirror-manager / download redirector),
-            # so there's no equivalent tool needed there.
-            menu.append(tr("Rate Mirrors…"),        "app.rate_mirrors")
+        # ── Packages ─────────────────────────────────────────────────────
+        # Opens the packages overview (same style as the tools hub).
+        pkg_btn = Gtk.Button(label=tr("Packages"))
+        pkg_btn.add_css_class("flat")
+        pkg_btn.add_css_class("header-menu-btn")
+        pkg_btn.connect("clicked", self._on_show_packages)
+        right_box.append(pkg_btn)
 
-        # "System Repair" submenu: every entry here is specifically about
-        # finding or fixing something broken (a corrupt package DB, a
-        # dangling symlink, a stale .pacnew, an orphaned package eating
-        # disk space, a poisoned package cache, …), as opposed to the
-        # general maintenance/info tools above and below it that don't
-        # imply anything is actually wrong.
-        repair_menu = Gio.Menu()
-        if distro.is_arch():
-            # pacman equivalent of the repair menus below — force-refresh,
-            # -Dk/-Qkk diagnostics, keyring reinit, -Rdd force-remove. The
-            # two most common Arch failure modes (stale GPG keys, a stuck
-            # db.lck) already get their own automatic fix banners
-            # elsewhere, so this covers what those don't.
-            repair_menu.append(tr("Repair System (pacman)…"), "app.pacman_repair")
-        if distro.is_debian():
-            # apt/dpkg's own maintenance commands (--fix-broken, dpkg
-            # --configure -a, --fix-missing, …) — Arch/Fedora/openSUSE
-            # each have their own different repair tools/conventions, so
-            # this stays Debian-family-only rather than trying to unify
-            # them into one cross-distro "repair" concept.
-            repair_menu.append(tr("Repair System (apt/dpkg)…"), "app.apt_repair")
-        if distro.is_fedora():
-            # dnf/rpm equivalent of the apt/dpkg repair menu above
-            # (distro-sync, rpm --rebuilddb, dnf clean all, …).
-            repair_menu.append(tr("Repair System (dnf/rpm)…"), "app.dnf_repair")
-        if distro.is_suse():
-            # zypper/rpm equivalent (zypper verify, rpm --rebuilddb,
-            # zypper clean --all, …).
-            repair_menu.append(tr("Repair System (zypper/rpm)…"), "app.zypper_repair")
-        repair_menu.append(tr("Check Certificates…"), "app.cert_checker")
-        repair_menu.append(tr("Find Broken Symlinks…"), "app.broken_symlinks")
-        cfg_conflicts_label = tr("Config Files (.pacnew)…") if distro.is_arch() \
-            else tr("Config File Conflicts…")
-        repair_menu.append(cfg_conflicts_label, "app.pacdiff")
-        repair_menu.append(tr("Find Orphans"), "app.orphans")
-        repair_menu.append(tr("Cache Cleaner"), "app.cache")
-        menu.append_submenu(tr("Repair System"), repair_menu)
+        # ── Tools ────────────────────────────────────────────────────────
+        tools_btn = Gtk.Button(label=tr("Tools"))
+        tools_btn.add_css_class("flat")
+        tools_btn.add_css_class("header-menu-btn")
+        tools_btn.connect("clicked", self._on_show_tools)
+        right_box.append(tools_btn)
 
-        menu.append_section(None, Gio.Menu())
-        menu.append(tr("Services & Security…"), "app.services_security")
-        menu.append(tr("Configuration Backup…"), "app.config_backup")
-        menu.append(tr("Find Package by File…"), "app.file_search")
-        menu.append(tr("More Update Sources…"),  "app.tool_updates")
-        if self._hold_supported:
-            menu.append(tr("Ignored Packages…"),    "app.ignored")
-        menu.append(tr("Package History…"),     "app.history")
-        menu.append(tr("System Info"),          "app.sysinfo")
-        menu.append_section(None, Gio.Menu())
-        menu.append(tr("Export Package List…"), "app.export_pkgs")
-        menu.append(tr("Import Package List…"), "app.import_pkgs")
+        # ── Settings ─────────────────────────────────────────────────────
+        # Opens the full preferences dialog directly (no dropdown).
+        settings_btn = Gtk.Button(label=tr("Preferences"))
+        settings_btn.add_css_class("flat")
+        settings_btn.add_css_class("header-menu-btn")
+        settings_btn.set_action_name("app.preferences")
+        right_box.append(settings_btn)
 
-        # PKGBUILD/Hold/Mark-as: each only where its backend actually works
-        # (see _hold_supported / _mark_reason_supported above). Skip the
-        # whole section if none of them apply on this distro.
-        if distro.is_arch() or self._hold_supported or self._mark_reason_supported:
-            menu.append_section(None, Gio.Menu())
-            if distro.is_arch():
-                menu.append(tr("View PKGBUILD (AUR)…"), "app.pkgbuild")
-            if self._hold_supported:
-                menu.append(tr("Hold / Unhold Selected"), "app.hold")
-            if self._mark_reason_supported:
-                menu.append(tr("Mark Selected as Explicit"),    "app.mark_explicit")
-                menu.append(tr("Mark Selected as Dependency"),  "app.mark_asdeps")
+        # ── Help ─────────────────────────────────────────────────────────
+        help_btn = Gtk.Button(label=tr("Help"))
+        help_btn.add_css_class("flat")
+        help_btn.add_css_class("header-menu-btn")
+        help_btn.set_action_name("app.shortcuts")
+        right_box.append(help_btn)
 
-        menu.append_section(None, Gio.Menu())
-        menu.append(tr("Preferences"),          "app.preferences")
-        menu.append(tr("Help"),                 "app.shortcuts")
-        menu.append(tr("About Pachul"),         "app.about")
-        menu_btn.set_menu_model(menu)
-        right_box.append(menu_btn)
+        # ── About ────────────────────────────────────────────────────────
+        about_btn = Gtk.Button(label=tr("About Pachul"))
+        about_btn.add_css_class("flat")
+        about_btn.add_css_class("header-menu-btn")
+        about_btn.set_action_name("app.about")
+        right_box.append(about_btn)
         self.content_hdr.pack_end(right_box)
         self.content_tv.add_top_bar(self.content_hdr)
 
@@ -805,33 +901,6 @@ class pachulWindow(Adw.ApplicationWindow):
         outer.append(self.repo_listbox)
 
         # Tools
-        outer.append(self._separator())
-        outer.append(self._sidebar_header(tr("TOOLS")))
-        tools_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        tools_box.set_margin_start(5); tools_box.set_margin_end(5); tools_box.set_margin_bottom(4)
-        tools_entries = []
-        if distro.is_arch():
-            # Rate Mirrors edits pacman.d/mirrorlist — Arch-specific.
-            tools_entries.append((ICON_RATE_MIRRORS, tr("Rate Mirrors"), self._on_rate_mirrors))
-        tools_entries += [
-            ("user-trash-symbolic",    tr("Find Orphans"),  self._on_show_orphans),
-            (ICON_CLEAN_CACHE,         tr("Clean Cache"),   self._on_clean_cache),
-        ]
-        for icon_name, btn_label, cb in tools_entries:
-            btn = Gtk.Button()
-            btn.add_css_class("flat"); btn.add_css_class("nav-row")
-            row_inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            row_inner.set_margin_top(5); row_inner.set_margin_bottom(5); row_inner.set_margin_start(10)
-            ic = make_icon(icon_name, 18)
-            ic.set_valign(Gtk.Align.CENTER); ic.add_css_class("dim-label")
-            lbl_w = Gtk.Label(label=btn_label)
-            lbl_w.set_halign(Gtk.Align.START); lbl_w.set_valign(Gtk.Align.CENTER)
-            row_inner.append(ic); row_inner.append(lbl_w)
-            btn.set_child(row_inner)
-            btn.connect("clicked", cb)
-            tools_box.append(btn)
-        outer.append(tools_box)
-
         scroll.set_child(outer)
         return scroll
 
@@ -877,6 +946,39 @@ class pachulWindow(Adw.ApplicationWindow):
         self.search_entry.connect("activate", self._on_search_activate)
         self.search_entry.connect("icon-press", self._on_search_icon_press)
         search_box.append(self.search_entry)
+
+        # Sort menu: radio items for name/repository/status + a checkbox
+        # for descending order (win.sort_by / win.sort_desc actions).
+        sort_menu = Gio.Menu()
+        sort_by_section = Gio.Menu()
+        sort_by_section.append(tr("Name"),           "win.sort_by::name")
+        sort_by_section.append(tr("Description"),    "win.sort_by::description")
+        sort_by_section.append(tr("Version"),        "win.sort_by::version")
+        sort_by_section.append(tr("Repository"),     "win.sort_by::repo")
+        sort_by_section.append(tr("Status"),         "win.sort_by::status")
+        sort_by_section.append(tr("Selected first"), "win.sort_by::selected")
+        sort_menu.append_section(tr("Sort by"), sort_by_section)
+        order_section = Gio.Menu()
+        order_section.append(tr("Descending order"), "win.sort_desc")
+        sort_menu.append_section(None, order_section)
+        self.sort_btn = Gtk.MenuButton()
+        self.sort_btn.set_menu_model(sort_menu)
+        self.sort_btn.set_child(themed_image("pachul-sort-symbolic", 18))
+        self.sort_btn.add_css_class("flat")
+        self.sort_btn.set_margin_start(6)
+        self.sort_btn.set_tooltip_text(tr("Sort packages"))
+        search_box.append(self.sort_btn)
+
+        # Details switch: icon-only toggle button (Ctrl+D) that shows/hides
+        # the package detail panel. Bound to the stateful
+        # win.toggle_details action, so it stays in sync with it.
+        self.details_btn = Gtk.ToggleButton()
+        self.details_btn.set_child(themed_image("pachul-details-symbolic", 18))
+        self.details_btn.add_css_class("flat")
+        self.details_btn.set_margin_start(2)
+        self.details_btn.set_action_name("win.toggle_details")
+        self.details_btn.set_tooltip_text(tr("Show or hide the package details (Ctrl+D)"))
+        search_box.append(self.details_btn)
         panel.append(search_box)
         panel.append(Gtk.Separator())
 
@@ -995,7 +1097,7 @@ class pachulWindow(Adw.ApplicationWindow):
         self.btn_hold = self._action_btn(
             None, tr("Ignore Updates"), callback=self._on_batch_hold)
         self.btn_hold.set_sensitive(False)
-        self.btn_hold.add_css_class("flat")
+        self.btn_hold.add_css_class("flat"); self.btn_hold.add_css_class("hold-btn")
         end_box.append(self.btn_hold)
 
         self.btn_upgrade_all = self._action_btn(
@@ -1029,6 +1131,7 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _action_btn(self, icon, label, *css_classes, callback=None):
         btn = Gtk.Button()
+        btn.add_css_class("pill-btn")
         for cls in css_classes:
             btn.add_css_class(cls)
         inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -1047,7 +1150,9 @@ class pachulWindow(Adw.ApplicationWindow):
     def _build_detail_panel(self):
         self.detail_panel = DetailPanel(
             self._action_btn, self._on_install, self._on_remove,
-            self._on_reinstall, self._on_downgrade, on_hold=self._on_toggle_hold)
+            self._on_reinstall,
+            lambda *_: self._on_downgrade(from_panel=True),
+            on_hold=lambda *_: self._on_toggle_hold(from_panel=True))
         self.detail_panel.dep_callback = self._lookup_dep_in_list
         self.detail_panel.aur_ahead_banner.connect(
             "button-clicked", self._on_aur_ahead_install_clicked)
@@ -1066,7 +1171,9 @@ class pachulWindow(Adw.ApplicationWindow):
         # a batch selection) is actually shown, in _show_detail() and
         # DetailPanel.show_batch(); until then the Paned gives the
         # package list the full width.
+        self.detail_panel.on_visibility = self._sync_details_state
         self.detail_panel.stack.set_visible(False)
+        self._sync_details_state(False)
         return self.detail_panel.stack
 
     # ── Data loading ──────────────────────────────────────────────────────────
@@ -1095,12 +1202,109 @@ class pachulWindow(Adw.ApplicationWindow):
         # re-filtered/re-rendered once the map is ready so icons pop in
         # without needing a manual refresh.
         threading.Thread(target=self._bg_build_icon_map, daemon=True).start()
+        # Versions of not-yet-installed AUR packages: the list above already
+        # shows whatever the local cache has; on every program start the
+        # current AUR data is fetched once in the background (~10 MB, never
+        # blocks the UI) and the rows are filled in place — so new packages
+        # and new versions show up without waiting for the cache to expire.
+        if (distro.is_arch() and not getattr(self, "_aur_meta_attempted", False)
+                and any(p.get("repo") == "aur" and p.get("status") == "available"
+                        for p in packages)):
+            self._aur_meta_attempted = True
+            threading.Thread(target=self._bg_refresh_aur_meta, daemon=True).start()
         # Re-verify updates: on first load when the setting allows it, and on
         # every reload once we've checked before (e.g. after a package op, so
         # an updated package leaves the Updates list).
         if self._updates is not None or get_setting("check_updates_on_start"):
             threading.Thread(target=self._bg_check_updates, daemon=True).start()
+        # Startup problem scan — once per session, and only if the user
+        # hasn't turned it off in Preferences. Runs well after the package
+        # list itself, so it never delays the window becoming usable.
+        if not self._startup_health_checked and get_setting("startup_healthcheck_enabled"):
+            self._startup_health_checked = True
+            threading.Thread(target=self._bg_startup_health_check, daemon=True).start()
         return False
+
+    def _bg_refresh_aur_meta(self):
+        meta = refresh_aur_meta()
+        if not meta and self._alive:
+            # Offline or AUR briefly unreachable right at start: try once more.
+            time.sleep(30)
+            if self._alive:
+                meta = refresh_aur_meta()
+        if meta and self._alive:
+            GLib.idle_add(self._on_aur_meta_ready, meta)
+
+    def _on_aur_meta_ready(self, meta):
+        """Fresh AUR versions arrived: update the package data (for future
+        filters/searches) and the rows already on screen, in place — a
+        rebind instead of a re-filter, so scroll position and selection
+        stay exactly as they are."""
+        apply_aur_meta(self._all_packages, meta)
+        changed = False
+        for item in self._iter_known_packages():
+            if item.pkg_repo == "aur" and item.pkg_status == "available":
+                m = meta.get(item.pkg_name)
+                if m:
+                    item.pkg_version = m[0]
+                    if not item.pkg_description:
+                        item.pkg_description = m[1]
+                    changed = True
+        if changed:
+            self._rebind_all_rows()
+            sel = self._selected_pkg
+            if (sel is not None and sel.pkg_repo == "aur"
+                    and sel.pkg_status == "available"
+                    and getattr(self.detail_panel, "_current_pkg_name", None) == sel.pkg_name):
+                self.detail_panel.ver_badge.set_label(sel.pkg_version)
+        return False
+
+    def _bg_startup_health_check(self):
+        findings = startup_health_checks()
+        if self._alive:
+            GLib.idle_add(self._on_startup_health_result, findings)
+
+    def _on_startup_health_result(self, findings):
+        if self._alive and not findings:
+            # A dialog just to say "all fine" would be noisy at every
+            # single startup — a self-dismissing toast fits a plain
+            # all-clear better and doesn't demand a click.
+            self._toast(tr("Startup check: no problems found"))
+        elif self._alive:
+            dlg, render = show_startup_healthcheck_dialog(
+                self, findings, self._activate_healthcheck_action,
+                rescan_fn=self._rescan_health_async)
+            # Kept so a repair run elsewhere (see _on_done below) or the
+            # dialog's own "Check again" button can update this same list
+            # in place; cleared once the dialog closes so a stray repair
+            # afterwards doesn't try to redraw a disposed dialog.
+            self._healthcheck_render = render
+
+            def _on_closed(*_):
+                self._healthcheck_render = None
+                return False
+            dlg.connect("close-request", _on_closed)
+        return False
+
+    def _activate_healthcheck_action(self, action_name):
+        """Dispatches a finding's "action" (a _on_show_* method name) from
+        the startup health-check summary dialog — the same handlers the
+        sidebar menu and app.py's GActions already call."""
+        handler = getattr(self, action_name, None)
+        if handler:
+            handler()
+
+    def _rescan_health_async(self, on_done):
+        """Re-runs backend.startup_health_checks() in the background and
+        hands the fresh list to `on_done` (called on the GTK main thread)
+        — used both by the health-check dialog's own "Check again" button
+        and, automatically, after any terminal command finishes while
+        that dialog is still open (see _on_done)."""
+        def worker():
+            findings = startup_health_checks()
+            if self._alive:
+                GLib.idle_add(on_done, findings)
+        threading.Thread(target=worker, daemon=True).start()
 
     def _bg_build_icon_map(self):
         mapping = build_desktop_icon_map()
@@ -1275,14 +1479,17 @@ class pachulWindow(Adw.ApplicationWindow):
         render in batches to avoid UI freeze."""
         filt  = self._current_filter
         query = self._search_query
+        sort  = self._sort_state()
+        selected = frozenset(self.pkg_sel_state.selected)
         pkgs_snapshot = list(self._all_packages)
 
         def do_filter():
             filtered = [p for p in pkgs_snapshot
                         if self._pkg_matches_filter(p, filt)
                         and self._pkg_matches_search(p, query)]
+            filtered = self._sort_packages(filtered, *sort, selected=selected)
             if self._alive:
-                GLib.idle_add(self._render_filter_results, filtered, filt, query)
+                GLib.idle_add(self._render_filter_results, filtered, filt, query, sort)
 
         threading.Thread(target=do_filter, daemon=True).start()
 
@@ -1290,7 +1497,8 @@ class pachulWindow(Adw.ApplicationWindow):
     def _make_item(p):
         return PackageItem(
             p["name"], p["version"], p.get("repo", "local"), p["status"],
-            p.get("description", ""), p.get("foreign", False), p.get("source_id"))
+            p.get("description", ""), p.get("foreign", False), p.get("source_id"),
+            p.get("new_version", ""))
 
     def _fill_pkg_store(self, filtered):
         # One splice replaces the whole list; the ListView renders only the
@@ -1298,9 +1506,11 @@ class pachulWindow(Adw.ApplicationWindow):
         items = [self._make_item(p) for p in filtered]
         self.pkg_store.splice(0, self.pkg_store.get_n_items(), items)
 
-    def _render_filter_results(self, filtered, filt, query):
+    def _render_filter_results(self, filtered, filt, query, sort=None):
         if not self._alive or self._current_filter != filt or self._search_query != query:
             return False
+        if sort is not None and sort != self._sort_state():
+            return False   # sort order changed meanwhile — a newer render is on its way
         self._fill_pkg_store(filtered)
         total = len(self._all_packages)
         shown = len(filtered)
@@ -1322,7 +1532,7 @@ class pachulWindow(Adw.ApplicationWindow):
             # showing its "Select a Package" placeholder, leaving a
             # pointless 3-column layout (menu / "up to date" / placeholder)
             # instead of just menu + "up to date".
-            self.detail_panel.stack.set_visible(False)
+            self._hide_detail_panel()
         else:
             self.list_stack.set_visible_child_name("list")
         return False
@@ -1408,7 +1618,7 @@ class pachulWindow(Adw.ApplicationWindow):
         # fresh navigation away from whatever package/batch was shown
         # before — hide the detail panel again so it doesn't keep showing
         # stale info until something new gets clicked in the list.
-        self.detail_panel.stack.set_visible(False)
+        self._hide_detail_panel()
         keys = list(self._nav_rows.keys())
         idx  = row.get_index()
         if idx >= len(keys):
@@ -1424,7 +1634,7 @@ class pachulWindow(Adw.ApplicationWindow):
     def _on_new_nav_selected(self, listbox, row):
         self.nav_listbox.unselect_all()
         self.repo_listbox.unselect_all()
-        self.detail_panel.stack.set_visible(False)
+        self._hide_detail_panel()
         keys = list(self._new_nav_rows.keys())
         idx  = row.get_index()
         if idx < len(keys):
@@ -1435,7 +1645,7 @@ class pachulWindow(Adw.ApplicationWindow):
     def _on_repo_nav_selected(self, listbox, row):
         self.nav_listbox.unselect_all()
         self.new_listbox.unselect_all()
-        self.detail_panel.stack.set_visible(False)
+        self._hide_detail_panel()
         keys = list(self._repo_nav_rows.keys())
         idx  = row.get_index()
         if idx < len(keys):
@@ -1503,6 +1713,48 @@ class pachulWindow(Adw.ApplicationWindow):
             self.btn_remove.set_sensitive(installed)
         self._show_detail(self.detail_panel, pkg)
         self._check_aur_ahead(pkg)
+        self._ensure_aur_version(pkg)
+
+    def _ensure_aur_version(self, pkg):
+        """An AUR package with no known version (it is newer than the daily
+        AUR dump in the local cache, or that download hasn't finished / failed):
+        ask the AUR RPC for just this one package and fill the version in."""
+        if not (distro.is_arch() and pkg.pkg_repo == "aur"
+                and pkg.pkg_status == "available" and not pkg.pkg_version):
+            return
+        name = pkg.pkg_name
+
+        def worker():
+            info = get_aur_info(name)
+            if info and info.get("Version") and self._alive:
+                GLib.idle_add(self._on_aur_version_fetched, name, info)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_aur_version_fetched(self, name, info):
+        ver  = info.get("Version") or ""
+        desc = info.get("Description") or ""
+        if not ver:
+            return False
+        for p in self._all_packages:
+            if p["name"] == name and p.get("repo") == "aur" and p.get("status") == "available":
+                p["version"] = ver
+                if not p.get("description"):
+                    p["description"] = desc
+        for item in self._iter_known_packages():
+            if (item.pkg_name == name and item.pkg_repo == "aur"
+                    and item.pkg_status == "available"):
+                item.pkg_version = ver
+                if not item.pkg_description:
+                    item.pkg_description = desc
+        self._rebind_all_rows()
+        sel = self._selected_pkg
+        if (sel is not None and sel.pkg_name == name
+                and getattr(self.detail_panel, "_current_pkg_name", None) == name):
+            self.detail_panel.ver_badge.set_label(version_text(sel))
+            if desc and sel.pkg_description == desc:
+                self.detail_panel.desc.set_label(desc)
+        return False
 
     def _check_aur_ahead(self, pkg):
         """Kick off a background check of whether this (plain-repo)
@@ -1605,10 +1857,10 @@ class pachulWindow(Adw.ApplicationWindow):
         for cls in REPO_BADGE_CLASS.values():
             panel.repo_badge.remove_css_class(cls)
         panel.repo_badge.add_css_class(REPO_BADGE_CLASS.get(repo_str, "badge-local"))
-        panel.ver_badge.set_label(pkg.pkg_version)
+        panel.ver_badge.set_label(version_text(pkg))
         self._set_status_pill(panel, pkg.pkg_status, pkg.pkg_foreign)
 
-        panel.stack.set_visible(True)
+        panel.reveal()
         panel.stack.set_visible_child_name("detail")
         for row in panel.info_rows.values():
             if isinstance(row, Adw.ActionRow):
@@ -1789,20 +2041,25 @@ class pachulWindow(Adw.ApplicationWindow):
         """Apply the current filter + search text; run callback once rendered."""
         filt  = self._current_filter
         query = self._search_query
+        sort  = self._sort_state()
+        selected = frozenset(self.pkg_sel_state.selected)
         pkgs_snapshot = list(self._all_packages)
 
         def do_filter():
             filtered = [p for p in pkgs_snapshot
                         if self._pkg_matches_filter(p, filt)
                         and self._pkg_matches_search(p, query)]
+            filtered = self._sort_packages(filtered, *sort, selected=selected)
             if self._alive:
-                GLib.idle_add(self._render_filter_results_then, filtered, filt, query, callback)
+                GLib.idle_add(self._render_filter_results_then, filtered, filt, query, callback, sort)
 
         threading.Thread(target=do_filter, daemon=True).start()
 
-    def _render_filter_results_then(self, filtered, filt, query, callback):
+    def _render_filter_results_then(self, filtered, filt, query, callback, sort=None):
         """Same as _render_filter_results but fires `callback` once rendered."""
         if not self._alive or self._current_filter != filt or self._search_query != query:
+            return False
+        if sort is not None and sort != self._sort_state():
             return False
         self._fill_pkg_store(filtered)
         total = len(self._all_packages)
@@ -1856,6 +2113,14 @@ class pachulWindow(Adw.ApplicationWindow):
         def _on_done(code):
             if code == 0:
                 invalidate_cache()
+                # If the Startup Check dialog is still open, a just-applied
+                # fix (repair command, service enabled, etc.) should be
+                # able to disappear from its list without waiting for the
+                # next app launch — re-run the checks and refresh it in
+                # place. Cheap to skip: this is a plain attribute, not a
+                # dialog method call, when that dialog isn't open.
+                if self._healthcheck_render is not None:
+                    self._rescan_health_async(self._healthcheck_render)
             # Adw.Toast.set_title() parses its text as Pango markup (it
             # supports "<a href>" action links), so an unescaped "&" in
             # *title* — e.g. "Firewall installieren & aktivieren" —
@@ -1955,7 +2220,12 @@ class pachulWindow(Adw.ApplicationWindow):
         if helper:
             main_cmd = aur_helper_upgrade_cmd(helper)
         elif distro.is_arch():
-            main_cmd = "pkexec /usr/bin/pacman -Syu --noconfirm"
+            # --ask 4 = ALPM_QUESTION_CONFLICT_PKG: beantwortet die Frage
+            # "X und Y stehen in Konflikt. Y entfernen?" mit Ja. Unter
+            # --noconfirm gilt sonst der Standard "N", das Upgrade bricht
+            # dann an Konflikten ab (z. B. plasma-x11-session bei Plasma
+            # 6.8). Abhängigkeiten werden von pacman weiterhin geprüft.
+            main_cmd = "pkexec /usr/bin/pacman -Syu --noconfirm --ask 4"
         else:
             main_cmd = pkgmanager.upgrade_all_cmd()
 
@@ -2070,6 +2340,21 @@ class pachulWindow(Adw.ApplicationWindow):
             # there (aur_helper_upgrade_cmd("pachuli")).
             cmd = f"{install_pachuli_cmd} && {cmd}"
 
+        # While building an AUR package, makepkg installs missing build
+        # dependencies itself and by default asks for the password through
+        # plain sudo in the terminal. If makepkg.conf has no PACMAN_AUTH yet,
+        # point it at pkexec first, so that step gets the same graphical
+        # prompt as everything else. One extra authentication, only until it
+        # is set (at most 3 attempts, in case the dialog gets dismissed); a
+        # failed or cancelled attempt never stops the upgrade itself, and an
+        # existing custom PACMAN_AUTH is left alone.
+        if helper and distro.is_arch() and makepkg_auth_needs_setup():
+            tries = int(get_setting("makepkg_pkexec_attempts") or 0)
+            if tries < 3:
+                save_settings({"makepkg_pkexec_attempts": tries + 1})
+                note = shlex.quote(":: " + tr("Setting up makepkg to use pkexec for build dependencies (one-time)…"))
+                cmd = f"{{ echo {note}; {get_makepkg_pkexec_cmd()}; }}; {cmd}"
+
         self._run_terminal(cmd, tr("System Upgrade"), on_success=_after)
 
     def _on_clean_cache(self, *_):
@@ -2181,20 +2466,65 @@ class pachulWindow(Adw.ApplicationWindow):
     def _on_show_ignored(self, *_):
         show_ignored_packages_dialog(self, self._run_terminal)
 
-    def _on_view_pkgbuild(self, *_):
+    def _need_pkg(self, from_panel=False):
+        """The package a Packages-menu action (Hold, PKGBUILD, Downgrade,
+        Mark as …) should act on, or None after showing a toast.
+
+        "Selected" in this app means two different things: a clicked row
+        (opens the detail view and sets _selected_pkg) and a ticked
+        checkbox (which deliberately does NOT open the detail view). The
+        menu actions only ever looked at the first, so a package selected
+        via its checkbox was reported as "select a package first". The
+        ticked checkbox now takes precedence — the same rule the bottom
+        action bar already follows — then the clicked row, then the
+        highlighted row."""
+        if from_panel:
+            # The detail panel's own buttons always act on the package the
+            # panel is showing, whatever is ticked elsewhere.
+            if self._selected_pkg is None:
+                self._toast(tr("Select a package first"))
+            return self._selected_pkg
+        sel = self.pkg_sel_state.selected
+        if len(sel) > 1:
+            self._toast(tr("Select only one package for this action"))
+            return None
+        if len(sel) == 1:
+            key = next(iter(sel))
+            for p in self._all_packages:
+                repo = p.get("repo", "local")
+                pk = (f"{repo}:{p.get('source_id') or p['name']}"
+                      if repo in ("flatpak", "snap") else p["name"])
+                if pk == key:
+                    # Reuse the item already in the list when there is one,
+                    # so its state (e.g. status) is the live one.
+                    for item in self._iter_known_packages():
+                        if selection_key(item) == key:
+                            return item
+                    return self._make_item(p)
         pkg = self._selected_pkg
-        if not pkg:
+        if pkg is None:
+            pkg = self.pkg_selection.get_selected_item()
+        if pkg is None:
             self._toast(tr("Select a package first"))
+        return pkg
+
+    def _on_view_pkgbuild(self, *_):
+        pkg = self._need_pkg()
+        if not pkg:
             return
         if not pkg.pkg_foreign:
             self._toast(tr("PKGBUILD is only available for AUR packages"))
             return
         show_pkgbuild_dialog(self, pkg.pkg_name, self._on_install)
 
-    def _on_toggle_hold(self, *_):
-        pkg = self._selected_pkg
+    def _on_toggle_hold(self, *_, from_panel=False):
+        # Several packages ticked: this menu entry is "Hold / Unhold
+        # Selected", so hand over to the same batch path as the action bar.
+        if not from_panel and len(self.pkg_sel_state.selected) > 1:
+            self._on_batch_hold()
+            return
+        pkg = self._need_pkg(from_panel)
         if not pkg:
-            self._toast(tr("Select a package first"))
             return
         if pkg.pkg_repo in ("flatpak", "snap"):
             self._toast(tr("Hold isn't available for Flatpak/Snap packages"))
@@ -2209,7 +2539,8 @@ class pachulWindow(Adw.ApplicationWindow):
             verb = tr("Unhold") if currently else tr("Hold")
             self._run_terminal(cmd, f"{verb} {pkg.pkg_name}")
 
-        show_hold_dialog(self, pkg.pkg_name, currently, _do_toggle)
+        show_hold_dialog(self, pkg.pkg_name, currently, _do_toggle,
+                         on_show_ignored=self._on_show_ignored)
 
     def _on_preferences(self, *_):
         show_preferences(self, self._on_settings_changed, app_dir=APP_DIR,
@@ -2299,22 +2630,27 @@ class pachulWindow(Adw.ApplicationWindow):
         # (_on_packages_loaded) already calls _apply_filter() once loading
         # is done.
 
+    def _on_show_tools(self, *_):
+        show_tools_dialog(self)
+
+    def _on_show_packages(self, *_):
+        show_packages_dialog(self)
+
     def _on_show_shortcuts(self, *_):
         show_help_dialog(self)
 
     def _on_focus_search(self, *_):
         GLib.idle_add(self._grab_search_focus)
 
-    def _on_downgrade(self, *_):
-        if not self._selected_pkg:
-            self._toast(tr("Select a package first"))
+    def _on_downgrade(self, *_, from_panel=False):
+        pkg = self._need_pkg(from_panel)
+        if not pkg:
             return
-        show_downgrade_dialog(self, self._selected_pkg.pkg_name, self._run_terminal)
+        show_downgrade_dialog(self, pkg.pkg_name, self._run_terminal)
 
     def _on_mark_explicit(self, *_):
-        pkg = self._selected_pkg
+        pkg = self._need_pkg()
         if not pkg:
-            self._toast(tr("Select a package first"))
             return
         if pkg.pkg_repo in ("flatpak", "snap"):
             self._toast(tr("Not applicable to Flatpak/Snap packages"))
@@ -2329,9 +2665,8 @@ class pachulWindow(Adw.ApplicationWindow):
             on_success=self._refresh_selected_pkg)
 
     def _on_mark_asdeps(self, *_):
-        pkg = self._selected_pkg
+        pkg = self._need_pkg()
         if not pkg:
-            self._toast(tr("Select a package first"))
             return
         if pkg.pkg_repo in ("flatpak", "snap"):
             self._toast(tr("Not applicable to Flatpak/Snap packages"))
@@ -2371,6 +2706,44 @@ class pachulWindow(Adw.ApplicationWindow):
             self._toast(tr("Exported {n} packages").format(n=len(pkgs)))
         except OSError as e:
             self._toast(tr("Export failed: {err}").format(err=e))
+
+    # ── Install a local package file (.tar.gz etc.) ─────────────────────────
+
+    def _on_install_local(self, *_):
+        dialog = Gtk.FileDialog()
+        dialog.set_title(tr("Install Local Package"))
+
+        pkg_filter = Gtk.FileFilter()
+        pkg_filter.set_name(tr("Package files (.tar.gz, .pkg.tar.*, .deb, .rpm, .flatpak)"))
+        for pattern in localpkg.FILE_PATTERNS:
+            pkg_filter.add_pattern(pattern)
+        all_filter = Gtk.FileFilter()
+        all_filter.set_name(tr("All files"))
+        all_filter.add_pattern("*")
+
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(pkg_filter)
+        filters.append(all_filter)
+        dialog.set_filters(filters)
+        dialog.set_default_filter(pkg_filter)
+        dialog.open(self, None, self._install_local_chosen)
+
+    def _install_local_chosen(self, dialog, result):
+        try:
+            gfile = dialog.open_finish(result)
+        except GLib.Error:
+            return   # user cancelled
+        path = gfile.get_path()
+        if not path:
+            self._toast(tr("Could not read file: {err}").format(err=gfile.get_uri()))
+            return
+        self._toast(tr("Checking package file…"))
+
+        def _worker():
+            info = localpkg.analyze(path)
+            GLib.idle_add(show_install_local_dialog, self, info, self._run_terminal)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _on_import_pkgs(self, *_):
         helper = self._get_aur_helper()
@@ -2446,6 +2819,14 @@ class pachulWindow(Adw.ApplicationWindow):
 
         if n == 0:
             self.pkg_count_label.set_label(getattr(self, "_list_count_label_text", ""))
+            # Reset the batch labels ("Remove (2740)" etc.) first. The
+            # single-package path below (_on_pkg_activated) only restores
+            # the Install label and the sensitivity of Remove, never the
+            # Remove/Ignore *labels* — so after Deselect All the stale
+            # "Remove (N)" text stayed on an active button.
+            self._set_btn_label(self.btn_install, tr("Install"))
+            self._set_btn_label(self.btn_remove, tr("Uninstall"))
+            self._set_btn_label(self.btn_hold, tr("Ignore Updates"))
             if self._selected_pkg is not None:
                 self._on_pkg_activated(self._selected_pkg)
             else:
@@ -2463,8 +2844,9 @@ class pachulWindow(Adw.ApplicationWindow):
         to_install, to_remove, to_hold = [], [], []
         selected_names = []
         for item in self._iter_known_packages():
-            if item.pkg_name in state.selected and item.pkg_name not in seen:
-                seen.add(item.pkg_name)
+            key = selection_key(item)
+            if key in state.selected and key not in seen:
+                seen.add(key)
                 selected_names.append(item.pkg_name)
                 # An "update" package is both installed (can be removed) and
                 # upgradable (can be installed/updated) — it used to only
@@ -2517,7 +2899,7 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _on_select_all(self, *_):
         """Select all packages currently visible in the package list."""
-        all_names = [item.pkg_name for item in self._iter_known_packages()]
+        all_names = {selection_key(item) for item in self._iter_known_packages()}
         if not all_names:
             return
         state = self.pkg_sel_state

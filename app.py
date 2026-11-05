@@ -30,7 +30,7 @@ import gi
 try:
     gi.require_version('Gtk', '4.0')
     gi.require_version('Adw', '1')
-    from gi.repository import Gtk, Adw, Gio, Gdk
+    from gi.repository import Gtk, Adw, Gio, Gdk, GLib
 except ValueError as e:
     sys.stderr.write(
         f"[pachul] Fehlende GTK4/libadwaita-Bindings ({e}).\n"
@@ -41,6 +41,7 @@ except ValueError as e:
     sys.exit(1)
 
 from styles import load_css
+from backend import get_setting, save_settings
 from window import pachulWindow
 from dialogs import show_about_dialog
 from i18n import tr
@@ -143,9 +144,39 @@ class pachulApp(Adw.Application):
         import os, signal
         os.kill(os.getpid(), signal.SIGTERM)
 
+    # ── Appearance (light / dark / follow system) ────────────────────────────
+
+    _SCHEMES = {
+        "system": Adw.ColorScheme.DEFAULT,
+        "light":  Adw.ColorScheme.FORCE_LIGHT,
+        "dark":   Adw.ColorScheme.FORCE_DARK,
+    }
+
+    def _apply_color_scheme(self, value):
+        if value not in self._SCHEMES:
+            value = "system"
+        Adw.StyleManager.get_default().set_color_scheme(self._SCHEMES[value])
+        return value
+
+    def _on_color_scheme(self, action, param):
+        """Radio entries in the main menu: app.color_scheme::system|light|dark."""
+        value = self._apply_color_scheme(param.get_string())
+        save_settings({"color_scheme": value})
+        action.set_state(GLib.Variant.new_string(value))
+
+    def _on_toggle_dark(self, *_):
+        """Light/dark toggle (Ctrl+Shift+D); the header bar button was removed."""
+        dark = Adw.StyleManager.get_default().get_dark()
+        value = self._apply_color_scheme("light" if dark else "dark")
+        save_settings({"color_scheme": value})
+        act = self.lookup_action("color_scheme")
+        if act is not None:
+            act.set_state(GLib.Variant.new_string(value))
+
     def _on_activate(self, app):
         self._register_icon_theme()
         load_css()
+        saved_scheme = self._apply_color_scheme(get_setting("color_scheme") or "system")
         self.win = pachulWindow(app)
         self.win.connect("close-request", lambda *_: self.quit())
 
@@ -175,10 +206,12 @@ class pachulApp(Adw.Application):
             "ignored":       self.win._on_show_ignored,
             "export_pkgs":   self.win._on_export_pkgs,
             "import_pkgs":   self.win._on_import_pkgs,
+            "install_local": self.win._on_install_local,
             "pkgbuild":      self.win._on_view_pkgbuild,
             "hold":          self.win._on_toggle_hold,
             "mark_explicit": self.win._on_mark_explicit,
             "mark_asdeps":   self.win._on_mark_asdeps,
+            "tools":         self.win._on_show_tools,
             "preferences":   self.win._on_preferences,
             "shortcuts":     self.win._on_show_shortcuts,
             "search":        self.win._on_focus_search,
@@ -190,11 +223,24 @@ class pachulApp(Adw.Application):
             act.connect("activate", cb)
             self.add_action(act)
 
+        # Stateful radio action for the Appearance section of the main menu
+        scheme_act = Gio.SimpleAction.new_stateful(
+            "color_scheme", GLib.VariantType.new("s"),
+            GLib.Variant.new_string(saved_scheme))
+        scheme_act.connect("activate", self._on_color_scheme)
+        self.add_action(scheme_act)
+
+        toggle_act = Gio.SimpleAction.new("toggle_dark", None)
+        toggle_act.connect("activate", self._on_toggle_dark)
+        self.add_action(toggle_act)
+
         accels = {
             "app.search":        ["<Ctrl>f"],
             "app.sync":          ["F5"],
             "app.refresh":       ["<Ctrl>r"],
             "app.check_updates": ["<Ctrl>u"],
+            "app.tools":         ["<Ctrl>t"],
+            "app.toggle_dark":   ["<Ctrl><Shift>d"],
             "app.preferences":   ["<Ctrl>comma"],
             "app.shortcuts":     ["<Ctrl>question", "F1"],
             "app.quit":          ["<Ctrl>q"],

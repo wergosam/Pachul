@@ -103,7 +103,7 @@ Pachul follows the GNOME Human Interface Guidelines and adapts automatically to 
 - Sync Databases (`F5`)
 - Check for Updates (`Strg+U` / `Ctrl+U`)
 - **File → Package Search** — find out which package owns a given file path, via `pacman -Fx` (offers a one-click files-database sync if it's missing)
-- **Rate Mirrors** — geo-aware ranking via `rate-mirrors`, with sort order, HTTPS-only filter, automatic backup and configurable mirror count
+- **Find Fastest Mirrors** — geo-aware ranking via `rate-mirrors`, with sort order, HTTPS-only filter, automatic backup and configurable mirror count
 - Find Orphans — bulk-remove packages that are no longer required by anything
 - Clean Cache
 - **Third-party repository management** — inspect and toggle enabled repos; edit `pacman.conf` directly on Arch, or add/remove **PPAs** (Debian/Ubuntu, including modern deb822 `.sources` files), **COPR** (Fedora) and **OBS repositories** (openSUSE) on other distros
@@ -111,6 +111,7 @@ Pachul follows the GNOME Human Interface Guidelines and adapts automatically to 
 - Package History
 - System Info — OS, kernel, hardware, package counts and cache size at a glance
 - Export / Import Package Lists — great for reproducing a setup on a new machine
+- **Install Local Package…** — manually install a downloaded file: a built Arch package (`*.pkg.tar.*`, detected by its `.PKGINFO`) via `pacman -U`, a source tarball with a `PKGBUILD` (e.g. an AUR snapshot `.tar.gz`) via `makepkg` + `pacman -U` — the PKGBUILD is shown for review first and nothing is unpacked until you confirm — a `.deb` / `.rpm` on Debian/Ubuntu / Fedora/openSUSE, or a Flatpak bundle (`.flatpak`) / reference (`.flatpakref`), installed per user via `flatpak install --user`
 - View PKGBUILD (AUR) before installing
 - Hold / Unhold Selected Packages (via `IgnorePkg`)
 - Mark Selected as Explicit or as Dependency
@@ -213,6 +214,7 @@ pachul/
 ├── backend.py      # pacman / AUR integration, settings, systemd timer helpers
 ├── distro.py       # Distro-family detection (Arch / Debian / Fedora / openSUSE)
 ├── pkgmanager.py   # CLI-based apt / dnf / zypper command & parser layer
+├── localpkg.py     # Analysis + install commands for manually chosen package files (.tar.gz, .pkg.tar.*, .deb, .rpm, .flatpak)
 ├── pkgmanager_native.py  # Optional native bindings (python-apt, python3-dnf/dnf5) with CLI fallback
 ├── notifier.py     # Headless entry point for the systemd background timer
 ├── styles.py       # Application-wide CSS
@@ -230,7 +232,7 @@ pachul/
 - **Background notifications never appear** — check the timer is enabled in Preferences, and that `notify-send` (usually part of `libnotify`) is installed.
 - **Mirror rating tool missing** — install `rate-mirrors` from the AUR; Pachul offers a one-click install button when it's absent.
 - **Language doesn't fully change** — some UI elements are only re-translated after a full restart of Pachul; this is expected.
-- **"error: failed to commit transaction (conflicting files)" when installing/reinstalling via `yay`, `paru`, `pachuli`, or plain `pacman -U`** — happens if Pachul was previously installed with `install.sh`: pacman refuses to install a package whose files already exist on disk but aren't owned by any package. Run `sudo bash uninstall.sh` from the same source checkout first (it removes exactly what `install.sh` put there), then install normally through your AUR helper. Alternatively, without removing anything first: `yay -S pachul --overwrite '*'` (or the equivalent flag for `paru`/`pikaur`) tells pacman to take ownership of the conflicting files instead of refusing.
+- **"error: failed to commit transaction (conflicting files)" when installing/reinstalling via `yay`, `paru`, `pachuli`, or plain `pacman -U`** — happens if Pachul was previously installed with `install.sh`: pacman refuses to install a package whose files already exist on disk but aren't owned by any package. Run `sudo pachul-uninstall` first (it removes exactly what `install.sh` put there) — this command ships with the AUR package itself, so no source checkout is needed once Pachul has been installed via AUR at least once; otherwise run `sudo bash uninstall.sh` from a source checkout instead. Then install normally through your AUR helper. Alternatively, without removing anything first: `yay -S pachul --overwrite '*'` (or the equivalent flag for `paru`/`pikaur`) tells pacman to take ownership of the conflicting files instead of refusing.
 - **"Failed to lock database" / `db.lck` errors, especially right after every single operation** — usually caused by another package-management daemon running alongside Pachul and briefly re-locking the same database (commonly PackageKit, or on Manjaro, `pamac-daemon` together with its tray icon). Pachul offers an automatic **Remove Lock & Retry** fix for one-off cases, but if it keeps recurring, disable the conflicting service for good, e.g.:
   ```bash
   sudo systemctl mask pamac-daemon
@@ -314,7 +316,7 @@ Pachul folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch a
 </td>
 <td align="center">
 <img src="screenshots/pachul02.webp" alt="Pachul – Werkzeuge-Menü" width="520"/><br/>
-<sub><b>Werkzeuge-Menü</b> — Datenbanken synchronisieren, Spiegelserver bewerten, Konfigurationsdateien verwalten und mehr</sub>
+<sub><b>Werkzeuge-Menü</b> — Datenbanken synchronisieren, Schnellste Spiegelserver finden, Konfigurationsdateien verwalten und mehr</sub>
 </td>
 </tr>
 </table>
@@ -344,7 +346,7 @@ Pachul folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch a
 - Datenbanken synchronisieren (`F5`)
 - Auf Updates prüfen (`Strg+U`)
 - **Datei-→-Paket-Suche** — herausfinden, welches Paket einen bestimmten Dateipfad besitzt, über `pacman -Fx` (bietet bei fehlender Dateien-Datenbank einen Ein-Klick-Sync an)
-- **Spiegelserver bewerten** — standortbasiertes Ranking über `rate-mirrors`, mit Sortieroptionen, Nur-HTTPS-Filter, automatischer Sicherung und einstellbarer Anzahl der Spiegelserver
+- **Schnellste Spiegelserver finden** — standortbasiertes Ranking über `rate-mirrors`, mit Sortieroptionen, Nur-HTTPS-Filter, automatischer Sicherung und einstellbarer Anzahl der Spiegelserver
 - Waisen finden — nicht mehr benötigte Pakete gesammelt entfernen
 - Cache leeren
 - **Drittanbieter-Repository-Verwaltung** — aktivierte Repos einsehen und umschalten; unter Arch `pacman.conf` direkt bearbeiten, auf anderen Distros **PPAs** (Debian/Ubuntu, inkl. moderner deb822-`.sources`-Dateien), **COPR** (Fedora) und **OBS-Repositories** (openSUSE) hinzufügen/entfernen
@@ -352,6 +354,7 @@ Pachul folgt den GNOME-Gestaltungsrichtlinien (HIG) und passt sich automatisch a
 - Paketverlauf
 - Systeminformationen — Betriebssystem, Kernel, Hardware, Paketanzahl und Cache-Größe auf einen Blick
 - Paketlisten exportieren/importieren — praktisch, um ein Setup auf einem neuen Rechner zu reproduzieren
+- **Lokales Paket installieren…** — eine heruntergeladene Datei manuell installieren: ein fertiges Arch-Paket (`*.pkg.tar.*`, erkannt an der `.PKGINFO`) per `pacman -U`, ein Quell-Tarball mit `PKGBUILD` (z. B. ein AUR-Snapshot als `.tar.gz`) per `makepkg` + `pacman -U` — das PKGBUILD wird vorher zur Prüfung angezeigt, entpackt wird erst nach deiner Bestätigung — eine `.deb` / `.rpm` unter Debian/Ubuntu bzw. Fedora/openSUSE oder ein Flatpak-Bundle (`.flatpak`) / eine Referenz (`.flatpakref`), pro Benutzer installiert per `flatpak install --user`
 - PKGBUILD (AUR) vor der Installation ansehen
 - Ausgewählte Pakete sperren/entsperren (über `IgnorePkg`)
 - Auswahl als explizit oder als Abhängigkeit markieren
@@ -454,6 +457,7 @@ pachul/
 ├── backend.py      # pacman-/AUR-Integration, Einstellungen, systemd-Timer-Hilfsfunktionen
 ├── distro.py       # Distro-Familien-Erkennung (Arch / Debian / Fedora / openSUSE)
 ├── pkgmanager.py   # CLI-basierte Befehls-/Parser-Schicht für apt / dnf / zypper
+├── localpkg.py     # Analyse + Installationsbefehle für manuell gewählte Paketdateien (.tar.gz, .pkg.tar.*, .deb, .rpm, .flatpak)
 ├── pkgmanager_native.py  # Optionale native Bindings (python-apt, python3-dnf/dnf5) mit CLI-Fallback
 ├── notifier.py     # Headless-Einstiegspunkt für den systemd-Hintergrund-Timer
 ├── styles.py       # Anwendungsweites CSS
@@ -471,7 +475,7 @@ pachul/
 - **Hintergrund-Benachrichtigungen erscheinen nie** — prüfe, ob der Timer in den Einstellungen aktiviert ist und ob `notify-send` (üblicherweise Teil von `libnotify`) installiert ist.
 - **Werkzeug zur Spiegelserver-Bewertung fehlt** — installiere `rate-mirrors` aus dem AUR; Pachul bietet dafür einen Ein-Klick-Installationsbutton an, falls es fehlt.
 - **Sprache wechselt nicht vollständig** — manche UI-Elemente werden erst nach einem vollständigen Neustart von Pachul neu übersetzt; das ist beabsichtigt.
-- **„error: failed to commit transaction (conflicting files)" bei der (Neu-)Installation über `yay`, `paru`, `pachuli` oder reines `pacman -U`** — passiert, wenn Pachul zuvor mit `install.sh` installiert wurde: pacman verweigert die Installation eines Pakets, dessen Dateien bereits auf der Platte liegen, aber keinem Paket gehören. Zuerst aus demselben Quellcode-Verzeichnis `sudo bash uninstall.sh` ausführen (entfernt genau das, was `install.sh` dort abgelegt hat), danach ganz normal über den AUR-Helfer installieren. Alternativ, ohne vorher etwas zu löschen: `yay -S pachul --overwrite '*'` (bzw. das entsprechende Flag bei `paru`/`pikaur`) weist pacman an, die Besitzrechte an den betroffenen Dateien zu übernehmen, statt die Installation zu verweigern.
+- **„error: failed to commit transaction (conflicting files)" bei der (Neu-)Installation über `yay`, `paru`, `pachuli` oder reines `pacman -U`** — passiert, wenn Pachul zuvor mit `install.sh` installiert wurde: pacman verweigert die Installation eines Pakets, dessen Dateien bereits auf der Platte liegen, aber keinem Paket gehören. Zuerst `sudo pachul-uninstall` ausführen (entfernt genau das, was `install.sh` dort abgelegt hat) — dieses Kommando ist im AUR-Paket selbst enthalten, sobald Pachul einmal über AUR installiert wurde, braucht es also keinen Source-Checkout mehr; andernfalls stattdessen `sudo bash uninstall.sh` aus einem Source-Checkout ausführen. Danach ganz normal über den AUR-Helfer installieren. Alternativ, ohne vorher etwas zu löschen: `yay -S pachul --overwrite '*'` (bzw. das entsprechende Flag bei `paru`/`pikaur`) weist pacman an, die Besitzrechte an den betroffenen Dateien zu übernehmen, statt die Installation zu verweigern.
 - **„Datenbank kann nicht gesperrt werden" / `db.lck`-Fehler, besonders nach jedem einzelnen Vorgang** — meist verursacht durch einen weiteren, parallel laufenden Paketverwaltungs-Dienst, der dieselbe Datenbank kurz danach erneut sperrt (häufig PackageKit, oder unter Manjaro `pamac-daemon` zusammen mit dessen Tray-Icon). Pachul bietet für Einzelfälle einen automatischen Fix **„Sperre entfernen & erneut versuchen"** an — tritt es aber wiederholt auf, den störenden Dienst dauerhaft deaktivieren, z. B.:
   ```bash
   sudo systemctl mask pamac-daemon

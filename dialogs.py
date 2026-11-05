@@ -36,16 +36,16 @@ from gi.repository import Gtk, Adw, GLib, Pango, Gdk
 
 import distro
 import pkgmanager
+import localpkg
 from backend import (run_command, get_orphans, get_system_info,
                      get_pacman_history,
-                     get_downgrade_candidates, build_downgrade_cmd,
+                     get_downgrade_candidates, build_downgrade_cmd, is_foreign_package,
                      get_pkgbuild, get_pacnew_files, get_file_diff, get_setting, save_settings,
                      files_db_available, search_file_owner, get_package_cache_size,
                      get_tool_updates, paru_installed, get_paru_bootstrap_cmd,
                      get_ignored_packages, build_hold_cmd_bulk, APP_VERSION,
                      aur_helper_install_cmd, pachuli_installed, local_pachuli_path,
-                     get_pachuli_install_cmd, makepkg_pkexec_configured,
-                     get_makepkg_pkexec_cmd, pachuli_update_available,
+                     get_pachuli_install_cmd, pachuli_update_available,
                      local_pachuli_version, installed_pachuli_version)
 from i18n import tr, get_language, set_language
 from icons import themed_image, themed_paintable
@@ -79,6 +79,35 @@ _DB_LOCK_RE = _re.compile(
     r'unable to lock database'
     r'|Datenbank (?:nicht sperren|konnte nicht gesperrt werden)',
     _re.IGNORECASE)
+
+
+_FAILURE_LINE = _re.compile(r"^\s*(error|fehler|fatal|schwerwiegend)\b\s*:", _re.IGNORECASE)
+
+
+def _failure_hint(full_text):
+    """Short explanation appended below the "Failed" footer of a finished
+    command: which output lines most likely caused the non-zero exit code,
+    and — for multi-step runs (system update + AUR + firmware + Flatpak …) —
+    the reminder that the other steps may well have succeeded."""
+    lines = []
+    for line in full_text.splitlines():
+        if _FAILURE_LINE.match(line):
+            line = line.strip()
+            if line not in lines:
+                lines.append(line)
+    multi_step = "\n=== " in full_text
+    if not lines and not multi_step:
+        return ""
+    out = ""
+    if multi_step:
+        out += tr("Note: this run had several steps. Steps above may have "
+                  "completed successfully even though the whole run is "
+                  "marked as failed.\n")
+    if lines:
+        out += tr("Probable cause (last error lines):\n")
+        for line in lines[-3:]:
+            out += "  " + (line if len(line) <= 160 else line[:157] + "…") + "\n"
+    return out
 
 
 def _detect_gpg_issue(text):
@@ -652,6 +681,9 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
         send_btn.set_sensitive(False)
         if code != 0:
             full_text = term_buf.get_text(term_buf.get_start_iter(), term_buf.get_end_iter(), False)
+            _hint = _failure_hint(full_text)
+            if _hint:
+                append_output(_hint)
             gpg_issue = _detect_gpg_issue(full_text)
             if gpg_issue is not None:
                 key_id = gpg_issue
@@ -907,6 +939,58 @@ def show_sync_db_dialog(parent, on_confirm):
     dialog.present(parent)
 
 
+# ─── Shared info box ──────────────────────────────────────────────────────────
+
+def make_info_box(info_id, heading, paragraphs, dismissible=False):
+    """Card with an info icon, a bold heading and wrapped paragraphs — used
+    to explain a tool before the user acts. All texts go through tr().
+
+    dismissible=True adds a close button; the choice is remembered in the
+    settings under "hide_info_<info_id>" and the box is then not built at
+    all (returns None, so callers must check). Margins are left to the
+    caller, since every dialog lays out its content differently."""
+    key = "hide_info_" + info_id
+    if dismissible and get_setting(key):
+        return None
+
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+    box.add_css_class("card")
+
+    icon = themed_image("dialog-information-symbolic", 20)
+    icon.set_valign(Gtk.Align.START)
+    icon.set_margin_top(14); icon.set_margin_start(14)
+    box.append(icon)
+
+    col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    col.set_hexpand(True)
+    col.set_margin_top(12);  col.set_margin_bottom(12)
+    col.set_margin_start(0); col.set_margin_end(0 if dismissible else 14)
+
+    head = Gtk.Label(label=tr(heading))
+    head.set_wrap(True); head.set_xalign(0); head.set_hexpand(True)
+    head.add_css_class("heading")
+    col.append(head)
+    for text in paragraphs:
+        lbl = Gtk.Label(label=tr(text))
+        lbl.set_wrap(True); lbl.set_xalign(0); lbl.set_hexpand(True)
+        col.append(lbl)
+    box.append(col)
+
+    if dismissible:
+        close = Gtk.Button.new_from_icon_name("window-close-symbolic")
+        close.add_css_class("flat"); close.add_css_class("circular")
+        close.set_valign(Gtk.Align.START)
+        close.set_margin_top(8); close.set_margin_end(8)
+        close.set_tooltip_text(tr("Hide this hint"))
+
+        def _hide(*_):
+            save_settings({key: True})
+            box.set_visible(False)
+        close.connect("clicked", _hide)
+        box.append(close)
+    return box
+
+
 # ─── Repository manager dialog ────────────────────────────────────────────────
 
 def show_repo_manager(parent, run_terminal_fn):
@@ -949,12 +1033,22 @@ def show_repo_manager(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
     outer.set_margin_top(12);   outer.set_margin_bottom(16)
     outer.set_margin_start(16); outer.set_margin_end(16)
+
+    # Info box: explains what a repository is and what happens when repos
+    # are missing or additional ones are added.
+    info_box = make_info_box(
+        "repo_manager",
+        "What is a repository?",
+        ["A repository (repo) is a package archive on a server from which pacman fetches programs and updates.",
+         "If a repository is missing: its packages can no longer be found or installed, and already installed packages from it receive no further updates (for example, without «multilib» there is no 32-bit software such as Steam or Wine; without «core» or «extra» the system itself can no longer be updated properly).",
+         "If additional repositories are added: their packages appear in the search and can be installed. However, this can cause dependency and version conflicts, for example when a repository offers different versions of system libraries, which can block updates or break the system. Only add third-party repositories from sources you trust."])
+    outer.append(info_box)
 
     repos_group = Adw.PreferencesGroup()
     repos_group.set_title(tr("Active Repositories"))
@@ -1056,7 +1150,7 @@ def show_repo_manager_native(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -1202,7 +1296,7 @@ def show_apt_repair_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -1357,7 +1451,7 @@ def show_dnf_repair_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -1503,7 +1597,7 @@ def show_zypper_repair_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -1650,7 +1744,7 @@ def show_pacman_repair_dialog(parent, run_terminal_fn, aur_helper=None):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -2077,7 +2171,7 @@ def show_cert_checker_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -2254,7 +2348,7 @@ def show_broken_symlinks_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -2391,7 +2485,7 @@ def show_services_security_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -2595,7 +2689,7 @@ def show_config_backup_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -2690,9 +2784,63 @@ def show_config_backup_dialog(parent, run_terminal_fn):
 
 # ─── Mirror rater dialog ──────────────────────────────────────────────────────
 
+def _manjaro_branch():
+    """Branch from /etc/pacman-mirrors.conf (stable / testing / unstable);
+    falls back to stable. Needed because the branch is part of every
+    Manjaro mirror URL."""
+    try:
+        for line in Path("/etc/pacman-mirrors.conf").read_text(errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            if key.strip() == "Branch" and val.strip() in ("stable", "testing", "unstable"):
+                return val.strip()
+    except OSError:
+        pass
+    return "stable"
+
+
+def _detect_country_code():
+    """Best-effort 2-letter country code of this machine, without any
+    network access: first from the system time zone (zone.tab maps every
+    zone to a country), then from the locale (de_CH.UTF-8 -> CH).
+    Returns "" if nothing usable is found."""
+    tz = ""
+    try:
+        tz = Path("/etc/timezone").read_text().strip()
+    except OSError:
+        pass
+    if not tz:
+        try:
+            link = os.path.realpath("/etc/localtime")
+            if "zoneinfo/" in link:
+                tz = link.split("zoneinfo/", 1)[1]
+        except OSError:
+            pass
+    if tz:
+        for tab in ("/usr/share/zoneinfo/zone.tab", "/usr/share/zoneinfo/zone1970.tab"):
+            try:
+                for line in Path(tab).read_text(errors="replace").splitlines():
+                    if line.startswith("#"):
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 3 and parts[2].strip() == tz:
+                        cc = parts[0].split(",")[0].strip().upper()
+                        if len(cc) == 2 and cc.isalpha():
+                            return cc
+            except OSError:
+                continue
+    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        m = _re.match(r"^[a-z]{2,3}_([A-Z]{2})", os.environ.get(var, ""))
+        if m:
+            return m.group(1)
+    return ""
+
+
 def show_mirror_rater(parent, run_terminal_fn):
     dialog = Adw.Window()
-    dialog.set_title(tr("Rate Mirrors"))
+    dialog.set_title(tr("Find Fastest Mirrors"))
     dialog.set_default_size(600, 560)
     dialog.set_resizable(True)
     dialog.set_transient_for(parent)
@@ -2704,7 +2852,7 @@ def show_mirror_rater(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     scroll = Gtk.ScrolledWindow()
@@ -2718,27 +2866,66 @@ def show_mirror_rater(parent, run_terminal_fn):
     _, code = run_command("which rate-mirrors 2>/dev/null")
     has_rate_mirrors = (code == 0)
 
+    # Manjaro has its own repositories and mirror network: its mirrorlist
+    # must be built with the "manjaro" subcommand, never the Arch one.
+    is_manjaro = distro.is_manjaro()
+    mirror_cmd = "manjaro" if is_manjaro else "arch"
+    manjaro_branch = _manjaro_branch() if is_manjaro else None
+
+    mirror_paragraphs = ["Mirrors are servers that hold copies of the package archives. pacman downloads packages and updates from the servers listed in /etc/pacman.d/mirrorlist, trying them from top to bottom.",
+                         "rate-mirrors measures which servers respond fastest from your location and puts them first. This helps with slow downloads, errors such as 404 or timeouts, or after moving to another country. The result is only shown first — your current list is replaced only when you save.",
+                         "Tip: keep «Backup current mirrorlist» switched on (only the most recent backup is kept). After saving, sync the databases so pacman uses the new servers («Sync Databases»)."]
+    if is_manjaro:
+        mirror_paragraphs.append("On Manjaro this list is normally managed by pacman-mirrors; running pacman-mirrors later can replace your result.")
+    # Instead of a big info card: a small info icon + heading. Click it
+    # to read the whole explanation.
+    _hint_text = "\n\n".join(tr(p) for p in mirror_paragraphs)
+    mirror_hint = Gtk.MenuButton()
+    mirror_hint.add_css_class("flat")
+    mirror_hint.set_halign(Gtk.Align.START)
+    mirror_hint.set_direction(Gtk.ArrowType.DOWN)
+    _hint_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    _hint_icon = themed_image("dialog-information-symbolic", 16)
+    _hint_icon.set_valign(Gtk.Align.CENTER)
+    _hint_content.append(_hint_icon)
+    _hint_content.append(Gtk.Label(label=tr("What are mirrors?")))
+    mirror_hint.set_child(_hint_content)
+    _pop = Gtk.Popover()
+    _pop_lbl = Gtk.Label(label=_hint_text)
+    _pop_lbl.set_wrap(True)
+    _pop_lbl.set_max_width_chars(60)
+    _pop_lbl.set_xalign(0)
+    _pop_lbl.set_margin_top(12); _pop_lbl.set_margin_bottom(12)
+    _pop_lbl.set_margin_start(14); _pop_lbl.set_margin_end(14)
+    _pop.set_child(_pop_lbl)
+    mirror_hint.set_popover(_pop)
+    outer.append(mirror_hint)
+
     if has_rate_mirrors:
         options_group = Adw.PreferencesGroup()
         options_group.set_title(tr("Mirror Options"))
-        options_group.set_description(tr(
-            "rate-mirrors tests all Arch mirrors and shows you the result — nothing is written to /etc/pacman.d/mirrorlist until you review it and choose to save"
-        ))
+        options_group.set_description(tr("Choose how mirrors are selected and tested"))
 
         country_row = Adw.ActionRow()
         country_row.set_title(tr("Countries"))
-        country_row.set_subtitle(tr("Comma-separated country names, or blank for all"))
+        country_row.set_subtitle(tr("Only use mirrors from these countries — 2-letter codes separated by commas, e.g. CH, DE, AT. Leave blank for all."))
         country_entry = Gtk.Entry()
-        country_entry.set_placeholder_text(tr("e.g. India, Germany, France"))
+        country_entry.set_placeholder_text(tr("e.g. CH, DE, AT"))
         country_entry.set_hexpand(True)
         country_entry.set_valign(Gtk.Align.CENTER)
         country_entry.set_width_chars(24)
+        _detected_cc = _detect_country_code()
+        if _detected_cc:
+            country_entry.set_text(_detected_cc)
+            country_row.set_subtitle(
+                country_row.get_subtitle() + "\n" +
+                tr("Detected automatically from your system settings"))
         country_row.add_suffix(country_entry)
         options_group.add(country_row)
 
         sort_row = Adw.ActionRow()
         sort_row.set_title(tr("Sort by"))
-        sort_row.set_subtitle(tr("How mirrors are ranked"))
+        sort_row.set_subtitle(tr("Order in which mirrors are picked for testing; the final order always comes from the speed test"))
         sort_store = Gtk.StringList()
         sort_options = [
             ("score_asc",  tr("Score ↑  (best reliability first)")),
@@ -2753,11 +2940,11 @@ def show_mirror_rater(parent, run_terminal_fn):
         sort_drop.set_selected(0)
         sort_drop.set_valign(Gtk.Align.CENTER)
         sort_row.add_suffix(sort_drop)
-        options_group.add(sort_row)
+        sort_row.set_visible(not is_manjaro)   # arch subcommand only
 
         protocol_row = Adw.ActionRow()
         protocol_row.set_title(tr("HTTPS only"))
-        protocol_row.set_subtitle(tr("Filter out plain HTTP mirrors"))
+        protocol_row.set_subtitle(tr("Ignore unencrypted HTTP mirrors (recommended)"))
         https_switch = Gtk.Switch()
         https_switch.set_active(True)
         https_switch.set_valign(Gtk.Align.CENTER)
@@ -2767,7 +2954,7 @@ def show_mirror_rater(parent, run_terminal_fn):
 
         backup_row = Adw.ActionRow()
         backup_row.set_title(tr("Backup current mirrorlist"))
-        backup_row.set_subtitle(tr("Saves existing list to mirrorlist-backup first"))
+        backup_row.set_subtitle(tr("Copies the current list to /etc/pacman.d/mirrorlist-backup before replacing it (an older backup is overwritten)"))
         backup_switch = Gtk.Switch()
         backup_switch.set_active(True)
         backup_switch.set_valign(Gtk.Align.CENTER)
@@ -2777,21 +2964,35 @@ def show_mirror_rater(parent, run_terminal_fn):
 
         delay_row = Adw.ActionRow()
         delay_row.set_title(tr("Max mirror delay (hours)"))
-        delay_row.set_subtitle(tr("Skip mirrors that are behind by more than this"))
+        delay_row.set_subtitle(tr("Skip mirrors whose last sync is older than this"))
         delay_spin = Gtk.SpinButton()
         delay_spin.set_range(1, 72); delay_spin.set_increments(1, 6); delay_spin.set_value(6)
         delay_spin.set_valign(Gtk.Align.CENTER)
         delay_row.add_suffix(delay_spin)
-        options_group.add(delay_row)
+
+        advanced_row = Adw.ExpanderRow()
+        advanced_row.set_title(tr("Advanced options"))
+        advanced_row.add_row(sort_row)
+        advanced_row.add_row(delay_row)
 
         top_row = Adw.ActionRow()
         top_row.set_title(tr("Number of mirrors to keep"))
-        top_row.set_subtitle(tr("0 = keep all ranked mirrors"))
+        top_row.set_subtitle(tr("How many of the fastest mirrors end up in the list (0 = all). 3 is usually enough."))
         top_spin = Gtk.SpinButton()
-        top_spin.set_range(0, 50); top_spin.set_increments(1, 5); top_spin.set_value(0)
+        top_spin.set_range(0, 50); top_spin.set_increments(1, 5); top_spin.set_value(3)
         top_spin.set_valign(Gtk.Align.CENTER)
         top_row.add_suffix(top_spin)
         options_group.add(top_row)
+        options_group.add(advanced_row)
+
+        # Keep the rows compact: the explanatory text moves from the
+        # visible subtitle into a tooltip (hover over the row to read it).
+        for _r in (country_row, sort_row, protocol_row, backup_row,
+                   delay_row, top_row):
+            _sub = _r.get_subtitle()
+            if _sub:
+                _r.set_tooltip_text(_sub)
+                _r.set_subtitle("")
 
         outer.append(options_group)
 
@@ -2799,25 +3000,36 @@ def show_mirror_rater(parent, run_terminal_fn):
         run_btn.add_css_class("suggested-action")
         run_btn.set_halign(Gtk.Align.CENTER)
 
-        def on_run(*_):
-            countries_raw = country_entry.get_text().strip()
-            sort_idx      = sort_drop.get_selected()
-            sort_key      = sort_options[sort_idx][0]
-            https_only    = https_switch.get_active()
-            backup        = backup_switch.get_active()
-            max_delay     = int(delay_spin.get_value()) * 3600
-            top_n         = int(top_spin.get_value())
+        def _parse_countries():
+            """-> (codes, ok). Only 2-letter ISO codes are valid for
+            rate-mirrors' --include-countries (names like "Germany" are not)."""
+            raw = country_entry.get_text().strip()
+            codes = [c.strip().upper() for c in raw.replace(";", ",").split(",") if c.strip()]
+            ok = all(len(c) == 2 and c.isascii() and c.isalpha() for c in codes)
+            return codes, ok
 
-            global_flags = []
-            if https_only:
-                global_flags.append("--protocol=https")
+        def _build_flags():
+            codes, _ok = _parse_countries()
+            g = []
+            if https_switch.get_active():
+                g.append("--protocol=https")
+            if codes:
+                g.append("--include-countries=" + ",".join(codes))
+            top_n = int(top_spin.get_value())
             if top_n > 0:
-                global_flags.append(f"--top-mirrors={top_n}")
-            if countries_raw:
-                first = countries_raw.split(",")[0].strip()
-                global_flags.append(f"--entry-country={shlex.quote(first)}")
+                g.append(f"--max-mirrors-to-output={top_n}")
+            s = [f"--max-delay={int(delay_spin.get_value()) * 3600}"]
+            if is_manjaro:
+                s.append(f"--branch={manjaro_branch}")
+            else:
+                s.append(f"--sort-mirrors-by={sort_options[sort_drop.get_selected()][0]}")
+            return g, s
 
-            sub_flags = [f"--sort-mirrors-by={sort_key}", f"--max-delay={max_delay}"]
+        def on_run(*_):
+            if not _parse_countries()[1]:
+                return
+            backup = backup_switch.get_active()
+            global_flags, sub_flags = _build_flags()
             gf = " ".join(global_flags)
             sf = " ".join(sub_flags)
 
@@ -2829,7 +3041,7 @@ def show_mirror_rater(parent, run_terminal_fn):
             fd, tmp_path = tempfile.mkstemp(prefix="pachul-mirrorlist-", suffix=".tmp")
             os.close(fd)
             cmd = (
-                f'rate-mirrors {gf} --save={shlex.quote(tmp_path)} arch {sf} '
+                f'rate-mirrors {gf} --save={shlex.quote(tmp_path)} {mirror_cmd} {sf} '
                 f'&& echo "{tr("Done — review the result below")}"'
             )
 
@@ -2912,7 +3124,7 @@ def show_mirror_rater(parent, run_terminal_fn):
             router_outer.set_margin_start(16); router_outer.set_margin_end(16)
 
             info_lbl = Gtk.Label(
-                label=tr("{n} mirrors found — review below, then choose whether to save.").format(n=server_count))
+                label=tr("{n} mirrors found, fastest first. Review the list, then save it as your new mirrorlist or discard it.").format(n=server_count))
             info_lbl.set_halign(Gtk.Align.START)
             info_lbl.add_css_class("dim-label")
             router_outer.append(info_lbl)
@@ -2943,22 +3155,14 @@ def show_mirror_rater(parent, run_terminal_fn):
         preview_lbl.set_selectable(True); preview_lbl.set_halign(Gtk.Align.CENTER)
 
         def update_preview(*_):
-            countries_raw = country_entry.get_text().strip()
-            sort_idx  = sort_drop.get_selected()
-            sort_key  = sort_options[sort_idx][0]
-            https_only = https_switch.get_active()
-            max_delay = int(delay_spin.get_value()) * 3600
-            top_n     = int(top_spin.get_value())
-            gflags = []
-            if https_only: gflags.append("--protocol=https")
-            if top_n > 0:  gflags.append(f"--top-mirrors={top_n}")
-            if countries_raw:
-                first = countries_raw.split(",")[0].strip()
-                gflags.append(f"--entry-country={shlex.quote(first)}")
-            sflags = [f"--sort-mirrors-by={sort_key}", f"--max-delay={max_delay}"]
-            preview_lbl.set_label(
-                f"rate-mirrors {' '.join(gflags)} arch {' '.join(sflags)} | pkexec /usr/bin/tee /etc/pacman.d/mirrorlist"
-            )
+            _codes, ok = _parse_countries()
+            if ok:
+                country_entry.remove_css_class("error")
+            else:
+                country_entry.add_css_class("error")
+            run_btn.set_sensitive(ok)
+            g, s = _build_flags()
+            preview_lbl.set_label(f"rate-mirrors {' '.join(g)} {mirror_cmd} {' '.join(s)}")
 
         country_entry.connect("changed", update_preview)
         sort_drop.connect("notify::selected", update_preview)
@@ -2972,10 +3176,7 @@ def show_mirror_rater(parent, run_terminal_fn):
         status = Adw.StatusPage()
         status.set_paintable(themed_paintable("network-transmit-receive-symbolic", 72))
         status.set_title(tr("rate-mirrors not installed"))
-        status.set_description(tr(
-            "rate-mirrors uses geo-aware routing to benchmark\n"
-            "all Arch mirrors and pick the fastest ones."
-        ))
+        status.set_description(tr("rate-mirrors measures how fast mirrors respond from your location and sorts your mirrorlist accordingly. Testing needs no administrator rights."))
         install_btn = Gtk.Button(label=tr("Install rate-mirrors"))
         install_btn.add_css_class("suggested-action")
         install_btn.set_halign(Gtk.Align.CENTER)
@@ -3008,7 +3209,7 @@ def show_orphan_finder(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -3102,10 +3303,15 @@ def show_orphan_finder(parent, run_terminal_fn):
 # ─── Clean cache dialog ────────────────────────────────────────────────────────
 
 def show_clean_cache_dialog(parent, run_terminal_fn):
-    dialog = Adw.Dialog()
+    # Adw.Window instead of Adw.Dialog so the window can be exactly as tall
+    # as the main window (an Adw.Dialog sheet has a fixed content size).
+    dialog = Adw.Window()
     dialog.set_title(tr("Clean Cache"))
-    dialog.set_content_width(520)
-    dialog.set_content_height(620)
+    main_win_height = parent.get_height() or 620
+    dialog.set_default_size(520, main_win_height)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
 
     tv  = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
@@ -3113,7 +3319,7 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Cancel"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     scroll = Gtk.ScrolledWindow()
@@ -3134,6 +3340,15 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
     }
     cache_path = "/var/cache/pacman/pkg" if distro.is_arch() \
         else cache_dir_by_family.get(distro.get_family(), "N/A")
+
+    cache_hint = make_info_box(
+        "cache_cleaner",
+        "What is the package cache?",
+        ["When you install or update software, the package manager keeps the downloaded package files. This lets you reinstall a package without downloading it again, or go back to an older version.",
+         "The cache keeps growing and can take up many gigabytes. Cleaning it is safe for the running system, but older versions are no longer available locally afterwards — so better not clean it right after an update that causes problems, you may still need the old version."],
+        dismissible=True)
+    if cache_hint is not None:
+        outer.append(cache_hint)
 
     info_group = Adw.PreferencesGroup()
     info_group.set_title(tr("What this does"))
@@ -3274,8 +3489,8 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
 
     scroll.set_child(outer)
     tv.set_content(scroll)
-    dialog.set_child(tv)
-    dialog.present(parent)
+    dialog.set_content(tv)
+    dialog.present()
 
 
 # ─── Import package list dialog ────────────────────────────────────────────────
@@ -3416,6 +3631,157 @@ def show_import_pkgs_dialog(parent, names, helper, run_terminal_fn):
     dialog.present()
 
 
+# ─── Install a local package file (.tar.gz, .pkg.tar.zst, .deb, .rpm) ─────────
+
+def show_install_local_dialog(parent, info, run_terminal_fn):
+    """Summary of a manually chosen package file plus the final confirmation.
+
+    *info* comes from localpkg.analyze(); nothing has been unpacked or
+    installed at this point. For source tarballs (PKGBUILD) the build script
+    is shown first, because building runs arbitrary shell code as the user."""
+    dialog = Adw.Window()
+    dialog.set_title(tr("Install Local Package"))
+    dialog.set_default_size(560, 560)
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    cancel_btn = Gtk.Button(label=tr("Cancel"))
+    cancel_btn.add_css_class("flat")
+    cancel_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_start(cancel_btn)
+    tv.add_top_bar(hdr)
+
+    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    outer.set_margin_top(16);   outer.set_margin_bottom(24)
+    outer.set_margin_start(16); outer.set_margin_end(16)
+
+    kind = info["kind"]
+    kind_label = {
+        localpkg.KIND_PACMAN_PKG: tr("Built Arch package (installed with pacman -U)"),
+        localpkg.KIND_PKGBUILD:   tr("Source package with PKGBUILD (built with makepkg, then installed)"),
+        localpkg.KIND_DEB:        tr("Debian package (.deb)"),
+        localpkg.KIND_RPM:        tr("RPM package (.rpm)"),
+        localpkg.KIND_FLATPAK_BUNDLE: tr("Flatpak bundle (.flatpak)"),
+        localpkg.KIND_FLATPAK_REF:    tr("Flatpak reference (.flatpakref) — the app is downloaded from its remote"),
+    }.get(kind, tr("Unknown"))
+
+    group = Adw.PreferencesGroup()
+    group.set_title(os.path.basename(info["path"]))
+
+    def _row(title, value):
+        r = Adw.ActionRow()
+        r.set_title(GLib.markup_escape_text(title))
+        r.set_subtitle(GLib.markup_escape_text(value))
+        r.set_subtitle_selectable(True)
+        group.add(r)
+
+    _row(tr("Type"), kind_label)
+    if info.get("name"):
+        _row(tr("Package"), info["name"])
+    if info.get("version"):
+        _row(tr("Version"), info["version"])
+    if info.get("desc"):
+        _row(tr("Description"), info["desc"])
+    _row(tr("Size"), f"{info.get('size', 0) / 1024 / 1024:.1f} MiB")
+    outer.append(group)
+
+    cmd = localpkg.install_command(info)
+
+    if cmd is None:
+        # Unsupported / not a package: say why and stop here.
+        err = Adw.StatusPage()
+        err.set_icon_name("dialog-warning-symbolic")
+        err.set_title(tr("Can't install this file"))
+        err.set_description(GLib.markup_escape_text(tr(info.get("error") or "Unknown error")))
+        err.set_vexpand(False)
+        outer.append(err)
+        if info.get("entries"):
+            peek = Adw.PreferencesGroup()
+            peek.set_title(tr("First entries in the archive"))
+            buf = Gtk.TextBuffer()
+            buf.set_text("\n".join(info["entries"]))
+            view = Gtk.TextView(buffer=buf)
+            view.set_editable(False); view.set_monospace(True)
+            view.set_wrap_mode(Gtk.WrapMode.NONE)
+            view.add_css_class("terminal-view")
+            sc = Gtk.ScrolledWindow()
+            sc.set_min_content_height(120)
+            sc.add_css_class("card")
+            sc.set_child(view)
+            peek.add(sc)
+            outer.append(peek)
+    else:
+        if kind == localpkg.KIND_PKGBUILD:
+            warn = Adw.PreferencesGroup()
+            warn.set_title(tr("Review the PKGBUILD before building"))
+            warn.set_description(tr(
+                "Building runs the shell code from this PKGBUILD as your user. "
+                "Only continue if you trust where the file came from. Missing "
+                "dependencies are installed from the official repositories "
+                "first (administrator password required); AUR-only "
+                "dependencies must be installed beforehand."
+            ))
+            buf = Gtk.TextBuffer()
+            buf.set_text(info.get("pkgbuild_text") or "")
+            view = Gtk.TextView(buffer=buf)
+            view.set_editable(False); view.set_monospace(True)
+            view.set_wrap_mode(Gtk.WrapMode.NONE)
+            view.add_css_class("terminal-view")
+            sc = Gtk.ScrolledWindow()
+            sc.set_min_content_height(240)
+            sc.set_vexpand(True)
+            sc.add_css_class("card")
+            sc.set_child(view)
+            warn.add(sc)
+            outer.append(warn)
+        elif kind in (localpkg.KIND_FLATPAK_BUNDLE, localpkg.KIND_FLATPAK_REF):
+            note = Gtk.Label(label=tr(
+                "Installed for your user account (no administrator password "
+                "needed). Required runtimes are fetched from your Flatpak "
+                "remotes."))
+            note.set_wrap(True)
+            note.set_xalign(0)
+            note.add_css_class("dim-label")
+            outer.append(note)
+        else:
+            note = Gtk.Label(label=tr(
+                "The package is installed as-is. Dependencies are resolved by "
+                "your package manager; you will be asked for the administrator "
+                "password."))
+            note.set_wrap(True)
+            note.set_xalign(0)
+            note.add_css_class("dim-label")
+            outer.append(note)
+
+        label = (tr("Build and Install") if kind == localpkg.KIND_PKGBUILD
+                 else tr("Install"))
+        btn = Gtk.Button(label=label)
+        btn.add_css_class("suggested-action")
+        btn.set_halign(Gtk.Align.CENTER)
+
+        title = tr("Install {name}").format(
+            name=info.get("name") or os.path.basename(info["path"]))
+
+        def _go(*_):
+            dialog.close()
+            run_terminal_fn(cmd, title)
+
+        btn.connect("clicked", _go)
+        outer.append(btn)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_vexpand(True)
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_child(outer)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+    dialog.present()
+
+
 # ─── Export package list dialog ────────────────────────────────────────────────
 
 def show_export_pkgs_intro(parent, on_choose_location):
@@ -3486,7 +3852,7 @@ def show_file_search_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -3631,7 +3997,7 @@ def show_sysinfo_dialog(parent):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     scroll = Gtk.ScrolledWindow()
@@ -3773,7 +4139,7 @@ def show_about_dialog(parent, app_icon_name="io.github.wergosam.pachul"):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     # Everything below lives in a ScrolledWindow. Adw.Dialog is capped to
@@ -3905,7 +4271,7 @@ _HISTORY_ICONS = {
 def show_history_dialog(parent):
     dialog = Adw.Window()
     dialog.set_title(tr("Package History"))
-    dialog.set_default_size(640, 600)
+    dialog.set_default_size(640, max(600, (parent.get_height() if parent is not None else 0) or 780))  # as tall as the main window
     dialog.set_resizable(True)
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
@@ -3916,7 +4282,7 @@ def show_history_dialog(parent):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -3993,9 +4359,11 @@ def show_history_dialog(parent):
 
 # ─── Downgrade from cache ─────────────────────────────────────────────────────
 
-def show_downgrade_dialog(parent, pkg_name, run_terminal_fn):
+def show_downgrade_dialog(parent, pkg_name, run_terminal_fn, limit=None, title=None):
+    """limit: zeigt nur die neuesten `limit` Versionen (None = alle).
+    title: optionaler Fenstertitel (Standard: "Downgrade {pkg}")."""
     dialog = Adw.Window()
-    dialog.set_title(tr("Downgrade {pkg}").format(pkg=pkg_name))
+    dialog.set_title(title or tr("Downgrade {pkg}").format(pkg=pkg_name))
     dialog.set_default_size(560, 420)
     dialog.set_resizable(True)
     dialog.set_transient_for(parent)
@@ -4007,32 +4375,83 @@ def show_downgrade_dialog(parent, pkg_name, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-    candidates = get_downgrade_candidates(pkg_name)
 
-    if not candidates:
-        status = Adw.StatusPage()
-        status.set_paintable(themed_paintable("package-x-generic-symbolic", 72))
-        status.set_title(tr("No Older Versions Found"))
+    # Kandidaten im Hintergrund laden (Arch: Abfrage des Arch Linux Archive
+    # = Netzwerkzugriff) — bis dahin ein Spinner.
+    loading = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+    loading.set_halign(Gtk.Align.CENTER); loading.set_valign(Gtk.Align.CENTER)
+    loading.set_vexpand(True)
+    sp = Gtk.Spinner(); sp.start(); sp.set_size_request(32, 32)
+    loading.append(sp)
+    loading.append(Gtk.Label(label=tr("Looking for available versions…")))
+    outer.append(loading)
+
+    tv.set_content(outer)
+    dialog.set_content(tv)
+    dialog.present()
+
+    def populate(candidates, foreign=False):
+        for child in list(outer):
+            outer.remove(child)
+        if foreign:
+            # AUR-Pakete: es gibt kein Versionsarchiv wie bei den offiziellen
+            # Repositories — kurzer Hinweis, wie es hier stattdessen läuft.
+            aur_note = make_info_box(
+                "downgrade_aur", "AUR package: versions work differently", [
+                    "The AUR has no version archive like the official repositories. "
+                    "Pachul can only offer versions that are still on your disk: the "
+                    "pacman cache and the build folders of your AUR helper "
+                    "(yay, paru, pikaur, pachuli).",
+                    "An older version is therefore only available if you built or "
+                    "installed it earlier. After cleaning the helper's cache it is gone; "
+                    "then you would have to check out an older PKGBUILD and build it yourself.",
+                ])
+            aur_note.set_margin_start(12); aur_note.set_margin_end(12)
+            aur_note.set_margin_top(12)
+            outer.append(aur_note)
+        if limit:
+            candidates = candidates[:limit]
+
+        # Nur die installierte Version gefunden = keine Alternative.
+        others = [c for c in candidates if not c.get("installed")]
+
+        if not candidates:
+            status = Adw.StatusPage()
+            status.set_paintable(themed_paintable("package-x-generic-symbolic", 72))
+            status.set_title(tr("No Older Versions Found"))
+            if distro.is_arch():
+                desc = tr("No package files for {pkg} were found in /var/cache/pacman/pkg "
+                          "or in the Arch Linux Archive.\nThe archive needs an internet "
+                          "connection and only holds packages from the official repositories."
+                          ).format(pkg=pkg_name)
+            else:
+                desc = tr("No older build of {pkg} is available — either nothing is cached "
+                          "locally, or the configured repositories only carry the current "
+                          "version.").format(pkg=pkg_name)
+            status.set_description(desc)
+            status.set_vexpand(True)
+            outer.append(status)
+            return
+
         if distro.is_arch():
-            desc = tr("No package files for {pkg} were found in /var/cache/pacman/pkg."
-                      "\nOlder versions are only available while they remain in the cache."
-                      ).format(pkg=pkg_name)
-        else:
-            desc = tr("No older build of {pkg} is available — either nothing is cached "
-                      "locally, or the configured repositories only carry the current "
-                      "version.").format(pkg=pkg_name)
-        status.set_description(desc)
-        status.set_vexpand(True)
-        outer.append(status)
-    else:
-        if distro.is_arch():
-            info_text = tr("{n} cached version(s) — pick one to install with pacman -U").format(n=len(candidates))
+            info_text = tr("{n} version(s) — pick one to install with pacman -U. "
+                           "Versions not in the local cache are downloaded from the "
+                           "Arch Linux Archive.").format(n=len(candidates))
         else:
             info_text = tr("{n} version(s) available — some may need to be downloaded").format(n=len(candidates))
+        if not others:
+            if distro.is_arch():
+                info_text = tr("No other version of {pkg} was found — not in the local "
+                               "cache, the AUR helper build caches or the Arch Linux "
+                               "Archive (which only holds packages from the official "
+                               "repositories, and needs an internet connection)."
+                               ).format(pkg=pkg_name)
+            else:
+                info_text = tr("No other version of {pkg} is available.").format(pkg=pkg_name)
         info_bar = Gtk.Label(label=info_text)
         info_bar.add_css_class("caption"); info_bar.set_wrap(True)
         info_bar.set_halign(Gtk.Align.START)
@@ -4051,14 +4470,25 @@ def show_downgrade_dialog(parent, pkg_name, run_terminal_fn):
         for cand in candidates:
             row = Adw.ActionRow()
             row.set_title(cand["version"])
-            if cand["kind"] == "file":
+            if cand["kind"] == "installed":
+                row.set_subtitle(tr("Currently installed"))
+            elif cand["kind"] == "file":
                 row.set_subtitle(cand["source"])
+            elif cand["kind"] == "url":
+                row.set_subtitle(tr("Download from Arch Linux Archive"))
             else:
                 row.set_subtitle(tr("Available from repository"))
             row.set_subtitle_selectable(True)
+            if cand.get("installed"):
+                badge = Gtk.Label(label=tr("INSTALLED"))
+                badge.add_css_class("row-status-pill")
+                badge.add_css_class("status-installed")
+                badge.set_valign(Gtk.Align.CENTER)
+                row.add_suffix(badge)
             btn = Gtk.Button(label=tr("Install"))
             btn.add_css_class("suggested-action"); btn.add_css_class("flat")
             btn.set_valign(Gtk.Align.CENTER)
+            btn.set_sensitive(not cand.get("installed"))
             btn.connect("clicked", lambda *_, c=cand: (
                 dialog.close(),
                 run_terminal_fn(build_downgrade_cmd(pkg_name, c),
@@ -4070,14 +4500,23 @@ def show_downgrade_dialog(parent, pkg_name, run_terminal_fn):
         scroll.set_child(listbox)
         outer.append(scroll)
 
-    tv.set_content(outer)
-    dialog.set_content(tv)
-    dialog.present()
+    def worker():
+        try:
+            cands = get_downgrade_candidates(pkg_name)
+        except Exception:
+            cands = []
+        try:
+            foreign = is_foreign_package(pkg_name)
+        except Exception:
+            foreign = False
+        GLib.idle_add(populate, cands, foreign)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 # ─── Hold / unhold package dialog ──────────────────────────────────────────────
 
-def show_hold_dialog(parent, pkg_name, currently_held, on_confirm):
+def show_hold_dialog(parent, pkg_name, currently_held, on_confirm, on_show_ignored=None):
     """currently_held=True means the click will *unhold* it; False means the
     click will add it to IgnorePkg (hold it)."""
     dialog = Adw.Dialog()
@@ -4134,6 +4573,24 @@ def show_hold_dialog(parent, pkg_name, currently_held, on_confirm):
 
     action_btn.connect("clicked", _do_action)
     outer.append(action_btn)
+
+    # Shortcut to the overview of everything that is held — the two belong
+    # together (this dialog changes one package, that one lists and undoes
+    # them all). Only offered when there is something to look at.
+    if on_show_ignored is not None:
+        n_ignored = len(get_ignored_packages())
+        if n_ignored:
+            link_btn = Gtk.Button(
+                label=tr("Show Ignored Packages ({n})…").format(n=n_ignored))
+            link_btn.add_css_class("flat")
+            link_btn.set_halign(Gtk.Align.CENTER)
+
+            def _show_ignored(*_):
+                dialog.close()
+                on_show_ignored()
+
+            link_btn.connect("clicked", _show_ignored)
+            outer.append(link_btn)
 
     scroll = Gtk.ScrolledWindow()
     scroll.set_vexpand(True)
@@ -4214,7 +4671,7 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
 
     aur_url = f"https://aur.archlinux.org/packages/{urllib.parse.quote(pkg_name, safe='')}"
     link_btn = Gtk.LinkButton(uri=aur_url)
@@ -4319,7 +4776,7 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
     dialog = Adw.Window()
     dialog.set_title(tr("Config Files (.pacnew / .pacsave)") if distro.is_arch()
                       else tr("Config File Conflicts"))
-    dialog.set_default_size(720, 560)
+    dialog.set_default_size(720, max(560, (parent.get_height() if parent is not None else 0) or 780))  # as tall as the main window
     dialog.set_resizable(True)
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
@@ -4330,7 +4787,7 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -4358,6 +4815,16 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
             status.set_vexpand(True)
             outer.append(status)
             return
+
+        if distro.is_arch():
+            pd_hint = make_info_box(
+                "pacdiff",
+                "What are .pacnew and .pacsave files?",
+                ["If you changed a configuration file yourself and the package ships a new version of it, pacman does not overwrite your file. It saves the new default next to it as «.pacnew». If you remove a package whose configuration file you changed, your file is kept as «.pacsave».",
+                 "«Use New (overwrite)» replaces your file with the new one — your own settings in it are lost. «Discard» only deletes the .pacnew file and keeps your version, which may then lack new options or contain outdated ones. Check the diff first."])
+            pd_hint.set_margin_start(16); pd_hint.set_margin_end(16)
+            pd_hint.set_margin_top(12)
+            outer.append(pd_hint)
 
         info = Gtk.Label(label=(
             tr("{n} file(s) left behind by package updates. Review the diff, then keep the new version or discard it.").format(n=len(files))))
@@ -4503,7 +4970,7 @@ def show_ignored_packages_dialog(parent, run_terminal_fn):
     detail panel individually."""
     dialog = Adw.Window()
     dialog.set_title(tr("Ignored Packages"))
-    dialog.set_default_size(520, 560)
+    dialog.set_default_size(520, max(560, (parent.get_height() if parent is not None else 0) or 780))  # as tall as the main window
     dialog.set_resizable(True)
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
@@ -4514,7 +4981,7 @@ def show_ignored_packages_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
 
     unignore_all_btn = Gtk.Button(label=tr("Unignore All"))
     unignore_all_btn.add_css_class("destructive-action")
@@ -4539,6 +5006,15 @@ def show_ignored_packages_dialog(parent, run_terminal_fn):
         names = sorted(get_ignored_packages())
         unignore_all_btn.set_visible(bool(names))
 
+        ig_paragraphs = ["Ignored (held) packages are skipped by system upgrades and stay at their current version until you unignore them.",
+                         "Be careful: if a package stays old while the libraries it depends on are upgraded, it may stop working or block other updates. Hold packages only temporarily, for example until a known bug is fixed."]
+        if distro.is_arch():
+            ig_paragraphs.append("Arch does not officially support partial upgrades, so every ignored package is a small risk for the whole system.")
+        ig_hint = make_info_box("ignored_packages", "What does “ignored” mean?", ig_paragraphs)
+        ig_hint.set_margin_start(12); ig_hint.set_margin_end(12)
+        ig_hint.set_margin_top(12)
+        outer.append(ig_hint)
+
         if not names:
             status = Adw.StatusPage()
             status.set_paintable(themed_paintable("emblem-ok-symbolic", 64))
@@ -4559,6 +5035,16 @@ def show_ignored_packages_dialog(parent, run_terminal_fn):
         for name in names:
             row = Adw.ActionRow()
             row.set_title(name)
+            ver_btn = Gtk.Button(label=tr("Choose Version…"))
+            ver_btn.set_valign(Gtk.Align.CENTER)
+            ver_btn.set_tooltip_text(tr(
+                "Install one of the last 5 versions. The package stays ignored."))
+            ver_btn.connect(
+                "clicked",
+                lambda *_, n=name: show_downgrade_dialog(
+                    dialog, n, run_terminal_fn, limit=5,
+                    title=tr("Choose Version of {pkg}").format(pkg=n)))
+            row.add_suffix(ver_btn)
             btn = Gtk.Button(label=tr("Unignore"))
             btn.set_valign(Gtk.Align.CENTER)
             btn.connect("clicked", lambda *_, n=name: run_unignore([n]))
@@ -4580,7 +5066,9 @@ def show_tool_updates_dialog(parent, run_terminal_fn):
     automatically alongside every normal system upgrade."""
     dialog = Adw.Window()
     dialog.set_title(tr("More Update Sources"))
-    dialog.set_default_size(760, 620)
+    # Same height as the main program window.
+    _main_h = (parent.get_height() if parent is not None else 0) or 780
+    dialog.set_default_size(760, max(620, _main_h))
     dialog.set_resizable(True)
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
@@ -4591,7 +5079,7 @@ def show_tool_updates_dialog(parent, run_terminal_fn):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
 
     update_btn = Gtk.Button(label=tr("Update Selected"))
     update_btn.add_css_class("suggested-action")
@@ -4799,7 +5287,7 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
     # freely resizable/movable top-level window — same reasoning as
     # show_repo_manager above. Default a bit more generously sized than
     # the implicit ~640×576 default.
-    dlg.set_default_size(780, 780)
+    dlg.set_default_size(640, 780)
     dlg.set_resizable(True)
     dlg.set_transient_for(parent)
     dlg.set_modal(True)
@@ -4883,30 +5371,6 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
         pachuli_btn.connect("clicked", _on_install_pachuli)
         pachuli_row.add_suffix(pachuli_btn)
         aur_group.add(pachuli_row)
-
-    if distro.is_arch() and not makepkg_pkexec_configured():
-        makepkg_row = Adw.ActionRow()
-        makepkg_row.set_title(tr("Build dependency prompts still use sudo"))
-        makepkg_row.set_subtitle(tr(
-            "While building an AUR package, makepkg installs any missing "
-            "dependencies itself — outside pachuli/yay/paru's own pkexec "
-            "or sudo call — and always does so via a plain sudo prompt in "
-            "the terminal panel, by default. This points /etc/makepkg.conf "
-            "at pkexec instead, so that step gets a native graphical "
-            "prompt too, same as the rest of every upgrade."))
-        makepkg_btn = Gtk.Button(label=tr("Use pkexec for build dependencies"))
-        makepkg_btn.add_css_class("suggested-action")
-        makepkg_btn.set_valign(Gtk.Align.CENTER)
-
-        def _on_configure_makepkg(btn):
-            if not run_terminal_fn:
-                return
-            btn.set_sensitive(False)
-            run_terminal_fn(get_makepkg_pkexec_cmd(),
-                             tr("Configure makepkg"), parent=dlg)
-        makepkg_btn.connect("clicked", _on_configure_makepkg)
-        makepkg_row.add_suffix(makepkg_btn)
-        aur_group.add(makepkg_row)
 
     inc_row = Adw.SwitchRow()
     inc_row.set_title(tr("Include AUR in update checks"))
@@ -5123,6 +5587,13 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
     _switch(tr("Confirm before removing packages"), None, "confirm_remove")
     _switch(tr("Check for updates on startup"), None, "check_updates_on_start")
     _switch(tr("Notify when updates are available"), None, "notify_updates")
+    _switch(
+        tr("Check for fixable system problems on startup"),
+        tr("Scans for things like failed services, no active firewall, "
+           "expired certificates or a broken package database, and lets "
+           "you jump straight to the matching built-in tool. Read-only, "
+           "no password needed."),
+        "startup_healthcheck_enabled")
 
     snap_tool, snap_info = detect_snapshot_tool()
     snap_row = Adw.SwitchRow()
@@ -5140,6 +5611,59 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
         {"snapshot_before_upgrade": r.get_active()}))
     beh.add(snap_row)
     page.add(beh)
+
+    # Appearance (light / dark / follow system)
+    look_group = Adw.PreferencesGroup()
+    look_group.set_title(tr("Appearance"))
+    look_group.set_description(tr("Changes apply immediately"))
+
+    # Two switches cover all three states: "Follow System" on = system,
+    # otherwise the "Dark Mode" switch decides between dark and light.
+    style_mgr = Adw.StyleManager.get_default()
+    cur_scheme = s.get("color_scheme", "system")
+    _busy = [False]   # guards against the switches re-triggering each other
+
+    follow_row = Adw.SwitchRow()
+    follow_row.set_title(tr("Follow System"))
+    dark_row = Adw.SwitchRow()
+    dark_row.set_title(tr("Dark Mode"))
+
+    follow_row.set_active(cur_scheme not in ("light", "dark"))
+    dark_row.set_active(cur_scheme == "dark" if cur_scheme in ("light", "dark")
+                        else style_mgr.get_dark())
+    dark_row.set_sensitive(not follow_row.get_active())
+
+    def _apply_scheme(value):
+        # The app owns the action: it applies the scheme and saves it.
+        app = parent.get_application()
+        if app is not None:
+            app.activate_action("color_scheme", GLib.Variant.new_string(value))
+
+    def _on_follow_toggled(row, _p):
+        if _busy[0]:
+            return
+        _busy[0] = True
+        try:
+            if row.get_active():
+                _apply_scheme("system")
+            else:
+                # Keep what is on screen right now, but fixed from here on.
+                _apply_scheme("dark" if style_mgr.get_dark() else "light")
+            dark_row.set_sensitive(not row.get_active())
+            dark_row.set_active(style_mgr.get_dark())
+        finally:
+            _busy[0] = False
+
+    def _on_dark_toggled(row, _p):
+        if _busy[0]:
+            return
+        _apply_scheme("dark" if row.get_active() else "light")
+
+    follow_row.connect("notify::active", _on_follow_toggled)
+    dark_row.connect("notify::active", _on_dark_toggled)
+    look_group.add(follow_row)
+    look_group.add(dark_row)
+    page.add(look_group)
 
     # Language
     lang_group = Adw.PreferencesGroup()
@@ -5216,6 +5740,23 @@ def show_preferences(parent, on_changed, app_dir=None, run_terminal_fn=None):
     page.add(svc)
 
     dlg.add(page)
+
+    # AdwPreferencesPage centres its content in a 600px clamp, which left
+    # much wider side margins than in the other dialogs. Let the content
+    # use the full width instead (margins then come from the group itself).
+    def _widen(w):
+        c = w.get_first_child()
+        while c is not None:
+            if isinstance(c, Adw.Clamp):
+                c.set_maximum_size(10000)
+                c.set_tightening_threshold(10000)
+                c.set_margin_start(4); c.set_margin_end(4)
+            _widen(c)
+            c = c.get_next_sibling()
+    try:
+        _widen(dlg)
+    except Exception:
+        pass
     dlg.present()
 
 
@@ -5230,6 +5771,9 @@ def _shortcuts_list():
         ("F5",            tr("Sync databases")),
         ("Ctrl+R",        tr("Refresh package list")),
         ("Ctrl+U",        tr("Check for updates")),
+        ("Ctrl+T",        tr("Open tools")),
+        ("Ctrl+D",        tr("Show/hide package details")),
+        ("Ctrl+Shift+D",  tr("Toggle light/dark")),
         ("Ctrl+,",        tr("Preferences")),
         ("Ctrl+A",        tr("Select all packages (batch mode)")),
         ("Ctrl+Shift+A",  tr("Deselect all packages (batch mode)")),
@@ -5239,107 +5783,502 @@ def _shortcuts_list():
 
 
 def _help_function_groups(parent):
-    """(group_title, [(name, description), …]) pairs describing every menu
-    function — grouped to match the app menu's own sections. `parent` is
-    the main window, used to skip rows for features that don't apply on
-    the current distro/setup (same conditions the menu itself uses)."""
+    """(group_title, [(name, description), …]) pairs for the Help window.
+
+    Mirrors what the user actually sees: the main window and its sidebar,
+    the Packages and Tools hubs (toolshub.py — same group names, same
+    titles, same distro conditions), the Preferences and the terminal
+    commands. The descriptions go further than the one-line hub texts and
+    also cover what the per-dialog tooltips and info boxes say, so the
+    help is never thinner than the UI it explains. `parent` is the main
+    window, used to skip rows for features that don't apply on the current
+    distro/setup (same conditions the hubs themselves use)."""
     hold_supported = getattr(parent, "_hold_supported", False)
     mark_supported = getattr(parent, "_mark_reason_supported", False)
 
     groups = []
+    _rows = []
+    _rows.append((tr("Window layout"),
+         tr(
+            "The window has three parts: the sidebar on the left (filters "
+            "and counters), the package list in the middle (with the search"
+            " bar) and the details of the selected package on the right. "
+            "The header bar at the top gives access to Packages, Tools, "
+            "Preferences, Help and About Pachul.")))
+    _rows.append((tr("Header bar buttons"),
+         tr(
+            "Packages: sync, check for updates and actions for the selected"
+            " packages. Tools (Ctrl+T): a searchable overview of all "
+            "maintenance, repair and system tools — type a word and press "
+            "Enter to open the first match. Preferences (Ctrl+,): all "
+            "settings. Help (F1): this window. About Pachul: version, "
+            "license and system info for bug reports.")))
+    _rows.append((tr("Sidebar counters"),
+         tr(
+            "The three cards at the top of the sidebar show the total "
+            "number of packages, how many of them come from the AUR, and "
+            "how many updates are pending.")))
+    _rows.append((tr("Status badges"),
+         tr(
+            "INSTALLED marks a package that is already on your system, "
+            "UPDATE marks an installed package for which a newer version is"
+            " available. Next to the name, small badges show the version, "
+            "the repository it comes from and its architecture.")))
+    _rows.append((tr("Administrator rights"),
+         tr(
+            "Actions that change the system (installing, removing, "
+            "repairing …) ask for your password through pkexec and show "
+            "their progress in a terminal window. Read-only checks and "
+            "scans run without elevated rights; each tool's description "
+            "says which is which.")))
+    _rows.append((tr("Tooltips and info boxes"),
+         tr(
+            "Many rows in the tools carry a tooltip with the exact command "
+            "that is run and what it affects — hold the mouse over a row to"
+            " read it before pressing its button. Info boxes explain a "
+            "topic once; those with a close button stay hidden after you "
+            "dismiss them.")))
+    groups.append((tr("Getting Started"), _rows))
 
-    groups.append((tr("Browsing & Search"), [
-        (tr("New Packages / All Packages / Installed / Updates"),
-         tr("Sidebar filters for the package list — what's newly available, "
-            "everything, only what's installed, or only what has an update "
-            "pending.")),
-        (tr("Search"),
-         tr("Type in the search bar (or press Ctrl+F) to filter the current "
-            "list by name or description.")),
-        (tr("Package details"),
-         tr("Click any package to see its description, version, size, "
-            "dependencies and files on the right, with Install/Remove/"
-            "Update actions.")),
-    ]))
+    _rows = []
+    _rows.append((tr("All Packages / Updates"),
+         tr(
+            "At the top of the sidebar: All Packages lists everything the "
+            "package manager knows about; Updates lists only installed "
+            "packages with a newer version available, with a count badge.")))
+    _rows.append((tr("NEW section"),
+         tr(
+            "Everything that is not installed yet — either all at once (All"
+            " New Packages) or per source such as core, extra, multilib, "
+            "aur, Flatpak or Snap. A good place to discover software.")))
+    _rows.append((tr("INSTALLED PACKAGES section"),
+         tr(
+            "Everything that is already on your system — all of it (All "
+            "Installed Packages) or per origin. Every repository appears in"
+            " both sections, each with its own package counter.")))
+    _rows.append((tr("Search"),
+         tr(
+            "Type in the search bar (or press Ctrl+F) to filter the list "
+            "that is currently shown by name or description. Pick All "
+            "Packages in the sidebar first if you want to search "
+            "everything.")))
+    _rows.append((tr("Package details"),
+         tr(
+            "Click a package to see its description and actions on the "
+            "right. The Info tab shows version, size, license, dependencies"
+            " and more; the Files tab lists every file the installed "
+            "package placed on your system, with a filter field and a file "
+            "counter.")))
+    _rows.append((tr("Dependencies"),
+         tr(
+            "Dependency entries in the Info tab are buttons: click one to "
+            "look that package up. Long lists can be expanded.")))
+    groups.append((tr("Browsing & Search"), _rows))
 
-    groups.append((tr("Updating"), [
-        (tr("Sync Databases"),
-         tr("Refresh the local package index from the repositories, "
-            "without installing anything yet.")),
-        (tr("Check for Updates"),
-         tr("Sync, then rebuild the Updates list — same as pressing Ctrl+U.")),
-        (tr("Refresh List"),
-         tr("Reload the current view from what's already known locally, "
-            "without contacting the repositories.")),
-        (tr("Upgrade All"),
-         tr("Install every pending update in one go — shown as a button "
-            "whenever the Updates list isn't empty.")),
-        (tr("Batch mode"),
-         tr("Select several packages at once (checkboxes in the list) to "
-            "install or remove them together; Ctrl+A / Ctrl+Shift+A select "
-            "or deselect everything currently visible.")),
-    ]))
+    _rows = []
+    _rows.append((tr("Install"),
+         tr(
+            "Installs the selected package from its source — repository, "
+            "AUR, Flatpak or Snap. A terminal window shows the progress, "
+            "and your password is asked via pkexec when needed.")))
+    _rows.append((tr("Uninstall"),
+         tr(
+            "Removes the selected package. If “Confirm before removing "
+            "packages” is switched on in Preferences, you are asked first.")))
+    _rows.append((tr("Reinstall"),
+         tr(
+            "Installs the same version of an installed package again — "
+            "useful when some of its files are damaged or missing.")))
+    _rows.append((tr("Downgrade"),
+         tr(
+            "Shows older versions of the package — those still in the "
+            "package cache first, others from the repository if available —"
+            " and installs the one you pick. Afterwards use Ignore Updates,"
+            " or the next upgrade will install the newer version again.")))
+    _rows.append((tr("Ignore Updates"),
+         tr(
+            "Pins a package at its current version so system upgrades skip "
+            "it until you release it again (Arch: IgnorePkg in "
+            "/etc/pacman.conf, Debian: apt-mark hold, openSUSE: package "
+            "lock). Use it only temporarily — a package that falls behind "
+            "its libraries can break or block other updates. All held "
+            "packages are listed under Tools → Ignored Packages.")))
+    _rows.append((tr("Batch mode"),
+         tr(
+            "Tick the checkboxes in the package list to select several "
+            "packages. The right side then lists the selection, and the "
+            "bottom bar offers Install, Uninstall and Ignore Updates for "
+            "all of them at once. Ctrl+A selects everything currently "
+            "visible, Ctrl+Shift+A clears the selection.")))
+    _rows.append((tr("Bottom action bar"),
+         tr(
+            "Left: buttons to select or deselect all visible packages, then"
+            " Install. Right: Uninstall and Ignore Updates. Upgrade All "
+            "appears whenever updates are pending, and Check for Updates is"
+            " available in the Updates view.")))
+    groups.append((tr("Installing & Removing"), _rows))
 
-    repo_rows = [
-        (tr("Manage Repositories…"),
-         tr("View and edit which package repositories are enabled.")),
-    ]
+    _rows = []
+    _rows.append((tr("Sync Databases"),
+         tr(
+            "Downloads the latest package lists from the repositories "
+            "without installing anything (F5). A confirmation dialog "
+            "explains what happens first.")))
+    _rows.append((tr("Check for Updates"),
+         tr(
+            "Syncs, then rebuilds the Updates list (Ctrl+U, or the button "
+            "in the Updates view). AUR packages are included if enabled in "
+            "Preferences.")))
+    _rows.append((tr("Refresh List"),
+         tr(
+            "Reloads the view from what is already known locally, without "
+            "contacting the repositories (Ctrl+R).")))
+    _rows.append((tr("Upgrade All"),
+         tr(
+            "Installs every pending update in one go. If Timeshift or "
+            "Snapper is found and enabled in Preferences, a restore point "
+            "is created first. Flatpak and Snap updates are included when "
+            "those sources are enabled.")))
+    _rows.append((tr("Updates outside the package manager"),
+         tr(
+            "Developer and system tools that normal upgrades don't cover "
+            "(rustup, npm, pip, firmware …) are handled under Tools → More "
+            "Update Sources.")))
+    _rows.append((tr("Notifications and background checks"),
+         tr(
+            "Preferences can check for updates on startup and notify you "
+            "when some are available. With the tray icon and the background"
+            " service, checks also run periodically while Pachul is closed.")))
+    groups.append((tr("Updating"), _rows))
+
+    _rows = []
+    _rows.append((tr("Install Local Package…"),
+         tr(
+            "Installs a downloaded file: a built package (.pkg.tar.*, "
+            "installed with pacman -U), a .tar.gz with a PKGBUILD (built "
+            "with makepkg first), .deb, .rpm, .flatpak or .flatpakref. "
+            "Pachul recognises the type, shows what it found and asks "
+            "before installing. Only formats your distribution can handle "
+            "work.")))
+    _rows.append((tr("Manage Repositories…"),
+         tr(
+            "Arch: shows the active repositories and lets you edit "
+            "pacman.conf (for example to enable multilib) — a wrong entry "
+            "can stop updates from working, so change it with care. Other "
+            "distributions: enable, disable or add software sources without"
+            " editing files by hand.")))
     if distro.is_arch():
-        repo_rows.append((tr("Rate Mirrors…"),
-            tr("Benchmark configured mirrors and switch to the fastest "
-               "ones. Arch-only — Fedora and openSUSE already pick the "
-               "fastest mirror automatically.")))
-    groups.append((tr("Repositories"), repo_rows))
+        _rows.append((tr("Find Fastest Mirrors…"),
+         tr(
+            "Tests the configured mirrors, ranks them by speed and lets you"
+            " apply the fastest ones to make downloads quicker. Arch only —"
+            " Fedora and openSUSE already pick the fastest mirror "
+            "automatically. An info box in the dialog explains what mirrors"
+            " are.")))
+    _rows.append((tr("More Update Sources…"),
+         tr(
+            "Checks tools that normal upgrades don't cover: rustup, cargo, "
+            "pip/pipx, npm, fnm/nvm, firmware (fwupd), Docker/Podman "
+            "images, editor plugins and more. Update them once with “Update"
+            " Selected”, or tick a tool to have it run automatically with "
+            "every normal system upgrade. The “What can be updated here?” "
+            "list shows everything supported, even if it isn't installed.")))
+    _rows.append((tr("Import Package List…"),
+         tr(
+            "Installs packages from a list file you exported earlier. After"
+            " you pick the file, the packages found in it are shown before "
+            "anything is installed.")))
+    _rows.append((tr("Export Package List…"),
+         tr(
+            "Saves the names of your explicitly installed programs to a "
+            "text file — handy for setting up another machine the same way "
+            "(use Import Package List there). You choose the target "
+            "location first.")))
+    groups.append((tr("Software & Sources"), _rows))
 
-    groups.append((tr("Tools"), [
-        (tr("Find Orphans"),
-         tr("List packages that were pulled in as dependencies but are no "
-            "longer needed by anything, so you can clean them up.")),
-        (tr("Find Package by File…"),
-         tr("Look up which installed package owns a given file path.")),
-        (tr("Config File Conflicts…"),
-         tr("Review and merge configuration files a package update left "
-            "behind instead of overwriting your local changes.")),
-        (tr("More Update Sources…"),
-         tr("Check for updates outside the system package manager — "
-            "rustup, npm, pip, Flatpak, and similar tools.")),
-        *([(tr("Ignored Packages…"),
-            tr("Hold specific packages back from updates."))] if hold_supported else []),
-        (tr("Package History…"),
-         tr("Browse a log of past installs, removals and updates.")),
-        (tr("System Info"),
-         tr("Overview of the system, hardware and installed packages.")),
-        (tr("Cache Cleaner"),
-         tr("Free up disk space by clearing old cached package files.")),
+    _rows = []
+    _rows.append((tr("Find Orphans"),
+         tr(
+            "Lists packages that were installed as dependencies and are no "
+            "longer needed by anything, so you can remove them and free "
+            "space. Check the list first: a program you use directly can "
+            "show up here if it was marked as a dependency — use Mark "
+            "Selected as Explicit to protect it.")))
+    _rows.append((tr("Cache Cleaner"),
+         tr(
+            "Frees disk space used by downloaded package files. On Arch it "
+            "keeps the 2 newest versions of each package (paccache), so a "
+            "downgrade stays possible; installed packages are never "
+            "touched. The dialog also offers general cleanup: shrink the "
+            "systemd journal (500 MB / 4 weeks), delete thumbnails older "
+            "than 30 days and empty the trash — emptying the trash cannot "
+            "be undone.")))
+    if distro.is_arch():
+        _rows.append((tr("Config Files (.pacnew)…"),
+         tr(
+            "After an update, a package can leave a new default "
+            "configuration file (.pacnew) or a backup (.pacsave) next to "
+            "yours instead of overwriting your changes. This tool shows the"
+            " differences and helps you merge or discard them.")))
+    if not distro.is_arch():
+        _rows.append((tr("Config File Conflicts…"),
+         tr(
+            "After an update, a package can leave a new default "
+            "configuration file (such as .rpmnew or .dpkg-dist) next to "
+            "yours instead of overwriting your changes. This tool shows the"
+            " differences and helps you merge or discard them.")))
+    if hold_supported:
+        _rows.append((tr("Ignored Packages…"),
+         tr(
+            "Overview of all packages currently held back from upgrades, "
+            "with an Unignore button for each (and Unignore All). An info "
+            "box explains why holding packages for long is risky.")))
+    _rows.append((tr("Package History…"),
+         tr(
+            "A log of past installs, upgrades and removals with dates — "
+            "useful to find out what changed before something stopped "
+            "working.")))
+    _rows.append((tr("Find Package by File…"),
+         tr(
+            "Finds out which package a file belongs to: enter a file name "
+            "or path. If the file database hasn't been synced yet, you are "
+            "offered to do that first.")))
+    groups.append((tr("Maintenance"), _rows))
+
+    _rows = []
+    if distro.is_arch():
+        _rows.append((tr("Repair System (pacman)…"),
+         tr(
+            "Standard Maintenance: Force-Refresh & Full Upgrade (pacman "
+            "-Syyu), a read-only database consistency check, and "
+            "Reinitialize Keyring (helps with signature errors). Diagnose: "
+            "search for packages with missing or modified files and "
+            "reinstall the ones you pick. Last Resort: force-remove a "
+            "broken package while ignoring dependencies — only when nothing"
+            " else works.")))
+    if distro.is_debian():
+        _rows.append((tr("Repair System (apt/dpkg)…"),
+         tr(
+            "Standard Maintenance: update, upgrade & autoremove, fix broken"
+            " dependencies, reconfigure all packages, fix missing or "
+            "corrupt package files and clean the package cache. Diagnose "
+            "lists broken or incomplete packages; Last Resort offers a "
+            "forced removal.")))
+    if distro.is_fedora():
+        _rows.append((tr("Repair System (dnf/rpm)…"),
+         tr(
+            "Standard Maintenance: update, upgrade & autoremove, fix "
+            "inconsistent package versions, rebuild the RPM database and "
+            "clean the package cache. Diagnose shows broken or unsatisfied "
+            "packages; Last Resort offers a forced removal.")))
+    if distro.is_suse():
+        _rows.append((tr("Repair System (zypper/rpm)…"),
+         tr(
+            "Standard Maintenance: update & upgrade, fix broken "
+            "dependencies, rebuild the RPM database and clean the package "
+            "cache. Diagnose shows broken or unsatisfied packages; Last "
+            "Resort offers a forced removal.")))
+    _rows.append((tr("Check Certificates…"),
+         tr(
+            "Domain check: connects live to the domains you enter (port "
+            "443) and reports the days left until the certificate expires. "
+            "Local check: read-only scan of the .pem files in "
+            "/etc/ssl/certs. There is also a one-click reinstall of the CA "
+            "certificate bundle for when HTTPS errors hit many unrelated "
+            "sites at once.")))
+    _rows.append((tr("Find Broken Symlinks…"),
+         tr(
+            "Scans /usr and /etc for symbolic links whose target no longer "
+            "exists and sorts them into license leftovers (safe), archiso "
+            "templates (expected) and everything else (review by hand). "
+            "Scanning is read-only; the clean-up button deletes only the "
+            "safe license leftovers and needs administrator rights.")))
+    groups.append((tr("Repair"), _rows))
+
+    _rows = []
+    _rows.append((tr("System Info"),
+         tr(
+            "Operating system, kernel, hardware and package statistics in "
+            "one place — a good thing to include in a bug report.")))
+    _rows.append((tr("Services & Security…"),
+         tr(
+            "Shows failed systemd services (with a one-click reset for the "
+            "usually harmless shadow.service), whether firewalld, fail2ban "
+            "and apparmor are active, the UFW firewall (show rules, install"
+            " and enable) and a check of the SSH root-login setting. Most "
+            "checks are read-only.")))
+    _rows.append((tr("Configuration Backup…"),
+         tr(
+            "Creates a compressed archive of important system configuration"
+            " (fstab, hostname, bootloader, package-manager config …) plus "
+            "a list of installed packages in the folder you choose "
+            "(default: ~/pachul-backup). Only the last 5 archives are kept."
+            " No administrator rights needed.")))
+    groups.append((tr("System"), _rows))
+
+    _rows = []
+    if distro.is_arch():
+        _rows.append((tr("View PKGBUILD (AUR)…"),
+         tr(
+            "Shows the build script of an AUR package before you install "
+            "it, so you can see what it will do — always worth a look for "
+            "unfamiliar packages. A link button in the viewer opens the "
+            "package's AUR page (votes, comments, discussion).")))
+    if hold_supported:
+        _rows.append((tr("Hold / Unhold Selected"),
+         tr(
+            "Same as Ignore Updates, but from the Packages menu: toggles "
+            "whether the selected packages are excluded from upgrades. A "
+            "dialog explains the effect and asks for confirmation.")))
+    if mark_supported:
+        _rows.append((tr("Mark Selected as Explicit / as Dependency"),
+         tr(
+            "Changes how a package is tracked. Explicit means installed on "
+            "purpose, so it is never offered for removal as an orphan; "
+            "Dependency means installed for other packages, so it shows up "
+            "in Find Orphans once nothing needs it any more. Only this "
+            "label changes — nothing is installed or removed.")))
+    groups.append((tr("Selected Packages"), _rows))
+
+    _rows = []
+    if distro.is_arch():
+        _rows.append((tr("AUR Helper"),
+         tr(
+            "Chooses the program used for AUR installs, updates and "
+            "PKGBUILDs: auto-detect, pachuli (Pachul's own minimal helper),"
+            " yay, paru, pikaur or none (pacman only). A missing helper can"
+            " be installed right from the Preferences. “Include AUR in "
+            "update checks” also looks for newer AUR versions — switch it "
+            "off if checks are slow or you don't use the AUR.")))
+    if distro.is_debian() or distro.is_fedora():
+        _rows.append((tr("Python bindings (apt / dnf)"),
+         tr(
+            "If python3-apt (Debian/Ubuntu) or python3-libdnf5 (Fedora) is "
+            "missing, Preferences offers to install it. It speeds up "
+            "package info, listing and update checks; Pachul works without "
+            "it, just more slowly. Restart Pachul afterwards.")))
+    _rows.append((tr("Additional Package Sources"),
+         tr(
+            "Switch Flatpak and Snap support on or off, and install or "
+            "uninstall flatpak/snapd itself. When enabled, their apps "
+            "appear in the sidebar and are included in searches and "
+            "upgrades. Flatpak installs run without a password; Snap always"
+            " needs one.")))
+    _rows.append((tr("Confirmations and notifications"),
+         tr(
+            "“Confirm before removing packages” asks before anything is "
+            "uninstalled. “Check for updates on startup” and “Notify when "
+            "updates are available” control the automatic update check and "
+            "its desktop notification.")))
+    _rows.append((tr("Startup health check"),
+         tr(
+            "Scans at startup for fixable problems such as failed services "
+            "or no active firewall. If something is found, a summary dialog"
+            " lets you open the matching tool — nothing is changed "
+            "automatically. Turn it off under Preferences → Behaviour.")))
+    _rows.append((tr("Snapshot before upgrades"),
+         tr(
+            "If Timeshift or Snapper is installed, a restore point can be "
+            "created before every system upgrade as a safety net.")))
+    _rows.append((tr("Appearance"),
+         tr(
+            "“Follow System” uses the desktop's light or dark setting; "
+            "“Dark Mode” switches manually (Ctrl+Shift+D toggles). Changes "
+            "apply immediately.")))
+    _rows.append((tr("Language"),
+         tr(
+            "Switches between English, German, French and Italian. The "
+            "interface is rebuilt right away, no restart needed.")))
+    _rows.append((tr("Tray icon and background service"),
+         tr(
+            "Start the tray icon automatically at login to see pending "
+            "updates at a glance. The background service checks for updates"
+            " through a systemd user timer (hourly, every 6 hours or "
+            "daily), even when Pachul is closed.")))
+    groups.append((tr("Preferences Explained"), _rows))
+
+    groups.append((tr("Terminal Commands"), [
+        (tr("pachul"),
+         tr("Launches the main window — same as clicking the app icon.")),
+        (tr("pachul-tray"),
+         tr("Launches the standalone tray icon showing pending updates "
+            "(requires libayatana-appindicator).")),
+        (tr("pachul-uninstall"),
+         tr("Removes a stray install.sh-based installation that's blocking "
+            "an AUR package install/upgrade with a \"conflicting files\" "
+            "error. Run as: sudo pachul-uninstall")),
+        (tr("pachuli"),
+         tr("Pachul's own minimal AUR helper, with a pacman/yay-style "
+            "command-line syntax (an operation letter -S/-R/-Q/-Y plus "
+            "stackable modifiers, e.g. -Ss, -Syu, -Rns). The commands "
+            "below cover every combination it supports; running "
+            "pachuli --help in a terminal prints the same reference.")),
+        (tr("pachuli <suchbegriff ...>"),
+         tr("Bare mode (like \"yay <term>\"): searches like -Ss and then "
+            "asks which numbered results to install directly, e.g. "
+            "\"1 3\", \"1-3\", \"^4\" or \"all\".")),
+        (tr("pachuli -Ss <suchbegriff>"),
+         tr("Searches both the AUR and the repositories for the given "
+            "term and lists the matches.")),
+        (tr("pachuli -S <paket ...>"),
+         tr("Installs the given package(s), building AUR packages with "
+            "makepkg as needed.")),
+        (tr("pachuli -Su [paket ...]"),
+         tr("Checks for and installs updates without refreshing the "
+            "repository database first — repo packages are upgraded from "
+            "the local cache only.")),
+        (tr("pachuli -Syu"),
+         tr("Like -Su, but also refreshes the repository database first "
+            "(only if it looks outdated).")),
+        (tr("pachuli -Syyu"),
+         tr("Like -Syu, but forces a repository database refresh even if "
+            "it looks up to date.")),
+        (tr("pachuli -Si <paket ...>"),
+         tr("Shows sync/AUR details for package(s) that aren't installed "
+            "yet.")),
+        (tr("pachuli -Sp <paket ...>"),
+         tr("Fetches and prints a package's PKGBUILD without building or "
+            "installing it.")),
+        (tr("pachuli -Sc"),
+         tr("Clears cached package files that are no longer the "
+            "currently installed version.")),
+        (tr("pachuli -Scc"),
+         tr("Clears the entire package cache, including files for "
+            "currently installed versions.")),
+        (tr("pachuli -R <paket ...>"),
+         tr("Removes the given package(s), keeping their configuration "
+            "files.")),
+        (tr("pachuli -Rns <paket ...>"),
+         tr("Removes the given package(s) together with their "
+            "configuration files.")),
+        (tr("pachuli -Qu"),
+         tr("Lists available updates as \"name old -> new\", the same "
+            "way \"yay -Qu\" does.")),
+        (tr("pachuli -Qu -q"),
+         tr("Like -Qu, but prints only the bare count — handy for status "
+            "lines or scripts.")),
+        (tr("pachuli -Qi [paket ...]"),
+         tr("Shows detailed info for installed packages, all of them if "
+            "none are named, like \"pacman -Qi\".")),
+        (tr("pachuli -Qii [paket ...]"),
+         tr("Like -Qi, but also lists backup configuration files and "
+            "whether they were modified.")),
+        (tr("pachuli -Yc"),
+         tr("Finds and removes orphaned dependencies — packages pulled "
+            "in as dependencies that nothing needs anymore, like "
+            "\"yay -Yc\".")),
+        (tr("pachuli --help"),
+         tr("Prints the full built-in command reference, including all "
+            "modifiers and options.")),
+        (tr("pachuli --version"),
+         tr("Prints the installed pachuli version.")),
     ]))
-
-    groups.append((tr("Package Lists"), [
-        (tr("Export Package List…"),
-         tr("Save the list of explicitly installed packages to a file — "
-            "handy for setting up another machine the same way.")),
-        (tr("Import Package List…"),
-         tr("Install every package from a previously exported list.")),
-    ]))
-
-    if distro.is_arch() or hold_supported or mark_supported:
-        adv_rows = []
-        if distro.is_arch():
-            adv_rows.append((tr("View PKGBUILD (AUR)…"),
-                tr("Inspect the build script of an AUR package before "
-                   "installing it.")))
-        if hold_supported:
-            adv_rows.append((tr("Hold / Unhold Selected"),
-                tr("Toggle whether the selected packages are excluded from "
-                   "updates.")))
-        if mark_supported:
-            adv_rows.append((tr("Mark Selected as Explicit / as Dependency"),
-                tr("Change how a package is tracked, so orphan-cleanup "
-                   "treats it correctly.")))
-        groups.append((tr("AUR / Advanced"), adv_rows))
 
     groups.append((tr("General"), [
-        (tr("Preferences"),
-         tr("App-wide settings: language, theme, and other options.")),
+        (tr("Help"),
+         tr(
+             "Opens this window (F1). Type in the search field at the top to"
+             " find a topic quickly.")),
         (tr("About Pachul"),
          tr("Version, license and system info for bug reports.")),
     ]))
@@ -5347,10 +6286,38 @@ def _help_function_groups(parent):
     return groups
 
 
-def show_help_dialog(parent):
+def show_startup_healthcheck_dialog(parent, findings, activate_fn, rescan_fn=None):
+    """Summary shown once, shortly after startup, when
+    backend.startup_health_checks() found something — a short list of
+    findings, each with a button that opens the existing repair/
+    diagnostic dialog that can fix it (Services & Security, one of the
+    four package-manager Repair dialogs, the Certificate Checker, or
+    Broken Symlinks). This dialog itself never runs any fix — it's
+    purely a router to tools that already exist elsewhere in the app.
+    `activate_fn` is called with the finding's "action" string (a
+    pachulWindow._on_show_* method name) when its button is clicked.
+    Deliberately stays open after that click (only its own Close button
+    or the window's own close button dismiss it) so several findings can
+    be opened one after another without having to wait for the next
+    startup — each click just relabels that row's button to "Opened" as
+    a lightweight confirmation.
+
+    The list can be refreshed in place, so a fix applied via one of those
+    tools doesn't require restarting the app to see it drop off: a
+    header-bar button lets the user re-run the checks manually, and the
+    caller can also push a fresh scan in on its own (e.g. after a repair
+    command finishes) by calling the returned `render` function with a
+    new findings list — see pachulWindow._on_done /
+    _healthcheck_render in window.py. `rescan_fn`, if given, is called
+    as rescan_fn(on_done) when the user clicks that button; it must run
+    backend.startup_health_checks() (in a background thread) and then
+    call on_done(new_findings).
+
+    Returns (dialog, render) — render(findings) rebuilds the list in
+    place; callers should stop calling it once the dialog has closed."""
     dialog = Adw.Window()
-    dialog.set_title(tr("Help"))
-    dialog.set_default_size(480, 640)
+    dialog.set_title(tr("Startup Check"))
+    dialog.set_default_size(560, 480)
     dialog.set_resizable(True)
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
@@ -5361,8 +6328,136 @@ def show_help_dialog(parent):
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_start(close_btn)
+    hdr.pack_end(close_btn)
+    refresh_btn = Gtk.Button()
+    refresh_btn.set_child(themed_image("view-refresh-symbolic", 16))
+    refresh_btn.set_tooltip_text(tr("Check again"))
+    refresh_btn.set_visible(rescan_fn is not None)
+    hdr.pack_end(refresh_btn)
     tv.add_top_bar(hdr)
+
+    content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+    content.set_margin_top(16);   content.set_margin_bottom(24)
+    content.set_margin_start(16); content.set_margin_end(16)
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_child(content)
+    tv.set_content(scroll)
+    dialog.set_content(tv)
+
+    closed = [False]
+    dialog.connect("close-request", lambda *_: closed.__setitem__(0, True) or False)
+
+    def render(items):
+        if closed[0]:
+            return
+        for child in list(content):
+            content.remove(child)
+
+        if not items:
+            status = Adw.StatusPage()
+            status.set_paintable(themed_paintable("emblem-ok-symbolic", 64))
+            status.set_title(tr("Nothing Left to Fix"))
+            status.set_description(tr(
+                "A re-check no longer finds any of the earlier issues."))
+            content.append(status)
+            content.set_valign(Gtk.Align.CENTER)
+            content.set_vexpand(True)
+            return
+        content.set_valign(Gtk.Align.FILL)
+        content.set_vexpand(False)
+
+        info = Adw.PreferencesGroup()
+        info.set_description(tr(
+            "{n} thing(s) found that a built-in tool can help with. Nothing "
+            "has been changed — pick one to open the matching tool."
+        ).format(n=len(items)) if len(items) != 1 else tr(
+            "1 thing found that a built-in tool can help with. Nothing has "
+            "been changed — open it below to fix it."))
+        content.append(info)
+
+        group = Adw.PreferencesGroup()
+        group.set_title(tr("Findings"))
+        for f in items:
+            row = Adw.ActionRow()
+            row.set_title(GLib.markup_escape_text(f["title"]))
+            if f.get("detail"):
+                row.set_subtitle(GLib.markup_escape_text(f["detail"]))
+                row.set_subtitle_lines(0)
+            btn = Gtk.Button(label=tr("Open"))
+            btn.add_css_class("suggested-action")
+            btn.set_valign(Gtk.Align.CENTER)
+
+            def _open(_btn, action=f["action"], button=btn):
+                activate_fn(action)
+                # Stays open (see docstring) — just gives a small
+                # confirmation that this row's tool was launched, so
+                # re-clicking the same row by mistake is obvious rather
+                # than silently reopening it.
+                button.set_label(tr("Opened"))
+                button.remove_css_class("suggested-action")
+            btn.connect("clicked", _open)
+            row.add_suffix(btn)
+            group.add(row)
+        content.append(group)
+
+        hint = Gtk.Label(label=tr(
+            "You can turn this check off anytime in Preferences → Behaviour."))
+        hint.add_css_class("dim-label")
+        hint.set_wrap(True)
+        hint.set_xalign(0)
+        content.append(hint)
+
+    def _on_refresh_clicked(*_):
+        if rescan_fn is None:
+            return
+        refresh_btn.set_sensitive(False)
+
+        def _done(new_findings):
+            refresh_btn.set_sensitive(True)
+            render(new_findings)
+        rescan_fn(_done)
+    refresh_btn.connect("clicked", _on_refresh_clicked)
+
+    render(findings)
+    dialog.present()
+    return dialog, render
+
+
+def show_help_dialog(parent):
+    dialog = Adw.Window()
+    dialog.set_title(tr("Help"))
+    # As tall as, and almost as wide as, the main window's startup size
+    # (1240x780, see set_default_size() in window.py) rather than a small
+    # fixed guess — falls back to that same startup size if the main
+    # window hasn't been allocated a size yet for some reason.
+    main_win_width  = parent.get_width()  or 1240
+    main_win_height = parent.get_height() or 780
+    dialog.set_default_size(max(480, main_win_width - 100), max(640, main_win_height))
+    dialog.set_resizable(True)
+    dialog.set_transient_for(parent)
+    dialog.set_modal(True)
+
+    tv  = Adw.ToolbarView()
+    hdr = Adw.HeaderBar()
+    hdr.set_show_end_title_buttons(False)
+    close_btn = Gtk.Button(label=tr("Close"))
+    close_btn.add_css_class("flat")
+    close_btn.connect("clicked", lambda *_: dialog.close())
+    hdr.pack_end(close_btn)
+    tv.add_top_bar(hdr)
+
+    # Search field: the help is long now, so let people jump to a topic.
+    search = Gtk.SearchEntry()
+    search.set_placeholder_text(tr("Search help…"))
+    search.set_hexpand(True)
+    search_box = Gtk.Box()
+    search_box.set_margin_start(12); search_box.set_margin_end(12)
+    search_box.set_margin_top(6);    search_box.set_margin_bottom(6)
+    search_box.append(search)
+    tv.add_top_bar(search_box)
 
     scroll = Gtk.ScrolledWindow()
     scroll.set_vexpand(True)
@@ -5372,7 +6467,10 @@ def show_help_dialog(parent):
     outer.set_margin_top(12);   outer.set_margin_bottom(24)
     outer.set_margin_start(16); outer.set_margin_end(16)
 
-    # ── Functions, grouped exactly like the app menu ──
+    # (group_widget, [(row, haystack), …]) — kept for live filtering
+    help_groups = []
+
+    # ── Functions, grouped like the Packages / Tools hubs ──
     for title, rows in _help_function_groups(parent):
         if not rows:
             continue
@@ -5382,6 +6480,7 @@ def show_help_dialog(parent):
         # otherwise crash ("Failed to set text ... from markup") — escape
         # everything here defensively.
         group.set_title(GLib.markup_escape_text(title))
+        entries = []
         for name, desc in rows:
             row = Adw.ActionRow()
             row.set_title(GLib.markup_escape_text(name))
@@ -5389,11 +6488,15 @@ def show_help_dialog(parent):
             row.set_subtitle_lines(0)
             row.add_css_class("help-row")
             group.add(row)
+            entries.append((row, f"{name} {desc} {title}".casefold()))
+        help_groups.append((group, entries))
         outer.append(group)
 
     # ── Keyboard shortcuts, all in one place ──
     kb_group = Adw.PreferencesGroup()
-    kb_group.set_title(tr("Keyboard Shortcuts"))
+    kb_title = tr("Keyboard Shortcuts")
+    kb_group.set_title(kb_title)
+    kb_entries = []
     for keys, desc in _shortcuts_list():
         row = Adw.ActionRow()
         row.set_title(GLib.markup_escape_text(desc))
@@ -5402,10 +6505,33 @@ def show_help_dialog(parent):
         kbd.set_valign(Gtk.Align.CENTER)
         row.add_suffix(kbd)
         kb_group.add(row)
+        kb_entries.append((row, f"{desc} {keys} {kb_title}".casefold()))
+    help_groups.append((kb_group, kb_entries))
     outer.append(kb_group)
+
+    empty = Adw.StatusPage()
+    empty.set_icon_name("system-search-symbolic")
+    empty.set_title(tr("No matching help topics"))
+    empty.set_description(tr("Try a different search term."))
+    empty.set_visible(False)
+    outer.append(empty)
+
+    def _filter(*_):
+        q = search.get_text().strip().casefold()
+        any_visible = False
+        for group, entries in help_groups:
+            shown = 0
+            for row, hay in entries:
+                vis = (not q) or all(w in hay for w in q.split())
+                row.set_visible(vis)
+                shown += vis
+            group.set_visible(shown > 0)
+            any_visible = any_visible or shown > 0
+        empty.set_visible(not any_visible)
+
+    search.connect("search-changed", _filter)
 
     scroll.set_child(outer)
     tv.set_content(scroll)
     dialog.set_content(tv)
     dialog.present()
-

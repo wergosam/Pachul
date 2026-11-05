@@ -30,8 +30,8 @@ DESKTOP_FILE="${DESKTOP_DIR}/${ICON_ID}.desktop"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Application Python modules (relative to SRC_DIR)
-PY_MODULES=(app.py backend.py dialogs.py distro.py i18n.py icons.py models.py
-            pkgmanager.py pkgmanager_native.py styles.py window.py notifier.py tray.py)
+PY_MODULES=(app.py backend.py dialogs.py distro.py i18n.py icons.py localpkg.py models.py
+            pkgmanager.py pkgmanager_native.py styles.py toolshub.py window.py notifier.py tray.py)
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 echo -e "

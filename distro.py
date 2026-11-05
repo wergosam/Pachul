@@ -131,6 +131,14 @@ def is_suse():
     return get_family() == "suse"
 
 
+def is_manjaro():
+    """True on Manjaro (ID=manjaro). Manjaro has its own repositories and
+    mirror network, so Arch mirror lists must never be written there."""
+    data = _read_os_release()
+    ids = [data.get("ID", "")] + data.get("ID_LIKE", "").split()
+    return any(i.lower() == "manjaro" for i in ids)
+
+
 def is_rpm_based():
     """Fedora and openSUSE both use rpm/dnf-style low-level tooling
     (rpm -qi/-ql/--requires/... all work identically on both), so a lot

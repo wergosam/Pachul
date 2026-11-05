@@ -39,8 +39,9 @@ SYNCDB_CACHE   = CACHE_DIR / "syncdb.json"
 INSTALLED_CACHE= CACHE_DIR / "installed.json"
 FLATPAK_REMOTE_CACHE = CACHE_DIR / "flatpak_remote.json"
 AUR_NAMES_CACHE = CACHE_DIR / "aur_names.json"
+AUR_META_CACHE = CACHE_DIR / "aur_meta.json"   # name -> [version, description]
 SNAP_CATALOG_CACHE = CACHE_DIR / "snap_catalog.json"
-APP_VERSION    = "2.2.10"   # shown in the About dialog — bump on every release
+APP_VERSION    = "2.3.1"   # shown in the About dialog — bump on every release
 CACHE_VERSION  = 4   # bump when the cached package schema changes, to force a rebuild
 SYNCDB_TTL     = 6 * 3600   # 6 hours
 FLATPAK_REMOTE_TTL = 6 * 3600   # same cadence as pacman's syncdb
@@ -49,6 +50,7 @@ FLATPAK_REMOTE_TTL = 6 * 3600   # same cadence as pacman's syncdb
 # AUR explicitly asks bulk consumers of this dump not to poll it more often
 # than once every 24h.
 AUR_NAMES_TTL = 24 * 3600
+AUR_META_TTL = 24 * 3600   # same cadence — one ~10 MB download per day at most
 SNAP_CATALOG_TTL = 6 * 3600   # same cadence as the Flatpak remote catalog
 
 def _ensure_cache_dir():
@@ -87,6 +89,11 @@ _DEFAULT_SETTINGS = {
     "flatpak_enabled":          False,    # off by default — opt-in extra package source
     "snap_enabled":             False,    # off by default — opt-in extra package source
     "auto_update_tool_ids":     [],       # ids of "More Update Sources" tools to run with every normal upgrade
+    "startup_healthcheck_enabled": True,  # scan for fixable problems (failed services, no firewall, etc.) on launch
+    "color_scheme":             "system", # system | light | dark  (Appearance in the main menu)
+    "pkg_sort_key":             "name",   # name | repo | status  (package list sort order)
+    "pkg_sort_desc":            False,    # True = descending order
+    "makepkg_pkexec_attempts":  0,        # automatic PACMAN_AUTH=pkexec setup attempts (max 3)
 }
 _settings_cache = None
 
@@ -344,6 +351,21 @@ def makepkg_pkexec_configured():
         if stripped.startswith("PACMAN_AUTH=") and "pkexec" in stripped:
             return True
     return False
+
+
+def makepkg_auth_needs_setup():
+    """True only if /etc/makepkg.conf has NO active PACMAN_AUTH line at all
+    (i.e. makepkg still uses its default, plain sudo). An active line that
+    already names pkexec is done; one naming something else (doas, su, …) is
+    the user's own deliberate choice and is never overwritten."""
+    try:
+        content = Path(MAKEPKG_CONF_PATH).read_text()
+    except OSError:
+        return False
+    for line in content.splitlines():
+        if line.strip().startswith("PACMAN_AUTH="):
+            return False
+    return True
 
 
 def get_makepkg_pkexec_cmd():
@@ -864,6 +886,121 @@ def _load_aur_names_cache():
     return None
 
 
+def load_aur_meta_cache(ignore_ttl=False):
+    """Return the cached AUR {name: [version, description]} map, or None.
+    With ignore_ttl=True a stale cache is still returned (better a version
+    that is a few days old than none at all while a refresh is pending)."""
+    if ignore_ttl or _file_age(AUR_META_CACHE) < AUR_META_TTL:
+        data = _read_json(AUR_META_CACHE)
+        if isinstance(data, dict) and data:
+            return data
+    return None
+
+
+def aur_meta_is_fresh():
+    return load_aur_meta_cache() is not None
+
+
+def refresh_aur_meta():
+    """Download the AUR's packages-meta-v1.json.gz (every package with its
+    current version and description) and cache a compact name -> [version,
+    description] map. This is what lets not-yet-installed AUR packages show
+    a version number without one RPC request per package.
+
+    The dump is a single JSON array of ~100k+ objects (far too big to
+    json.loads in one go on a desktop), so it is decompressed and decoded
+    one object at a time from a stream — memory stays proportional to the
+    small result map, not to the dump.
+
+    Best-effort: returns None on any failure (offline, AUR unreachable,
+    malformed data) and keeps whatever cache already exists."""
+    import zlib
+    import urllib.request
+    import urllib.error
+    try:
+        req = urllib.request.Request(
+            "https://aur.archlinux.org/packages-meta-v1.json.gz",
+            headers={"User-Agent": "Pachul"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            meta = _parse_aur_meta_stream(iter(lambda: resp.read(1 << 16), b""))
+    except (urllib.error.URLError, OSError, EOFError, zlib.error, ValueError):
+        return None
+    if not meta:
+        return None
+    _write_json(AUR_META_CACHE, meta)
+    return meta
+
+
+def _parse_aur_meta_stream(chunks):
+    """Incrementally decode a gzip'd JSON array of AUR package objects
+    (an iterable of byte chunks) into {name: [version, description]}."""
+    import zlib
+    dec = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    jd = json.JSONDecoder()
+    meta = {}
+    buf = ""
+    started = False
+    pending = b""   # incomplete multi-byte UTF-8 tail between chunks
+
+    def drain(buf):
+        i, n = 0, len(buf)
+        while True:
+            while i < n and buf[i] in " \t\r\n,":
+                i += 1
+            if i >= n or buf[i] == "]":
+                return buf[i:] if i < n else "", i >= n or buf[i] == "]"
+            try:
+                obj, end = jd.raw_decode(buf, i)
+            except ValueError:
+                return buf[i:], False     # object not complete yet
+            if isinstance(obj, dict) and obj.get("Name"):
+                meta[obj["Name"]] = [obj.get("Version") or "",
+                                     obj.get("Description") or ""]
+            i = end
+
+    for chunk in chunks:
+        raw = pending + dec.decompress(chunk)
+        try:
+            text = raw.decode("utf-8")
+            pending = b""
+        except UnicodeDecodeError as e:
+            text = raw[:e.start].decode("utf-8", errors="replace")
+            pending = raw[e.start:]
+        buf += text
+        if not started:
+            buf = buf.lstrip()
+            if not buf:
+                continue
+            if buf[0] != "[":
+                raise ValueError("unexpected AUR meta format")
+            buf = buf[1:]
+            started = True
+        buf, _done = drain(buf)
+    tail = dec.flush()
+    if tail:
+        buf += (pending + tail).decode("utf-8", errors="replace")
+        drain(buf)
+    return meta
+
+
+def apply_aur_meta(packages, meta):
+    """Fill version (and a blank description) of available-but-not-installed
+    AUR entries from `meta`, in place. Installed/update entries keep their
+    real local version. Returns how many entries were touched."""
+    if not meta:
+        return 0
+    n = 0
+    for p in packages:
+        if p.get("repo") == "aur" and p.get("status") == "available":
+            m = meta.get(p["name"])
+            if m:
+                p["version"] = m[0]
+                if not p.get("description"):
+                    p["description"] = m[1]
+                n += 1
+    return n
+
+
 def _build_aur_names_index():
     """Every package name currently in the AUR (tens of thousands), fetched
     from the AUR's own packages.gz dump — a plain, one-name-per-line list
@@ -1029,6 +1166,13 @@ def get_packages():
     # *installed* set (`flatpak list`, `snap list` are both cheap) — Flatpak's
     # available-package catalog is itself cached separately, with its own TTL
     # (see _load_flatpak_remote_cache()), since that one genuinely isn't cheap.
+    # Versions for not-yet-installed AUR packages come from a separate daily
+    # cache (never stored inside packages.json, which only rebuilds when the
+    # installed set changes and would freeze them). A stale map is still
+    # used here; the window refreshes it in the background when it's old.
+    if distro.is_arch():
+        apply_aur_meta(packages, load_aur_meta_cache(ignore_ttl=True))
+
     return packages + get_flatpak_packages() + get_snap_packages()
 
 
@@ -1192,11 +1336,13 @@ def check_updates():
         out, code = run_command("checkupdates 2>/dev/null || pacman -Qu 2>/dev/null", timeout=60)
         if out and code == 0:
             for line in out.splitlines():
+                if "[ignored]" in line or "(ignored)" in line:
+                    continue
                 parts = line.strip().split()
                 if len(parts) >= 4:
                     results.append({"name": parts[0], "old": parts[1],
                                     "new": parts[3], "aur": False})
-        return results
+        return filter_ignored_updates(results)
 
     def _aur_check():
         helper = _find_aur_helper()
@@ -1207,11 +1353,13 @@ def check_updates():
         aout, acode = run_command(aur_cmd, timeout=90)
         if aout and acode == 0:
             for line in _strip_ansi(aout).splitlines():
+                if "[ignored]" in line or "(ignored)" in line:
+                    continue
                 parts = line.strip().split()
                 if len(parts) >= 4:
                     results.append({"name": parts[0], "old": parts[1],
                                     "new": parts[3], "aur": True})
-        return results
+        return filter_ignored_updates(results)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(fn) for fn in
@@ -2556,115 +2704,101 @@ def chaotic_aur_configured():
     return bool(re.search(r"^\[chaotic-aur\]", content, re.MULTILINE))
 
 
+def _conf_directive_values(lines, key):
+    """Alle Werte einer pacman.conf-Direktive (z.B. IgnorePkg) aus ALLEN
+    passenden, nicht auskommentierten Zeilen. Inline-Kommentare
+    ("IgnorePkg = foo # Grund") werden abgeschnitten. Gibt
+    (Zeilenindizes, Menge der Werte) zurück."""
+    pat = re.compile(r"^" + re.escape(key) + r"\s*=(.*)$")
+    idxs, values = [], set()
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        m = pat.match(s)
+        if not m:
+            continue
+        idxs.append(i)
+        values.update(m.group(1).split("#", 1)[0].split())
+    return idxs, values
+
+
 def get_ignored_packages():
     """Set of packages currently held back from upgrades — via IgnorePkg
     in pacman.conf on Arch, or the matching native hold/lock mechanism
     on apt/openSUSE (dnf has no reliable built-in equivalent)."""
     if not distro.is_arch():
         return pkgmanager.get_held_packages()
-    ignored = set()
     try:
-        for line in PACMAN_CONF.read_text(errors="replace").splitlines():
-            s = line.strip()
-            if s.startswith("#") or not s.startswith("IgnorePkg"):
-                continue
-            _, _, val = s.partition("=")
-            ignored.update(val.split())
+        lines = PACMAN_CONF.read_text(errors="replace").splitlines()
+    except Exception:
+        return set()
+    return _conf_directive_values(lines, "IgnorePkg")[1]
+
+
+def _pacman_conf_list(key):
+    """Werte einer pacman.conf-Direktive über `pacman-conf` (löst auch
+    Include-Dateien und mehrere Zeilen korrekt auf). Leere Liste, wenn
+    pacman-conf nicht verfügbar ist."""
+    if not shutil.which("pacman-conf"):
+        return []
+    out, code = run_command(f"pacman-conf {shlex.quote(key)} 2>/dev/null", timeout=10)
+    if code != 0 or not out:
+        return []
+    return [x.strip() for x in out.splitlines() if x.strip()]
+
+
+def _ignore_patterns():
+    """(Muster, Gruppen) aus IgnorePkg / IgnoreGroup. Quelle: pacman-conf
+    plus direktes Lesen von /etc/pacman.conf als Rückfall. Muster dürfen
+    Wildcards enthalten (wie bei pacman selbst)."""
+    pats = set(_pacman_conf_list("IgnorePkg"))
+    groups = set(_pacman_conf_list("IgnoreGroup"))
+    try:
+        lines = PACMAN_CONF.read_text(errors="replace").splitlines()
+        pats |= _conf_directive_values(lines, "IgnorePkg")[1]
+        groups |= _conf_directive_values(lines, "IgnoreGroup")[1]
     except Exception:
         pass
-    return ignored
+    return pats, groups
 
 
-def set_package_ignored(pkg_name, ignore):
-    """Compute a pacman.conf with pkg_name added to / removed from IgnorePkg and
-    write it to a temp file. Returns the temp path, or None if no change is needed.
-
-    The editing happens here in Python (safe); the caller just needs to copy the
-    temp file over /etc/pacman.conf with root privileges.
-    """
-    try:
-        lines = PACMAN_CONF.read_text().splitlines()
-    except Exception:
-        return None
-
-    idx, current = None, set()
-    for i, line in enumerate(lines):
-        s = line.strip()
-        if s.startswith("#"):
-            continue
-        if s.startswith("IgnorePkg"):
-            idx = i
-            _, _, val = s.partition("=")
-            current = set(val.split())
-            break
-
-    if ignore:
-        if pkg_name in current:
-            return None
-        current.add(pkg_name)
-        new_line = "IgnorePkg = " + " ".join(sorted(current))
-        if idx is not None:
-            lines[idx] = new_line
-        else:
-            for i, line in enumerate(lines):
-                if line.strip() == "[options]":
-                    lines.insert(i + 1, new_line)
-                    break
-            else:
-                lines.append(new_line)
-    else:
-        if pkg_name not in current:
-            return None
-        current.discard(pkg_name)
-        if idx is not None:
-            if current:
-                lines[idx] = "IgnorePkg = " + " ".join(sorted(current))
-            else:
-                del lines[idx]
-
-    import tempfile
-    fd, tmp = tempfile.mkstemp(prefix="pachul-pacman-conf-", suffix=".conf")
-    with os.fdopen(fd, "w") as f:
-        f.write("\n".join(lines) + "\n")
-    return tmp
+def filter_ignored_updates(updates):
+    """Entfernt Pakete, die pacman per IgnorePkg / IgnoreGroup von
+    Upgrades ausschliesst, aus einer Update-Liste. `checkupdates` und
+    `pacman -Qu` listen solche Pakete trotzdem auf (nur mit dem Zusatz
+    "[ignored]"), ein AUR-Helper je nach Version ebenfalls — ohne diesen
+    Filter würden sie in pachul als Update erscheinen, obwohl ein
+    System-Upgrade sie überspringt. Nur für Arch relevant."""
+    if not updates or not distro.is_arch():
+        return updates
+    import fnmatch
+    pats, groups = _ignore_patterns()
+    for g in groups:
+        out, code = run_command(f"pacman -Sgq {shlex.quote(g)} 2>/dev/null", timeout=15)
+        if code == 0 and out:
+            pats.update(x.strip() for x in out.splitlines() if x.strip())
+    if not pats:
+        return updates
+    return [u for u in updates
+            if not any(fnmatch.fnmatchcase(u["name"], p) for p in pats)]
 
 
-def set_packages_ignored(pkg_names, ignore):
-    """Batch version of set_package_ignored: adds/removes several package
-    names to/from IgnorePkg in a single pass, returning one temp file to
-    install. Returns None if none of the requested names actually needed
-    a change (all already in the requested state)."""
-    try:
-        lines = PACMAN_CONF.read_text().splitlines()
-    except Exception:
-        return None
-
-    idx, current = None, set()
-    for i, line in enumerate(lines):
-        s = line.strip()
-        if s.startswith("#"):
-            continue
-        if s.startswith("IgnorePkg"):
-            idx = i
-            _, _, val = s.partition("=")
-            current = set(val.split())
-            break
-
-    names = set(pkg_names)
-    if ignore:
-        changed = bool(names - current)
-        current |= names
-    else:
-        changed = bool(names & current)
-        current -= names
-    if not changed:
-        return None
-
-    if idx is not None:
+def _write_ignorepkg(lines, idxs, current):
+    """Schreibt die IgnorePkg-Werte `current` zurück in `lines`: Die erste
+    vorhandene IgnorePkg-Zeile wird aktualisiert, weitere (doppelte)
+    IgnorePkg-Zeilen werden entfernt — ihre Werte sind in `current`
+    bereits enthalten. Ist `current` leer, werden alle Zeilen entfernt.
+    Existiert noch keine Zeile, wird sie unter [options] eingefügt.
+    Gibt den Pfad einer Temp-Datei mit dem neuen Inhalt zurück."""
+    if idxs:
         if current:
-            lines[idx] = "IgnorePkg = " + " ".join(sorted(current))
+            lines[idxs[0]] = "IgnorePkg = " + " ".join(sorted(current))
+            drop = idxs[1:]
         else:
-            del lines[idx]
+            drop = idxs
+        for i in sorted(drop, reverse=True):
+            del lines[i]
     elif current:
         new_line = "IgnorePkg = " + " ".join(sorted(current))
         for i, line in enumerate(lines):
@@ -2679,6 +2813,42 @@ def set_packages_ignored(pkg_names, ignore):
     with os.fdopen(fd, "w") as f:
         f.write("\n".join(lines) + "\n")
     return tmp
+
+
+def set_package_ignored(pkg_name, ignore):
+    """Compute a pacman.conf with pkg_name added to / removed from IgnorePkg and
+    write it to a temp file. Returns the temp path, or None if no change is needed.
+
+    The editing happens here in Python (safe); the caller just needs to copy the
+    temp file over /etc/pacman.conf with root privileges.
+    """
+    return set_packages_ignored([pkg_name], ignore)
+
+
+def set_packages_ignored(pkg_names, ignore):
+    """Batch version of set_package_ignored: adds/removes several package
+    names to/from IgnorePkg in a single pass, returning one temp file to
+    install. Returns None if none of the requested names actually needed
+    a change (all already in the requested state). Berücksichtigt alle
+    IgnorePkg-Zeilen der Datei (auch von Hand ergänzte)."""
+    try:
+        lines = PACMAN_CONF.read_text().splitlines()
+    except Exception:
+        return None
+
+    idxs, current = _conf_directive_values(lines, "IgnorePkg")
+
+    names = set(pkg_names)
+    if ignore:
+        changed = bool(names - current)
+        current |= names
+    else:
+        changed = bool(names & current)
+        current -= names
+    if not changed:
+        return None
+
+    return _write_ignorepkg(lines, idxs, current)
 
 
 def build_hold_cmd(pkg_name, hold):
@@ -2707,18 +2877,103 @@ def build_hold_cmd_bulk(pkg_names, hold):
     return f"pkexec /usr/bin/install -m644 {shlex.quote(tmp)} /etc/pacman.conf"
 
 
+ARCH_ARCHIVE_URL = "https://archive.archlinux.org/packages"
+
+
+def get_arch_archive_versions(pkg_name, timeout=15):
+    """Alle im Arch Linux Archive abgelegten Versionen von pkg_name als
+    [{"version","source","kind":"url","date"}, ...], neueste zuerst.
+    Leere Liste bei Netzwerkfehler oder wenn das Paket dort nicht
+    existiert (z.B. AUR-Pakete). Blockiert bis zum Timeout — nicht im
+    GTK-Hauptthread aufrufen."""
+    import urllib.request
+    from datetime import datetime
+    if not pkg_name:
+        return []
+    dir_url = f"{ARCH_ARCHIVE_URL}/{pkg_name[0]}/{pkg_name}/"
+    try:
+        req = urllib.request.Request(dir_url, headers={"User-Agent": "Pachul"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            html = r.read().decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    # Zeile: <a href="NAME-VER-REL-ARCH.pkg.tar.zst">…</a>   03-Oct-2024 12:34  size
+    row_re = re.compile(
+        r'<a href="(?P<file>[^"/]+\.pkg\.tar\.(?:zst|xz))"[^>]*>[^<]*</a>'
+        r'\s+(?P<date>\d{2}-\w{3}-\d{4} \d{2}:\d{2})')
+    found = {}
+    for m in row_re.finditer(html):
+        fname = m.group("file")
+        stem = re.sub(r"\.pkg\.tar\.\w+$", "", fname)
+        parts = stem.rsplit("-", 3)       # name-ver-rel-arch
+        if len(parts) != 4 or parts[0] != pkg_name:
+            continue
+        try:
+            ts = datetime.strptime(m.group("date"), "%d-%b-%Y %H:%M")
+        except ValueError:
+            ts = datetime.min
+        version = f"{parts[1]}-{parts[2]}"
+        if version not in found or ts > found[version][0]:
+            found[version] = (ts, fname)
+    out = [{"version": v, "source": f"{dir_url}{fname}", "kind": "url", "date": ts}
+           for v, (ts, fname) in found.items()]
+    out.sort(key=lambda c: c["date"], reverse=True)
+    return out
+
+
+def _installed_version_arch(pkg_name):
+    out, code = run_command(f"pacman -Q {shlex.quote(pkg_name)} 2>/dev/null", timeout=5)
+    if code == 0 and out.strip():
+        parts = out.strip().split()
+        if len(parts) >= 2:
+            return parts[1]
+    return None
+
+
+def is_foreign_package(pkg_name):
+    """True, wenn das installierte Paket nicht aus einem Sync-Repository
+    stammt (auf Arch: AUR bzw. selbst gebaut, `pacman -Qm`). Auf anderen
+    Distros immer False."""
+    if not distro.is_arch():
+        return False
+    out, code = run_command("pacman -Qqm 2>/dev/null", timeout=10)
+    return code == 0 and pkg_name in out.split()
+
+
 def get_downgrade_candidates(pkg_name):
-    """Older versions of pkg_name available to install instead of the
-    current one, as [{"version","source","kind"}, ...] — "kind" is "file"
-    (a real cached package file) or "repo" (the package manager can still
-    resolve that exact build itself, no local file needed). Distro-
-    agnostic wrapper: Arch uses the local pacman cache (see
-    get_cached_versions() below); everything else goes through
-    pkgmanager.get_downgrade_candidates()."""
+    """Andere Versionen von pkg_name, die statt der aktuellen installiert
+    werden können, als [{"version","source","kind"}, ...] — "kind" ist
+    "file" (echte Datei im Cache), "url" (Arch Linux Archive, pacman lädt
+    sie selbst) oder "repo" (der Paketmanager löst genau diesen Build selbst
+    auf). Die installierte Version ist mit "installed": True markiert.
+    Reihenfolge: neueste zuerst. Auf Arch wird zusätzlich zum lokalen
+    Paketcache das Arch Linux Archive abgefragt (Netzwerkzugriff; nicht im
+    GTK-Hauptthread aufrufen). Andere Distros: pkgmanager.get_downgrade_candidates()."""
     if not distro.is_arch():
         return pkgmanager.get_downgrade_candidates(pkg_name)
-    return [{"version": v, "source": fp, "kind": "file"}
-            for v, fp in get_cached_versions(pkg_name)]
+    cached = {v: fp for v, fp in get_cached_versions(pkg_name)}
+    for v, fp in get_aur_built_versions(pkg_name):
+        cached.setdefault(v, fp)
+    installed = _installed_version_arch(pkg_name)
+    result, seen = [], set()
+    for c in get_arch_archive_versions(pkg_name):
+        v = c["version"]
+        if v in cached:                    # lokale Datei bevorzugen (kein Download)
+            c = {"version": v, "source": cached[v], "kind": "file"}
+        c["installed"] = (v == installed)
+        result.append(c)
+        seen.add(v)
+    # Nur im Cache vorhandene Versionen (z.B. AUR-Pakete oder offline)
+    for v, fp in cached.items():
+        if v not in seen:
+            result.append({"version": v, "source": fp, "kind": "file",
+                           "installed": (v == installed)})
+    # Die installierte Version immer anzeigen — auch wenn sie weder im
+    # Archiv noch im Cache liegt (typisch für AUR-Pakete).
+    if installed and installed not in seen and installed not in cached:
+        result.insert(0, {"version": installed, "source": "", "kind": "installed",
+                          "installed": True})
+    return result
 
 
 def build_downgrade_cmd(pkg_name, candidate):
@@ -2727,6 +2982,37 @@ def build_downgrade_cmd(pkg_name, candidate):
     if not distro.is_arch():
         return pkgmanager.downgrade_cmd(pkg_name, candidate)
     return f"pkexec /usr/bin/pacman -U --noconfirm {shlex.quote(candidate['source'])}"
+
+
+def get_aur_built_versions(pkg_name):
+    """[(version, filepath), …] bereits gebauter Pakete aus den Build-Caches
+    der AUR-Helfer (yay, paru, pikaur, pachuli) — AUR-Pakete landen nicht
+    im pacman-Cache. Neueste zuerst (nach Änderungszeit)."""
+    home = Path.home()
+    roots = [home / ".cache" / "yay" / pkg_name,
+             home / ".cache" / "paru" / "clone" / pkg_name,
+             home / ".cache" / "pikaur" / "pkg",
+             home / ".cache" / "pachuli" / "builds"]
+    pkgdest = os.environ.get("PKGDEST")
+    if pkgdest:
+        roots.append(Path(pkgdest))
+    results = {}
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+            for f in root.rglob(f"{pkg_name}-*.pkg.tar.*"):
+                if f.name.endswith(".sig"):
+                    continue
+                stem = re.sub(r"\.pkg\.tar\.\w+$", "", f.name)
+                parts = stem.rsplit("-", 3)
+                if len(parts) == 4 and parts[0] == pkg_name:
+                    results.setdefault(f"{parts[1]}-{parts[2]}", str(f))
+        except Exception:
+            continue
+    return sorted(results.items(),
+                  key=lambda vf: os.path.getmtime(vf[1]) if os.path.exists(vf[1]) else 0,
+                  reverse=True)
 
 
 def get_cached_versions(pkg_name):
@@ -3208,6 +3494,172 @@ def withdraw_notification(notif_id):
         "--object-path /org/freedesktop/Notifications "
         "--method org.freedesktop.Notifications.CloseNotification "
         f"{int(notif_id)}")
+
+
+def startup_health_checks():
+    """A handful of fast, strictly read-only, no-root checks for common
+    fixable problems, run once in the background shortly after the main
+    window opens (see pachulWindow._bg_startup_health_check). Every check
+    here uses only commands the repair/diagnostic dialogs already treat
+    as safe (systemctl --failed, pacman -Dk, dpkg -l, dnf check, the
+    Broken Symlinks scan, the Certificate Checker's local scan) — this
+    function does not add any new kind of system probing, it just runs a
+    curated subset of the existing ones automatically and reports what
+    it found. Nothing here ever needs a password: findings only point at
+    which already-existing dialog can fix the problem, they don't fix it
+    themselves. Returns a list of dicts, each
+    {"title": str, "detail": str, "action": <attribute name of a
+    pachulWindow._on_show_* method>}, or an empty list if nothing was
+    found (including if a check itself failed or timed out — a check
+    that can't complete is skipped silently rather than reported as a
+    problem). Includes a best-effort heuristic check for openSUSE
+    ('zypper verify --dry-run --no-refresh'): unlike pacman -Dk/dnf
+    check/dpkg -l, zypper's dry-run output isn't a clean "found a
+    problem" signal on every version/locale, so this only looks for the
+    literal "Nothing to do" (no issue) vs. any other non-empty output
+    (possible issue) and labels the finding as a heuristic — it can
+    occasionally be wrong in either direction, which the other, more
+    reliable checks in this function are not."""
+    from i18n import tr   # local import: avoids a circular import with i18n.py
+    findings = []
+
+    def _add(title, detail, action):
+        findings.append({"title": title, "detail": detail, "action": action})
+
+    # ── Failed systemd services (all distros) ──
+    out, _ = run_command("systemctl --failed --no-legend --plain --no-pager 2>/dev/null", timeout=6)
+    failed = [l for l in out.splitlines() if l.strip()]
+    if failed:
+        names = [l.split()[0] for l in failed if l.split()]
+        _add(
+            tr("{n} systemd service(s) failed").format(n=len(failed)),
+            ", ".join(names[:5]) + ("…" if len(names) > 5 else ""),
+            "_on_show_services_security",
+        )
+
+    # ── SSH root login enabled (all distros) ──
+    out, _ = run_command(
+        '[ -r /etc/ssh/sshd_config ] && '
+        'grep -qE "^PermitRootLogin\\s+yes" /etc/ssh/sshd_config && echo yes',
+        timeout=4)
+    if out.strip() == "yes":
+        _add(
+            tr("SSH allows direct root login"),
+            tr("PermitRootLogin yes is set in /etc/ssh/sshd_config."),
+            "_on_show_services_security",
+        )
+
+    # ── No active firewall (all distros) ──
+    _, ufw_active_code = run_command("systemctl is-active --quiet ufw 2>/dev/null", timeout=4)
+    _, firewalld_active_code = run_command("systemctl is-active --quiet firewalld 2>/dev/null", timeout=4)
+    if ufw_active_code != 0 and firewalld_active_code != 0:
+        _add(
+            tr("No active firewall detected"),
+            tr("Neither UFW nor firewalld is currently active."),
+            "_on_show_services_security",
+        )
+
+    # ── Package database / consistency (distro-specific) ──
+    fam = pkgmanager.get_family()
+    if fam == "arch":
+        if os.path.exists("/var/lib/pacman/db.lck"):
+            _add(
+                tr("Pacman database is locked (stale db.lck)"),
+                tr("A leftover db.lck is blocking every pacman operation."),
+                "_on_show_pacman_repair",
+            )
+        # pacman -Dk prints "No database errors have been found!" on
+        # success — NOT empty output — so a plain "is there any output"
+        # check always misfires. Only non-empty output that doesn't
+        # match that success message is an actual finding.
+        out, _ = run_command("pacman -Dk 2>/dev/null", timeout=8)
+        stripped = out.strip()
+        if stripped and "no database errors" not in stripped.lower():
+            _add(
+                tr("Pacman database consistency issues found"),
+                stripped.splitlines()[0],
+                "_on_show_pacman_repair",
+            )
+    elif fam == "debian":
+        out, _ = run_command("dpkg -l 2>/dev/null | grep -E '^..r'", timeout=8)
+        broken = [l for l in out.splitlines() if l.strip()]
+        if broken:
+            _add(
+                tr("{n} broken/incomplete package(s) (dpkg)").format(n=len(broken)),
+                broken[0].strip(),
+                "_on_show_apt_repair",
+            )
+    elif fam == "fedora":
+        out, code = run_command("dnf check 2>/dev/null", timeout=15)
+        if code != 0 and out.strip():
+            _add(
+                tr("dnf check reports package problems"),
+                out.strip().splitlines()[0],
+                "_on_show_dnf_repair",
+            )
+    elif fam == "suse":
+        # Heuristic, unlike the three checks above: --no-refresh keeps
+        # this from hitting the network/repos (faster, safer for an
+        # automatic background check, but can miss fixes only a fresh
+        # repo refresh would reveal), and "Nothing to do" is the only
+        # normal-case output this reliably recognizes across zypper
+        # versions/locales — anything else non-empty is reported as a
+        # *possible* issue, not a confirmed one. Locked/permission
+        # errors (e.g. another zypper already running) are treated as a
+        # failed check and skipped silently, same as every other check
+        # here.
+        out, code = run_command(
+            "zypper --non-interactive --no-refresh verify --dry-run 2>&1", timeout=15)
+        low = out.lower()
+        _skip_markers = ("system management is locked", "unable to lock",
+                          "permission denied", "no repositories")
+        if out.strip() and "nothing to do" not in low \
+                and not any(m in low for m in _skip_markers):
+            _add(
+                tr("zypper verify suggests possible package problems (heuristic — please double-check)"),
+                out.strip().splitlines()[0],
+                "_on_show_zypper_repair",
+            )
+
+    # ── Expired local certificates (all distros) ──
+    # `openssl x509 -checkend` always prints its own verdict text
+    # ("Certificate will (not) expire") to stdout regardless of -noout
+    # or the exit code, so that stdout has to be silenced too (not just
+    # stderr) or every single certificate checked — not just the
+    # expired ones — ends up as a line in $CERT's output.
+    out, _ = run_command(
+        'while IFS= read -r -d "" CERT; do '
+        '  openssl x509 -checkend 0 -noout -in "$CERT" >/dev/null 2>&1 || echo "$CERT"; '
+        'done < <(find /etc/ssl/certs/ -name "*.pem" -print0 2>/dev/null)',
+        timeout=10)
+    expired = [l for l in out.splitlines() if l.strip()]
+    if expired:
+        _add(
+            tr("{n} expired local certificate(s)").format(n=len(expired)),
+            expired[0].strip(),
+            "_on_show_cert_checker",
+        )
+
+    # ── Broken symlinks under /usr/share/licenses only (all distros).
+    # The Broken Symlinks dialog only ever auto-deletes this one
+    # category (its "Scan & Remove Safe Ones" button) — everything else
+    # it finds goes in a "REVIEW — not auto-deleted" bucket that needs
+    # manually identifying and reinstalling the owning package, so it
+    # can never actually disappear just by opening that tool. Reporting
+    # those here would point at a "fix" that doesn't exist, which is
+    # exactly what caused it to keep reappearing after every re-check —
+    # so only the truly one-click-fixable category is checked.
+    out, _ = run_command(
+        'find /usr/share/licenses -xtype l -print 2>/dev/null', timeout=8)
+    orphaned = [l for l in out.splitlines() if l.strip()]
+    if orphaned:
+        _add(
+            tr("{n} orphaned license symlink(s) (safe to remove)").format(n=len(orphaned)),
+            orphaned[0].strip(),
+            "_on_show_broken_symlinks",
+        )
+
+    return findings
 
 
 def run_update_notification_check():
