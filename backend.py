@@ -1,14 +1,13 @@
 """
 Pachul — backend.py
-All pacman / system data functions: package queries, AUR search,
-update checks, orphan detection, system info, and demo data.
+Data layer for the whole app: package queries, AUR search, update checks,
+orphan detection, system information and the demo-mode sample data.
 
-Caching strategy
-----------------
-~/.cache/pachul/
-  installed.json   — pacman -Q + -Qm output, invalidated when pacman -Q changes
-  syncdb.json      — pacman -Sl output, TTL 6 h (changes only after pacman -Sy)
-  packages.json    — merged full package list (served instantly on next launch)
+Cache layout (below ~/.cache/pachul/)
+-------------------------------------
+  installed.json   output of pacman -Q / -Qm; stale as soon as pacman -Q differs
+  syncdb.json      the repository index (pacman -Sl); refreshed every 6 hours
+  packages.json    the merged package list, so the next start can show it at once
 """
 
 import json
@@ -34,9 +33,9 @@ import pkgmanager
 # ─── Cache paths ──────────────────────────────────────────────────────────────
 
 CACHE_DIR      = Path.home() / ".cache" / "pachul"
-PKG_CACHE      = CACHE_DIR / "packages.json"
-SYNCDB_CACHE   = CACHE_DIR / "syncdb.json"
-INSTALLED_CACHE= CACHE_DIR / "installed.json"
+INSTALLED_CACHE = CACHE_DIR.joinpath("installed.json")
+SYNCDB_CACHE = CACHE_DIR.joinpath("syncdb.json")
+PKG_CACHE = CACHE_DIR.joinpath("packages.json")
 FLATPAK_REMOTE_CACHE = CACHE_DIR / "flatpak_remote.json"
 AUR_NAMES_CACHE = CACHE_DIR / "aur_names.json"
 AUR_META_CACHE = CACHE_DIR / "aur_meta.json"   # name -> [version, description]
@@ -54,22 +53,24 @@ AUR_META_TTL = 24 * 3600   # same cadence — one ~10 MB download per day at mos
 SNAP_CATALOG_TTL = 6 * 3600   # same cadence as the Flatpak remote catalog
 
 def _ensure_cache_dir():
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
 
 def _read_json(path):
+    """Load a JSON file; any problem (missing, corrupt) simply yields None."""
     try:
-        with open(path, "r") as f:
-            return json.load(f)
+        return json.loads(Path(path).read_text())
     except Exception:
         return None
 
+
 def _write_json(path, data):
+    """Write atomically (temp file, then rename); failures are swallowed."""
     try:
         _ensure_cache_dir()
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w") as f:
-            json.dump(data, f, separators=(",", ":"))
-        tmp.replace(path)
+        staging = path.with_suffix(".tmp")
+        staging.write_text(json.dumps(data, separators=(",", ":")))
+        staging.replace(path)
     except Exception:
         pass
 
@@ -143,33 +144,33 @@ _C_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C"}
 
 def run_command(cmd, timeout=30):
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                           timeout=timeout, env=_C_ENV)
-        return r.stdout.strip(), r.returncode
+        done = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                              timeout=timeout, env=_C_ENV)
     except subprocess.TimeoutExpired:
         return "", 1
-    except Exception as e:
-        return str(e), 1
+    except Exception as exc:
+        return str(exc), 1
+    return done.stdout.strip(), done.returncode
 
 
 def run_command_stream(cmd, on_line, on_done, timeout=180):
-    """Run a non-interactive command, streaming output line by line."""
-    def worker():
+    """Start a shell command in the background and forward each output line
+    to on_line; on_done receives the exit code (both on the GLib main loop)."""
+    def pump():
         try:
-            proc = subprocess.Popen(
-                cmd, shell=True,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            child = subprocess.Popen(
+                cmd, shell=True, text=True, bufsize=1,
                 stdin=subprocess.DEVNULL,
-                text=True, bufsize=1
-            )
-            for line in proc.stdout:
-                GLib.idle_add(on_line, line.rstrip())
-            proc.wait()
-            GLib.idle_add(on_done, proc.returncode)
-        except Exception as e:
-            GLib.idle_add(on_line, f"Error: {e}")
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            for raw_line in child.stdout:
+                GLib.idle_add(on_line, raw_line.rstrip())
+            child.wait()
+        except Exception as exc:
+            GLib.idle_add(on_line, f"Error: {exc}")
             GLib.idle_add(on_done, 1)
-    threading.Thread(target=worker, daemon=True).start()
+            return
+        GLib.idle_add(on_done, child.returncode)
+    threading.Thread(target=pump, daemon=True).start()
 
 
 def _is_demo():
@@ -736,39 +737,50 @@ def search_snap(query):
     return items
 
 
-# ─── Popular AUR packages to always show in the list ─────────────────────────
+# ─── Curated AUR entries (always listed; also the demo-mode catalogue) ───────
+
+_POPULAR_AUR_TABLE = """
+yay|12.3.5-1|Yet another yogurt - AUR helper written in Go
+paru|2.0.4-1|Feature packed AUR helper
+google-chrome|124.0-1|The popular web browser by Google
+visual-studio-code-bin|1.89.0-1|Visual Studio Code editor from Microsoft
+discord|0.0.57-1|All-in-one voice and text chat for gamers
+spotify|1.2.25-1|A proprietary music streaming service
+1password|8.10.30-1|Password manager and secure digital wallet
+zoom|6.0.2-1|Video conferencing, web conferencing, webinars
+slack-desktop|4.38.125-1|Messaging app for teams
+telegram-desktop-bin|5.1.6-1|Official Telegram Desktop client
+obs-studio-browser|30.1.2-1|Free and open source streaming/recording software
+timeshift|24.01.1-1|System restore utility for Linux
+ventoy-bin|1.0.99-1|Tool to create bootable USB drives
+onlyoffice-bin|8.0.1-1|Free office suite compatible with MS Office
+bottles|51.14-1|Run Windows software on Linux using Wine
+protonup-qt|2.9.0-1|Install and manage Proton-GE and Luxtorpeda
+heroic-games-launcher|2.14.0-1|Open source Epic, GOG and Amazon Games launcher
+lutris|0.5.17-1|Open gaming platform for Linux
+mangohud|0.7.1-1|Vulkan/OpenGL overlay for monitoring FPS and temps
+nerd-fonts-complete|3.2.1-1|Iconic font aggregator and collection
+ttf-ms-fonts|0.1-9|Core Microsoft fonts
+pamac-aur|11.6.0-1|A Package Manager with AUR support
+pikaur|1.28-1|Lightweight AUR package manager
+sublime-text-4|4.0.4180-1|Sophisticated text editor for code and prose
+jetbrains-toolbox|2.3.2-1|JetBrains IDE manager
+postman-bin|11.0.9-1|API development environment
+insomnia|9.2.0-1|Open-source API client
+dbeaver|24.0.5-1|Universal database tool and SQL client
+wine|9.8-1|A compatibility layer for running Windows programs
+steam|1.0.0.79-2|Valve's digital software delivery system
+"""
 POPULAR_AUR_PACKAGES = [
-    ("yay",                    "12.3.5-1",   "Yet another yogurt - AUR helper written in Go"),
-    ("paru",                   "2.0.4-1",    "Feature packed AUR helper"),
-    ("google-chrome",          "124.0-1",    "The popular web browser by Google"),
-    ("visual-studio-code-bin", "1.89.0-1",   "Visual Studio Code editor from Microsoft"),
-    ("discord",                "0.0.57-1",   "All-in-one voice and text chat for gamers"),
-    ("spotify",                "1.2.25-1",   "A proprietary music streaming service"),
-    ("1password",              "8.10.30-1",  "Password manager and secure digital wallet"),
-    ("zoom",                   "6.0.2-1",    "Video conferencing, web conferencing, webinars"),
-    ("slack-desktop",          "4.38.125-1", "Messaging app for teams"),
-    ("telegram-desktop-bin",   "5.1.6-1",    "Official Telegram Desktop client"),
-    ("obs-studio-browser",     "30.1.2-1",   "Free and open source streaming/recording software"),
-    ("timeshift",              "24.01.1-1",  "System restore utility for Linux"),
-    ("ventoy-bin",             "1.0.99-1",   "Tool to create bootable USB drives"),
-    ("onlyoffice-bin",         "8.0.1-1",    "Free office suite compatible with MS Office"),
-    ("bottles",                "51.14-1",    "Run Windows software on Linux using Wine"),
-    ("protonup-qt",            "2.9.0-1",    "Install and manage Proton-GE and Luxtorpeda"),
-    ("heroic-games-launcher",  "2.14.0-1",   "Open source Epic, GOG and Amazon Games launcher"),
-    ("lutris",                 "0.5.17-1",   "Open gaming platform for Linux"),
-    ("mangohud",               "0.7.1-1",    "Vulkan/OpenGL overlay for monitoring FPS and temps"),
-    ("nerd-fonts-complete",    "3.2.1-1",    "Iconic font aggregator and collection"),
-    ("ttf-ms-fonts",           "0.1-9",      "Core Microsoft fonts"),
-    ("pamac-aur",              "11.6.0-1",   "A Package Manager with AUR support"),
-    ("pikaur",                 "1.28-1",     "Lightweight AUR package manager"),
-    ("sublime-text-4",         "4.0.4180-1", "Sophisticated text editor for code and prose"),
-    ("jetbrains-toolbox",      "2.3.2-1",    "JetBrains IDE manager"),
-    ("postman-bin",            "11.0.9-1",   "API development environment"),
-    ("insomnia",               "9.2.0-1",    "Open-source API client"),
-    ("dbeaver",                "24.0.5-1",   "Universal database tool and SQL client"),
-    ("wine",                   "9.8-1",      "A compatibility layer for running Windows programs"),
-    ("steam",                  "1.0.0.79-2", "Valve's digital software delivery system"),
+    tuple(cell.strip() for cell in row.split("|"))
+    for row in _POPULAR_AUR_TABLE.strip().splitlines()
 ]
+
+
+def _aur_stub(name, desc, version=""):
+    """Entry for a package that is only known from the AUR catalogue."""
+    return {"name": name, "version": version, "repo": "aur",
+            "status": "available", "description": desc, "foreign": True}
 
 
 # ─── Installed-package fingerprint ────────────────────────────────────────────
@@ -796,46 +808,38 @@ def _installed_fingerprint():
 # ─── Sync-DB cache (pacman -Sl) ───────────────────────────────────────────────
 
 def _load_syncdb_cache():
-    """Return cached pacman -Sl data if it's fresh enough."""
-    if _file_age(SYNCDB_CACHE) < SYNCDB_TTL:
-        data = _read_json(SYNCDB_CACHE)
-        if data:
-            return data
-    return None
+    """The cached repository index while it is within its TTL, else None."""
+    if _file_age(SYNCDB_CACHE) >= SYNCDB_TTL:
+        return None
+    return _read_json(SYNCDB_CACHE) or None
 
 def _parse_db_file(db_path):
-    """Parse one pacman .db tarball and return {pkgname: (repo, version, desc)}."""
+    """Read one pacman .db archive into {pkgname: (repo, version, desc)}."""
     import tarfile
-    repo = db_path.stem  # filename without .db = repo name
-    result = {}
+    repo = db_path.stem  # file name without ".db" is the repo name
+    found = {}
+    wanted = ("%NAME%", "%VERSION%", "%DESC%")
     try:
-        with tarfile.open(db_path, "r:*") as tar:
-            members = {m.name: m for m in tar.getmembers()}
-            desc_members = [m for name, m in members.items() if name.endswith("/desc")]
-            for member in desc_members:
-                f = tar.extractfile(member)
-                if not f:
+        with tarfile.open(db_path, "r:*") as archive:
+            desc_files = {m.name: m for m in archive.getmembers()
+                          if m.name.endswith("/desc")}
+            for member in desc_files.values():
+                handle = archive.extractfile(member)
+                if not handle:
                     continue
-                content = f.read().decode("utf-8", errors="replace")
-                name = version = desc = None
-                lines = content.splitlines()
-                i = 0
-                while i < len(lines):
-                    tag = lines[i]
-                    if tag in ("%NAME%", "%VERSION%", "%DESC%") and i + 1 < len(lines):
-                        val = lines[i + 1].strip()
-                        if tag == "%NAME%":
-                            name = val
-                        elif tag == "%VERSION%":
-                            version = val
-                        elif tag == "%DESC%":
-                            desc = val
-                    i += 1
-                if name:
-                    result[name] = (repo, version or "", desc or "")
+                rows = handle.read().decode("utf-8", errors="replace").splitlines()
+                fields = {}
+                for pos, tag in enumerate(rows[:-1]):
+                    if tag in wanted:
+                        fields[tag] = rows[pos + 1].strip()
+                pkg = fields.get("%NAME%")
+                if pkg:
+                    found[pkg] = (repo,
+                                  fields.get("%VERSION%") or "",
+                                  fields.get("%DESC%") or "")
     except Exception:
         pass
-    return result
+    return found
 
 
 def _build_syncdb(installed_set):
@@ -849,41 +853,39 @@ def _build_syncdb(installed_set):
         _write_json(SYNCDB_CACHE, pkgs)
         return pkgs
 
-    from concurrent.futures import ThreadPoolExecutor
     sync_dir = Path("/var/lib/pacman/sync")
-    pkgs = {}
+    index = {}
 
     if sync_dir.exists():
         db_files = list(sync_dir.glob("*.db"))
-        with ThreadPoolExecutor(max_workers=min(4, len(db_files) or 1)) as ex:
-            futures = [ex.submit(_parse_db_file, db) for db in db_files]
-            for future in futures:
-                for name, (repo, version, desc) in future.result().items():
-                    pkgs[name] = {"repo": repo, "version": version, "description": desc}
+        workers = min(4, len(db_files) or 1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for parsed in pool.map(_parse_db_file, db_files):
+                for pkg_name, (repo, version, desc) in parsed.items():
+                    index[pkg_name] = {"repo": repo, "version": version,
+                                       "description": desc}
 
-    # Fallback: if no .db files found, use pacman -Sl (slower)
-    if not pkgs:
-        sl_out, sl_code = run_command("pacman -Sl 2>/dev/null", timeout=60)
-        if sl_out and sl_code == 0:
-            for line in sl_out.splitlines():
-                parts = line.strip().split()
-                if len(parts) >= 3:
-                    repo, pkgname, version = parts[0], parts[1], parts[2]
-                    pkgs[pkgname] = {"repo": repo, "version": version, "description": ""}
+    # No usable .db files: ask pacman itself (slower, but always available)
+    if not index:
+        listing, rc = run_command("pacman -Sl 2>/dev/null", timeout=60)
+        if listing and rc == 0:
+            for row in listing.splitlines():
+                cols = row.strip().split()
+                if len(cols) >= 3:
+                    index[cols[1]] = {"repo": cols[0], "version": cols[2],
+                                      "description": ""}
 
-    _write_json(SYNCDB_CACHE, pkgs)
-    return pkgs
+    _write_json(SYNCDB_CACHE, index)
+    return index
 
 
 # ─── Main package list ────────────────────────────────────────────────────────
 
 def _load_aur_names_cache():
-    """Return the cached full AUR package-name list if it's fresh enough."""
-    if _file_age(AUR_NAMES_CACHE) < AUR_NAMES_TTL:
-        data = _read_json(AUR_NAMES_CACHE)
-        if data:
-            return data
-    return None
+    """Cached AUR package-name list while it is within its TTL, else None."""
+    if _file_age(AUR_NAMES_CACHE) >= AUR_NAMES_TTL:
+        return None
+    return _read_json(AUR_NAMES_CACHE) or None
 
 
 def load_aur_meta_cache(ignore_ttl=False):
@@ -1037,70 +1039,59 @@ def _build_aur_names_index():
 
 
 def _merge_into_list(installed_pkgs, syncdb, aur_set):
-    """Combine installed + syncdb + popular AUR into the final package list."""
-    all_pkgs = dict(installed_pkgs)
+    """Merge installed packages, the repo index and the AUR names into the
+    single list the UI shows."""
+    merged = dict(installed_pkgs)
 
-    for pkgname, info in syncdb.items():
-        desc = info.get("description", "")
-        if pkgname in all_pkgs:
-            if info["repo"] and not all_pkgs[pkgname]["foreign"]:
-                all_pkgs[pkgname]["repo"] = info["repo"]
-            # Always fill description from syncdb if missing
-            if not all_pkgs[pkgname].get("description"):
-                all_pkgs[pkgname]["description"] = desc
-        else:
-            all_pkgs[pkgname] = {
+    for pkgname, meta in syncdb.items():
+        blurb = meta.get("description", "")
+        entry = merged.get(pkgname)
+        if entry is None:
+            merged[pkgname] = {
                 "name": pkgname,
-                "version": info["version"],
-                "repo": info["repo"],
+                "version": meta["version"],
+                "repo": meta["repo"],
                 "status": "available",
-                "description": desc,
+                "description": blurb,
                 "foreign": False,
             }
+            continue
+        if meta["repo"] and not entry["foreign"]:
+            entry["repo"] = meta["repo"]
+        # the repo index fills in a missing description
+        if not entry.get("description"):
+            entry["description"] = blurb
 
-    # Popular AUR packages are injected first (only on Arch), with their
-    # curated descriptions, for nicer-looking discoverability entries —
-    # then the full AUR catalog (aur_set, see _build_aur_names_index())
-    # fills in everything else, blank description/version and all. Order
-    # matters here only in that popular packages keep their nicer
-    # description instead of being overwritten by a blank one.
+    # Arch only: curated AUR entries go in first so they keep their nicer
+    # descriptions, then the complete AUR catalogue (aur_set, built by
+    # _build_aur_names_index()) adds everything else with blank details.
     if distro.is_arch():
         for name, _version, desc in POPULAR_AUR_PACKAGES:
-            if name not in all_pkgs:
-                all_pkgs[name] = {
-                    "name": name, "version": "", "repo": "aur",
-                    "status": "available", "description": desc, "foreign": True,
-                }
+            merged.setdefault(name, _aur_stub(name, desc))
         for name in aur_set:
-            if name not in all_pkgs:
-                all_pkgs[name] = {
-                    "name": name, "version": "", "repo": "aur",
-                    "status": "available", "description": "", "foreign": True,
-                }
+            merged.setdefault(name, _aur_stub(name, ""))
 
-    return list(all_pkgs.values())
+    return list(merged.values())
 
 
 def get_packages():
     """
-    Return package list as fast as possible.
+    The full package list, as quickly as possible.
 
-    Launch path:
-      1. If packages.json cache exists AND installed fingerprint matches → return cache instantly.
-      2. Otherwise build from scratch (pacman -Q + cached/fresh pacman -Sl) and save cache.
+    1. packages.json exists and its installed-fingerprint still matches:
+       serve that cache straight away.
+    2. Otherwise rebuild (pacman -Q plus the cached or fresh repo index)
+       and store the result for the next start.
     """
     if _is_demo():
-        demo = []
-        for name, version, desc in POPULAR_AUR_PACKAGES:
-            demo.append({"name": name, "version": version, "repo": "aur",
-                          "status": "available", "description": desc, "foreign": True})
-        return demo
+        return [_aur_stub(name, desc, version)
+                for name, version, desc in POPULAR_AUR_PACKAGES]
 
-    # ── Fast path: fingerprint check ─────────────────────────────────────────
-    result = _installed_fingerprint()
-    if result is None:
+    # Fast path: compare the installed-package fingerprint
+    snapshot = _installed_fingerprint()
+    if snapshot is None:
         return []
-    fingerprint, raw_Q = result
+    fingerprint, raw_Q = snapshot
 
     cached = _read_json(PKG_CACHE)
     if (cached and cached.get("version") == CACHE_VERSION
@@ -1254,15 +1245,15 @@ def get_package_info(pkg_name):
 
 
 def get_package_files(pkg_name):
+    # shown when the real file list cannot be determined
+    placeholder = [f"{pkg_name} /usr/bin/{pkg_name}",
+                   f"{pkg_name} /usr/share/man/man1/{pkg_name}.1"]
     if not distro.is_arch():
-        files = pkgmanager.get_package_files(pkg_name)
-        if files:
-            return files
-        return [f"{pkg_name} /usr/bin/{pkg_name}", f"{pkg_name} /usr/share/man/man1/{pkg_name}.1"]
-    out, code = run_command(f"pacman -Ql {shlex.quote(pkg_name)} 2>/dev/null")
-    if out and code == 0:
-        return out.splitlines()
-    return [f"{pkg_name} /usr/bin/{pkg_name}", f"{pkg_name} /usr/share/man/man1/{pkg_name}.1"]
+        return pkgmanager.get_package_files(pkg_name) or placeholder
+    listing, rc = run_command(f"pacman -Ql {shlex.quote(pkg_name)} 2>/dev/null")
+    if listing and rc == 0:
+        return listing.splitlines()
+    return placeholder
 
 
 # ─── File → package search (pacman -F) ───────────────────────────────────────
@@ -1433,29 +1424,25 @@ def get_snap_updates():
 
 
 def get_orphans():
-    if not distro.is_arch():
+    if distro.is_arch():
+        listing, _ = run_command("pacman -Qdt 2>/dev/null")
+        orphans = []
+        for row in (listing or "").splitlines():
+            fields = row.strip().split(None, 1)
+            if len(fields) == 2:
+                orphans.append({"name": fields[0], "version": fields[1]})
+    else:
         orphans = pkgmanager.get_orphans()
-        if not orphans and _is_demo():
-            orphans = [
-                {"name": "lib32-libpng12", "version": "1.2.56-2"},
-                {"name": "perl-encode-locale", "version": "1.05-7"},
-                {"name": "python2", "version": "2.7.18-3"},
-            ]
-        return orphans
-    out, _ = run_command("pacman -Qdt 2>/dev/null")
-    orphans = []
-    if out:
-        for line in out.splitlines():
-            parts = line.strip().split(None, 1)
-            if len(parts) == 2:
-                orphans.append({"name": parts[0], "version": parts[1]})
     if not orphans and _is_demo():
-        orphans = [
-            {"name": "lib32-libpng12", "version": "1.2.56-2"},
-            {"name": "perl-encode-locale", "version": "1.05-7"},
-            {"name": "python2", "version": "2.7.18-3"},
-        ]
+        orphans = [{"name": n, "version": v} for n, v in _DEMO_ORPHANS]
     return orphans
+
+
+_DEMO_ORPHANS = (
+    ("lib32-libpng12", "1.2.56-2"),
+    ("perl-encode-locale", "1.05-7"),
+    ("python2", "2.7.18-3"),
+)
 
 
 def _human_size(num_bytes):
@@ -3039,107 +3026,99 @@ def get_cached_versions(pkg_name):
 
 def search_packages_cmd(query):
     def parse_pacman_ss(out):
-        pkgs = []
-        lines = out.splitlines()
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            if '/' in line and not line.startswith(' '):
-                parts = line.split()
-                if parts:
-                    repo_pkg = parts[0]
-                    version = parts[1] if len(parts) > 1 else "unknown"
-                    repo, name = repo_pkg.split('/', 1) if '/' in repo_pkg else ('', repo_pkg)
-                    desc = lines[i + 1].strip() if i + 1 < len(lines) else ""
-                    pkgs.append({"name": name, "version": version, "repo": repo,
-                                 "description": desc, "status": "available",
-                                 "foreign": repo.lower() == "aur"})
-                    i += 2
-                    continue
-            i += 1
-        return pkgs
+        """pacman -Ss: a 'repo/name version ...' line, then the description."""
+        found = []
+        text_lines = out.splitlines()
+        total = len(text_lines)
+        idx = 0
+        while idx < total:
+            header = text_lines[idx].strip()
+            tokens = header.split() if "/" in header else []
+            if not tokens:
+                idx += 1
+                continue
+            qualified = tokens[0]
+            ver = tokens[1] if len(tokens) > 1 else "unknown"
+            if "/" in qualified:
+                repo_name, pkg = qualified.split("/", 1)
+            else:
+                repo_name, pkg = "", qualified
+            blurb = text_lines[idx + 1].strip() if idx + 1 < total else ""
+            found.append({"name": pkg, "version": ver, "repo": repo_name,
+                          "description": blurb, "status": "available",
+                          "foreign": repo_name.lower() == "aur"})
+            idx += 2
+        return found
 
     def parse_pachuli_ss(out):
-        """Parses pachuli's numbered `-Ss` search output (always
-        ANSI-colored, one result per two lines: 'N repo/name version [...]'
-        then an indented description line) into the same shape as
-        parse_pacman_ss above."""
-        pkgs = []
-        lines = _strip_ansi(out).splitlines()
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            m = re.match(r"^\d+\s+(\S+)/(\S+)\s+(\S+)", line)
-            if m:
-                repo, name, version = m.group(1), m.group(2), m.group(3)
-                has_desc = i + 1 < len(lines) and lines[i + 1].startswith(" ")
-                desc = lines[i + 1].strip() if has_desc else ""
-                pkgs.append({"name": name, "version": version, "repo": repo,
-                             "description": desc, "status": "available",
-                             "foreign": repo.lower() == "aur"})
-                i += 2 if has_desc else 1
+        """Parse pachuli's numbered -Ss output (always ANSI-coloured): per
+        result a 'N repo/name version [...]' line, optionally followed by an
+        indented description. Returns the same shape as parse_pacman_ss."""
+        found = []
+        text_lines = _strip_ansi(out).splitlines()
+        row_re = re.compile(r"^\d+\s+(\S+)/(\S+)\s+(\S+)")
+        idx = 0
+        while idx < len(text_lines):
+            hit = row_re.match(text_lines[idx].strip())
+            if not hit:
+                idx += 1
                 continue
-            i += 1
-        return pkgs
+            repo_name, pkg, ver = hit.groups()
+            nxt = text_lines[idx + 1] if idx + 1 < len(text_lines) else None
+            has_desc = nxt is not None and nxt.startswith(" ")
+            blurb = nxt.strip() if has_desc else ""
+            found.append({"name": pkg, "version": ver, "repo": repo_name,
+                          "description": blurb, "status": "available",
+                          "foreign": repo_name.lower() == "aur"})
+            idx += 2 if has_desc else 1
+        return found
 
     packages = []
     seen = set()
 
+    def collect(items):
+        """Append results whose name has not been seen yet."""
+        for item in items:
+            if item["name"] in seen:
+                continue
+            seen.add(item["name"])
+            packages.append(item)
+
     if not distro.is_arch():
-        cmd = pkgmanager.search_cmd(query)
-        if cmd:
-            out, code = run_command(cmd, timeout=30)
+        search_cmd = pkgmanager.search_cmd(query)
+        if search_cmd:
+            out, code = run_command(search_cmd, timeout=30)
             if out and code == 0:
-                for p in pkgmanager.parse_search(out):
-                    if p["name"] not in seen:
-                        seen.add(p["name"])
-                        packages.append(p)
-        for p in search_flatpak(query):
-            if p["name"] not in seen:
-                seen.add(p["name"])
-                packages.append(p)
-        for p in search_snap(query):
-            if p["name"] not in seen:
-                seen.add(p["name"])
-                packages.append(p)
+                collect(pkgmanager.parse_search(out))
+        collect(search_flatpak(query))
+        collect(search_snap(query))
         return packages
 
-    qq = shlex.quote(query)
-    out, code = run_command(f"pacman -Ss {qq} 2>/dev/null")
+    quoted = shlex.quote(query)
+    out, code = run_command(f"pacman -Ss {quoted} 2>/dev/null")
     if out and code == 0:
-        for p in parse_pacman_ss(out):
-            if p["name"] not in seen:
-                seen.add(p["name"])
-                packages.append(p)
+        collect(parse_pacman_ss(out))
 
-    aur_helper = _find_aur_helper()
-    if aur_helper:
-        if aur_helper == "pachuli":
-            # -a/--aur-only skips pachuli's own (redundant) repo search;
-            # -q suppresses its status lines so only result lines remain.
-            aur_out, aur_code = run_command(f"pachuli -Ss {qq} -a -q -g 2>/dev/null", timeout=30)
-            aur_pkgs = parse_pachuli_ss(aur_out) if (aur_out and aur_code == 0) else []
+    helper = _find_aur_helper()
+    if helper:
+        if helper == "pachuli":
+            # -a skips pachuli's own repo search, -q drops status lines
+            aur_out, aur_code = run_command(f"pachuli -Ss {quoted} -a -q -g 2>/dev/null", timeout=30)
+            aur_found = parse_pachuli_ss(aur_out) if (aur_out and aur_code == 0) else []
         else:
-            aur_out, aur_code = run_command(f"{aur_helper} -Ss --aur {qq} 2>/dev/null", timeout=30)
-            aur_pkgs = parse_pacman_ss(aur_out) if (aur_out and aur_code == 0) else []
-        if aur_pkgs:
-            for p in aur_pkgs:
-                if p["name"] not in seen:
-                    p["foreign"] = True
-                    if p["repo"].lower() not in ("core", "extra", "multilib", "community"):
-                        p["repo"] = "aur"
-                    seen.add(p["name"])
-                    packages.append(p)
+            aur_out, aur_code = run_command(f"{helper} -Ss --aur {quoted} 2>/dev/null", timeout=30)
+            aur_found = parse_pacman_ss(aur_out) if (aur_out and aur_code == 0) else []
+        official = ("core", "extra", "multilib", "community")
+        for item in aur_found:
+            if item["name"] in seen:
+                continue
+            item["foreign"] = True
+            if item["repo"].lower() not in official:
+                item["repo"] = "aur"
+        collect(aur_found)
 
-    for p in search_flatpak(query):
-        if p["name"] not in seen:
-            seen.add(p["name"])
-            packages.append(p)
-
-    for p in search_snap(query):
-        if p["name"] not in seen:
-            seen.add(p["name"])
-            packages.append(p)
+    collect(search_flatpak(query))
+    collect(search_snap(query))
 
     return packages
 

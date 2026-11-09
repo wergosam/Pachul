@@ -71,14 +71,54 @@ from icons import ICON_SVGS as _INLINE_ICONS
 
 
 
+_APP_ID = "io.github.wergosam.pachul"
+
+# (action name, method of the main window that handles it), in registration order
+_WINDOW_ACTIONS = (
+    ("sync", "_on_sync_db"),
+    ("refresh", "_on_refresh"),
+    ("install", "_on_install"),
+    ("remove", "_on_remove"),
+    ("cache", "_on_clean_cache"),
+    ("check_updates", "_on_check_updates"),
+    ("manage_repos", "_on_manage_repos"),
+    ("apt_repair", "_on_show_apt_repair"),
+    ("dnf_repair", "_on_show_dnf_repair"),
+    ("zypper_repair", "_on_show_zypper_repair"),
+    ("pacman_repair", "_on_show_pacman_repair"),
+    ("cert_checker", "_on_show_cert_checker"),
+    ("broken_symlinks", "_on_show_broken_symlinks"),
+    ("services_security", "_on_show_services_security"),
+    ("config_backup", "_on_show_config_backup"),
+    ("rate_mirrors", "_on_rate_mirrors"),
+    ("orphans", "_on_show_orphans"),
+    ("file_search", "_on_show_file_search"),
+    ("sysinfo", "_on_show_sysinfo"),
+    ("history", "_on_show_history"),
+    ("pacdiff", "_on_show_pacdiff"),
+    ("tool_updates", "_on_show_tool_updates"),
+    ("ignored", "_on_show_ignored"),
+    ("export_pkgs", "_on_export_pkgs"),
+    ("import_pkgs", "_on_import_pkgs"),
+    ("install_local", "_on_install_local"),
+    ("pkgbuild", "_on_view_pkgbuild"),
+    ("hold", "_on_toggle_hold"),
+    ("mark_explicit", "_on_mark_explicit"),
+    ("mark_asdeps", "_on_mark_asdeps"),
+    ("tools", "_on_show_tools"),
+    ("preferences", "_on_preferences"),
+    ("shortcuts", "_on_show_shortcuts"),
+    ("search", "_on_focus_search"),
+)
+
+
 class pachulApp(Adw.Application):
     def __init__(self):
-        super().__init__(
-            application_id="io.github.wergosam.pachul",
-            flags=Gio.ApplicationFlags.FLAGS_NONE,
-        )
-        self.connect("activate", self._on_activate)
-        self.connect("shutdown", self._on_shutdown)
+        super().__init__(application_id=_APP_ID,
+                         flags=Gio.ApplicationFlags.FLAGS_NONE)
+        for signal_name, handler in (("activate", self._on_activate),
+                                     ("shutdown", self._on_shutdown)):
+            self.connect(signal_name, handler)
 
     def _register_icon_theme(self):
         """Icon aus dem Projekt-Root in die von GTK geforderte
@@ -180,48 +220,14 @@ class pachulApp(Adw.Application):
         self.win = pachulWindow(app)
         self.win.connect("close-request", lambda *_: self.quit())
 
-        actions = {
-            "sync":          self.win._on_sync_db,
-            "refresh":       self.win._on_refresh,
-            "install":       self.win._on_install,
-            "remove":        self.win._on_remove,
-            "cache":         self.win._on_clean_cache,
-            "check_updates": self.win._on_check_updates,
-            "manage_repos":  self.win._on_manage_repos,
-            "apt_repair":    self.win._on_show_apt_repair,
-            "dnf_repair":    self.win._on_show_dnf_repair,
-            "zypper_repair": self.win._on_show_zypper_repair,
-            "pacman_repair": self.win._on_show_pacman_repair,
-            "cert_checker":  self.win._on_show_cert_checker,
-            "broken_symlinks": self.win._on_show_broken_symlinks,
-            "services_security": self.win._on_show_services_security,
-            "config_backup":     self.win._on_show_config_backup,
-            "rate_mirrors":  self.win._on_rate_mirrors,
-            "orphans":       self.win._on_show_orphans,
-            "file_search":   self.win._on_show_file_search,
-            "sysinfo":       self.win._on_show_sysinfo,
-            "history":       self.win._on_show_history,
-            "pacdiff":       self.win._on_show_pacdiff,
-            "tool_updates":  self.win._on_show_tool_updates,
-            "ignored":       self.win._on_show_ignored,
-            "export_pkgs":   self.win._on_export_pkgs,
-            "import_pkgs":   self.win._on_import_pkgs,
-            "install_local": self.win._on_install_local,
-            "pkgbuild":      self.win._on_view_pkgbuild,
-            "hold":          self.win._on_toggle_hold,
-            "mark_explicit": self.win._on_mark_explicit,
-            "mark_asdeps":   self.win._on_mark_asdeps,
-            "tools":         self.win._on_show_tools,
-            "preferences":   self.win._on_preferences,
-            "shortcuts":     self.win._on_show_shortcuts,
-            "search":        self.win._on_focus_search,
-            "quit":          lambda *_: self.quit(),
-            "about":         self._on_about,
-        }
-        for name, cb in actions.items():
-            act = Gio.SimpleAction.new(name, None)
-            act.connect("activate", cb)
-            self.add_action(act)
+        handlers = {name: getattr(self.win, method)
+                    for name, method in _WINDOW_ACTIONS}
+        handlers["quit"] = lambda *_: self.quit()
+        handlers["about"] = self._on_about
+        for action_name, callback in handlers.items():
+            action = Gio.SimpleAction.new(action_name, None)
+            action.connect("activate", callback)
+            self.add_action(action)
 
         # Stateful radio action for the Appearance section of the main menu
         scheme_act = Gio.SimpleAction.new_stateful(

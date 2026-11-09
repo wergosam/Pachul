@@ -79,47 +79,72 @@ REPO_BADGE_CLASS = {
     "chaotic-aur":  "badge-chaotic-aur",
 }
 
-# ─── Symbolic icon fallbacks per package name ─────────────────────────────────
+# ─── Small layout helper used by the row widgets below ─────────────────────────
 
-PKG_ICONS = {
-    "linux":                  "utilities-terminal-symbolic",
-    "linux-firmware":         "drive-harddisk-symbolic",
-    "base":                   "package-x-generic-symbolic",
-    "bash":                   "utilities-terminal-symbolic",
-    "zsh":                    "utilities-terminal-symbolic",
-    "fish":                   "utilities-terminal-symbolic",
-    "git":                    "preferences-system-details-symbolic",
-    "python":                 "text-x-script-symbolic",
-    "python-pip":             "text-x-script-symbolic",
-    "nodejs":                 "text-x-script-symbolic",
-    "npm":                    "text-x-script-symbolic",
-    "rust":                   "application-x-executable-symbolic",
-    "go":                     "application-x-executable-symbolic",
-    "cmake":                  "applications-engineering-symbolic",
-    "docker":                 "application-x-executable-symbolic",
-    "flatpak":                "package-x-generic-symbolic",
-    "pacman":                 "package-x-generic-symbolic",
-    "yay":                    "package-x-generic-symbolic",
-    "paru":                   "package-x-generic-symbolic",
-    "networkmanager":         "network-wireless-symbolic",
-    "openssh":                "network-server-symbolic",
-    "pipewire":               "audio-speakers-symbolic",
-    "alsa-utils":             "audio-card-symbolic",
-    "htop":                   "utilities-system-monitor-symbolic",
-    "curl":                   "network-transmit-receive-symbolic",
-    "wget":                   "network-transmit-receive-symbolic",
-    "vim":                    "text-editor-symbolic",
-    "nano":                   "text-editor-symbolic",
-    "mesa":                   "video-display-symbolic",
-    "timeshift":              "document-revert-symbolic",
-    "systemd":                "preferences-system-symbolic",
-    "firefox":                "web-browser-symbolic",
-    "chromium":               "web-browser-symbolic",
-    "google-chrome":          "web-browser-symbolic",
-    "gimp":                   "applications-graphics-symbolic",
-    "vlc":                    "applications-multimedia-symbolic",
-    "visual-studio-code-bin": "text-editor-symbolic",
+def _make_box(vertical, gap, valign=None, halign=None, hexpand=False):
+    """Gtk.Box with orientation, spacing and optional alignment / expansion."""
+    box = Gtk.Box()
+    box.set_orientation(Gtk.Orientation.VERTICAL if vertical
+                        else Gtk.Orientation.HORIZONTAL)
+    box.set_spacing(gap)
+    if valign is not None:
+        box.set_valign(valign)
+    if halign is not None:
+        box.set_halign(halign)
+    if hexpand:
+        box.set_hexpand(True)
+    return box
+
+
+# ─── Symbolic icons that stand in for well-known packages ─────────────────────
+# Grouped by icon: every package listed under a symbol is shown with it.
+
+_ICON_GROUPS = {
+    "utilities-terminal-symbolic":
+        ("linux", "bash", "zsh", "fish",),
+    "drive-harddisk-symbolic":
+        ("linux-firmware",),
+    "package-x-generic-symbolic":
+        ("base", "flatpak", "pacman", "yay", "paru",),
+    "preferences-system-details-symbolic":
+        ("git",),
+    "text-x-script-symbolic":
+        ("python", "python-pip", "nodejs", "npm",),
+    "application-x-executable-symbolic":
+        ("rust", "go", "docker",),
+    "applications-engineering-symbolic":
+        ("cmake",),
+    "network-wireless-symbolic":
+        ("networkmanager",),
+    "network-server-symbolic":
+        ("openssh",),
+    "audio-speakers-symbolic":
+        ("pipewire",),
+    "audio-card-symbolic":
+        ("alsa-utils",),
+    "utilities-system-monitor-symbolic":
+        ("htop",),
+    "network-transmit-receive-symbolic":
+        ("curl", "wget",),
+    "text-editor-symbolic":
+        ("vim", "nano", "visual-studio-code-bin",),
+    "video-display-symbolic":
+        ("mesa",),
+    "document-revert-symbolic":
+        ("timeshift",),
+    "preferences-system-symbolic":
+        ("systemd",),
+    "web-browser-symbolic":
+        ("firefox", "chromium", "google-chrome",),
+    "applications-graphics-symbolic":
+        ("gimp",),
+    "applications-multimedia-symbolic":
+        ("vlc",),
 }
+
+PKG_ICONS = {pkg: symbol
+             for symbol, members in _ICON_GROUPS.items()
+             for pkg in members}
 
 
 def pkg_icon(name):
@@ -134,12 +159,9 @@ class PackageItem(GObject.Object):
     def __init__(self, name, version, repo="local", status="installed",
                  description="", foreign=False, source_id=None, new_version=""):
         super().__init__()
-        self.pkg_name        = name
-        self.pkg_version     = version
-        self.pkg_repo        = repo
-        self.pkg_status      = status
-        self.pkg_description = description
-        self.pkg_foreign     = foreign
+        (self.pkg_name, self.pkg_version, self.pkg_repo,
+         self.pkg_status, self.pkg_description, self.pkg_foreign) = (
+            name, version, repo, status, description, foreign)
         # Set for Flatpak (application ID, e.g. "org.gimp.GIMP") and Snap
         # (plain package name) entries — that's what the actual install/
         # remove commands need, kept separate from pkg_name so the display
@@ -247,9 +269,7 @@ class PackageRowContent(Gtk.Box):
         self.icon.add_css_class("dim-label")
         self.append(self.icon)
 
-        info_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        info_box.set_hexpand(True)
-        info_box.set_valign(Gtk.Align.CENTER)
+        info_box = _make_box(True, 1, valign=Gtk.Align.CENTER, hexpand=True)
 
         self.name_label = Gtk.Label()
         self.name_label.set_halign(Gtk.Align.START)
@@ -269,12 +289,8 @@ class PackageRowContent(Gtk.Box):
         info_box.append(self.desc_label)
         self.append(info_box)
 
-        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        right.set_valign(Gtk.Align.CENTER)
-        right.set_halign(Gtk.Align.END)
-
-        badges_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        badges_row.set_halign(Gtk.Align.END)
+        right = _make_box(True, 3, valign=Gtk.Align.CENTER, halign=Gtk.Align.END)
+        badges_row = _make_box(False, 4, halign=Gtk.Align.END)
         self.status_badge = Gtk.Label()
         self.status_badge.add_css_class("row-status-pill")
         badges_row.append(self.status_badge)
@@ -399,44 +415,46 @@ def make_package_listview(on_activate, on_selection_change=None, sel_state=None)
     return listview, store, selection, sel_state
 
 
-# ─── Sidebar navigation row ───────────────────────────────────────────────────
+# ─── Row in the sidebar navigation ────────────────────────────────────────────
 
 class NavRow(Gtk.ListBoxRow):
     def __init__(self, icon_name, label, count=None, badge_css=None):
         super().__init__()
-        self.add_css_class("nav-row")
         self.set_activatable(True)
+        self.add_css_class("nav-row")
 
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        box.set_margin_top(7);    box.set_margin_bottom(7)
-        box.set_margin_start(10); box.set_margin_end(10)
+        content = _make_box(False, 10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        content.set_margin_top(7)
+        content.set_margin_bottom(7)
 
-        icon = make_icon(icon_name, 18)
-        icon.set_valign(Gtk.Align.CENTER)
-        icon.add_css_class("dim-label")
-        box.append(icon)
+        symbol = make_icon(icon_name, 18)
+        symbol.set_valign(Gtk.Align.CENTER)
+        symbol.add_css_class("dim-label")
+        content.append(symbol)
 
-        lbl = Gtk.Label(label=label)
-        lbl.set_hexpand(True)
-        lbl.set_halign(Gtk.Align.START)
-        lbl.set_valign(Gtk.Align.CENTER)
-        box.append(lbl)
+        title = Gtk.Label(label=label, hexpand=True, halign=Gtk.Align.START,
+                          valign=Gtk.Align.CENTER)
+        content.append(title)
 
         self.count_lbl = None
         if count is not None:
-            self.count_lbl = Gtk.Label(label=str(count))
-            self.count_lbl.add_css_class("count-badge")
-            if badge_css:
-                self.count_lbl.add_css_class(badge_css)
-            self.count_lbl.set_valign(Gtk.Align.CENTER)
-            self.count_lbl.set_visible(int(str(count)) > 0 if str(count).isdigit() else True)
-            box.append(self.count_lbl)
+            digits = str(count)
+            classes = ["count-badge"] + ([badge_css] if badge_css else [])
+            badge = Gtk.Label(label=digits, valign=Gtk.Align.CENTER,
+                              css_classes=classes)
+            # numeric counts of 0 stay hidden; non-numeric text is always shown
+            badge.set_visible(int(digits) > 0 if digits.isdigit() else True)
+            content.append(badge)
+            self.count_lbl = badge
 
         self._badge_css = badge_css
-        self.set_child(box)
+        self.set_child(content)
 
     def set_count(self, n):
-        if self.count_lbl:
-            self.count_lbl.set_label(str(n))
-            self.count_lbl.set_visible(n > 0)
-            self.count_lbl.set_visible(n > 0)
+        badge = self.count_lbl
+        if badge is None:
+            return
+        badge.set_label(str(n))
+        badge.set_visible(n > 0)

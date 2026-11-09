@@ -1,72 +1,100 @@
 #!/usr/bin/env bash
-# ──────────────────────────────────────────────────────────────────────────────
-#  Pachul Installer
-#  A powerful Pacman/AUR front end using GTK4 and libadwaita
+# ══════════════════════════════════════════════════════════════════════════════
+#  Pachul installer
+#  Graphical Pacman/AUR front end (GTK4 + libadwaita)
 #  https://github.com/wergosam/Pachul
-# ──────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
 
-# ── Colours ───────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
+# ── Terminal output helpers ───────────────────────────────────────────────────
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'
+BOLD=$'\033[1m'
+RESET=$'\033[0m'
 
-info()    { echo -e "${CYAN}${BOLD}[·]${RESET} $*"; }
-success() { echo -e "${GREEN}${BOLD}[✓]${RESET} $*"; }
-warn()    { echo -e "${YELLOW}${BOLD}[!]${RESET} $*"; }
-error()   { echo -e "${RED}${BOLD}[✗]${RESET} $*" >&2; }
+# _say <colour> <symbol> <text…> — coloured "[symbol] text"; text may use \n etc.
+_say() {
+    local colour="$1" symbol="$2"
+    shift 2
+    printf '%s%s[%s]%s %b\n' "$colour" "$BOLD" "$symbol" "$RESET" "$*"
+}
+info()    { _say "$CYAN"   '·' "$@"; }
+success() { _say "$GREEN"  '✓' "$@"; }
+warn()    { _say "$YELLOW" '!' "$@"; }
+error()   { _say "$RED"    '✗' "$@" >&2; }
 die()     { error "$*"; exit 1; }
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# ── Names and locations ───────────────────────────────────────────────────────
 APP_NAME="pachul"
-INSTALL_DIR="/usr/local/bin"
-DATA_DIR="/usr/local/share/${APP_NAME}"
-DESKTOP_DIR="/usr/share/applications"
-ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
-POLICY_DIR="/usr/share/polkit-1/actions"
 ICON_ID="io.github.wergosam.pachul"
 BW_ICON_ID="io_github_wergosam_pachul_bw"
+
+INSTALL_DIR=/usr/local/bin
+DATA_DIR=/usr/local/share/${APP_NAME}
+DESKTOP_DIR=/usr/share/applications
+ICON_DIR=/usr/share/icons/hicolor/scalable/apps
+POLICY_DIR=/usr/share/polkit-1/actions
 DESKTOP_FILE="${DESKTOP_DIR}/${ICON_ID}.desktop"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Application Python modules (relative to SRC_DIR)
-PY_MODULES=(app.py backend.py dialogs.py distro.py i18n.py icons.py localpkg.py models.py
-            pkgmanager.py pkgmanager_native.py styles.py toolshub.py window.py notifier.py tray.py)
+# Python modules shipped next to this script
+PY_MODULES=(
+    app.py backend.py dialogs.py distro.py i18n.py icons.py localpkg.py
+    models.py pkgmanager.py pkgmanager_native.py styles.py toolshub.py
+    window.py notifier.py tray.py
+)
+# Icons that are copied both to DATA_DIR and to the hicolor theme
+ICON_FILES=("${ICON_ID}.svg" "${BW_ICON_ID}.svg")
 
-# ── Banner ────────────────────────────────────────────────────────────────────
-echo -e "
-Pachul — Pacman/AUR Front End — Installer v1.0.0
-"
+# ── Welcome ───────────────────────────────────────────────────────────────────
+printf '\n%s\n\n' "Pachul — Pacman/AUR Front End — Installer v1.0.0"
 
-# ── Root check ────────────────────────────────────────────────────────────────
-if [[ $EUID -ne 0 ]]; then
+# Installing system files needs root; restart through sudo if necessary
+[[ $EUID -eq 0 ]] || {
     warn "Not running as root — re-launching with sudo…"
     exec sudo bash "$0" "$@"
-fi
+}
 
-# ── Distro / package-manager detection ───────────────────────────────────────
-# Pachul now also supports Debian/Ubuntu (apt), Fedora (dnf) and openSUSE
-# (zypper) — see distro.py/pkgmanager.py. This installer only needs to know
-# which package manager to use for its OWN dependency install below; it
-# mirrors distro.py's own detection logic (os-release ID/ID_LIKE, falling
-# back to whichever binary is on PATH) so both stay in sync.
+# ── Which package manager are we on? ─────────────────────────────────────────
+# Pachul runs on Arch (pacman), Debian/Ubuntu (apt), Fedora (dnf) and
+# openSUSE (zypper), see distro.py / pkgmanager.py. The installer only needs
+# the family to pick its own dependency commands. It follows distro.py: first
+# the os-release ID / ID_LIKE words, then whichever tool is found on PATH.
 detect_family() {
+    local words="" family word tool
+    local -A id_words=(
+        [arch]="arch archlinux manjaro endeavouros"
+        [debian]="debian ubuntu"
+        [fedora]="fedora rhel centos"
+        [suse]="suse opensuse sles"
+    )
+    local -A path_tools=(
+        [arch]=pacman [debian]=apt-get [fedora]=dnf [suse]=zypper
+    )
+
     if [[ -r /etc/os-release ]]; then
         . /etc/os-release
-        local ids="${ID:-} ${ID_LIKE:-}"
-        case " ${ids} " in
-            *" arch "*|*" archlinux "*|*" manjaro "*|*" endeavouros "*) echo arch; return ;;
-            *" debian "*|*" ubuntu "*) echo debian; return ;;
-            *" fedora "*|*" rhel "*|*" centos "*) echo fedora; return ;;
-            *" suse "*|*" opensuse "*|*" sles "*) echo suse; return ;;
-        esac
+        words=" ${ID:-} ${ID_LIKE:-} "
+        for family in arch debian fedora suse; do
+            for word in ${id_words[$family]}; do
+                if [[ "$words" == *" ${word} "* ]]; then
+                    echo "$family"
+                    return
+                fi
+            done
+        done
     fi
-    if command -v pacman &>/dev/null; then echo arch
-    elif command -v apt-get &>/dev/null; then echo debian
-    elif command -v dnf &>/dev/null; then echo fedora
-    elif command -v zypper &>/dev/null; then echo suse
-    else echo unknown
-    fi
+    for family in arch debian fedora suse; do
+        tool="${path_tools[$family]}"
+        if command -v "$tool" &>/dev/null; then
+            echo "$family"
+            return
+        fi
+    done
+    echo unknown
 }
 
 DISTRO_FAMILY="$(detect_family)"
@@ -76,263 +104,245 @@ if [[ "$DISTRO_FAMILY" == "unknown" ]]; then
     die "Pachul requires Arch (pacman), Debian/Ubuntu (apt), Fedora (dnf) or openSUSE (zypper) — none found."
 fi
 
-# ── Source file check ─────────────────────────────────────────────────────────
+# ── Are all files here? ──────────────────────────────────────────────────────
 info "Checking source files…"
-MISSING_FILES=()
-for f in "${PY_MODULES[@]}"; do
-    [[ -f "${SRC_DIR}/${f}" ]] || MISSING_FILES+=("$f")
+absent=()
+for rel in "${PY_MODULES[@]}" "${ICON_FILES[@]}"; do
+    [[ -f "${SRC_DIR}/${rel}" ]] || absent+=("$rel")
 done
-[[ -f "${SRC_DIR}/${ICON_ID}.svg" ]] || MISSING_FILES+=("${ICON_ID}.svg")
-[[ -f "${SRC_DIR}/${BW_ICON_ID}.svg" ]] || MISSING_FILES+=("${BW_ICON_ID}.svg")
-
-if [[ ${#MISSING_FILES[@]} -gt 0 ]]; then
-    die "Missing files in ${SRC_DIR}:\n$(printf '   • %s\n' "${MISSING_FILES[@]}")"
+if (( ${#absent[@]} > 0 )); then
+    die "Missing files in ${SRC_DIR}:\n$(printf '   • %s\n' "${absent[@]}")"
 fi
 success "All source files present."
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  1. Dependencies
-# ─────────────────────────────────────────────────────────────────────────────
+# ══ 1. Dependencies ═══════════════════════════════════════════════════════════
 info "Checking dependencies…"
 
-# Package names differ per distro. Arch and Fedora are verified against
-# real systems; Debian/Ubuntu and openSUSE names are best-effort (same
-# "written carefully, not live-tested" caveat as the rest of the
-# multi-distro work — see DISTRO_SUPPORT_CHANGES.md) and worth double-
-# checking on a real system if dependency install fails there.
+# Package names differ between distributions. The Arch and Fedora lists were
+# checked on real systems; the Debian/Ubuntu and openSUSE names are
+# best-effort (written carefully, not live-tested — see
+# DISTRO_SUPPORT_CHANGES.md). If the install fails there, compare them with
+# your distribution's package search.
 case "$DISTRO_FAMILY" in
     arch)
         REQUIRED_PKGS=(python gtk4 libadwaita python-gobject pacman-contrib libnotify)
-        is_installed() { pacman -Qi "$1" &>/dev/null; }
-        install_pkgs() { pacman -Sy --noconfirm --needed "$@"; }
+        QUERY_CMD=(pacman -Qi)
+        INSTALL_CMD=(pacman -Sy --noconfirm --needed)
         ;;
     fedora)
         REQUIRED_PKGS=(python3 gtk4 libadwaita python3-gobject libnotify)
-        is_installed() { rpm -q "$1" &>/dev/null; }
-        install_pkgs() { dnf install -y "$@"; }
+        QUERY_CMD=(rpm -q)
+        INSTALL_CMD=(dnf install -y)
         ;;
     debian)
         REQUIRED_PKGS=(python3 gir1.2-gtk-4.0 gir1.2-adw-1 python3-gi libnotify-bin)
-        is_installed() { dpkg -s "$1" &>/dev/null; }
-        install_pkgs() { apt-get update && apt-get install -y "$@"; }
+        QUERY_CMD=(dpkg -s)
+        INSTALL_CMD=(apt-get install -y)
         ;;
     suse)
         REQUIRED_PKGS=(python3 typelib-1_0-Gtk-4_0 typelib-1_0-Adw-1 python3-gobject libnotify-tools)
-        is_installed() { rpm -q "$1" &>/dev/null; }
-        install_pkgs() { zypper --non-interactive install "$@"; }
+        QUERY_CMD=(rpm -q)
+        INSTALL_CMD=(zypper --non-interactive install)
         ;;
 esac
 
-MISSING_PKGS=()
-for pkg in "${REQUIRED_PKGS[@]}"; do
-    is_installed "$pkg" || MISSING_PKGS+=("$pkg")
+is_installed() { "${QUERY_CMD[@]}" "$1" &>/dev/null; }
+
+install_pkgs() {
+    # apt needs a fresh package index first; stop if that fails
+    if [[ "$DISTRO_FAMILY" == "debian" ]]; then
+        apt-get update || return 1
+    fi
+    "${INSTALL_CMD[@]}" "$@"
+}
+
+to_install=()
+for dep in "${REQUIRED_PKGS[@]}"; do
+    is_installed "$dep" || to_install+=("$dep")
 done
 
-if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
-    warn "Installing missing packages: ${MISSING_PKGS[*]}"
-    install_pkgs "${MISSING_PKGS[@]}" || die "Failed to install dependencies."
-    success "Dependencies installed."
-else
+if (( ${#to_install[@]} == 0 )); then
     success "All dependencies satisfied."
+else
+    warn "Installing missing packages: ${to_install[*]}"
+    if ! install_pkgs "${to_install[@]}"; then
+        die "Failed to install dependencies."
+    fi
+    success "Dependencies installed."
 fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  2. Install application modules
-# ─────────────────────────────────────────────────────────────────────────────
+# ══ 2. Application modules ════════════════════════════════════════════════════
 
-# Clear out stale icon files from an earlier installation first. `install`
-# below overwrites an existing file without complaint on its own — but a
-# reinstall that happens via a package manager instead (e.g. the AUR
-# package built from PKGBUILD) can abort with a "file already exists,
-# owned by no package" conflict if these same three paths are already
-# sitting there from a previous install.sh run (or an older release that
-# used a different icon filename here, e.g. the now-unused
-# "_transparent" variant). Removing them ourselves first — regardless of
-# which of DATA_DIR/ICON_DIR they're in, or how they got there — means
-# the install below (and any later package-manager install of the same
-# paths) always starts from a clean slate instead of tripping over
-# leftovers.
+# First remove icon files from an earlier installation. `install` itself would
+# simply overwrite them, but a later install through the package manager (the
+# AUR package built from PKGBUILD) fails with "file already exists, owned by
+# no package" if these paths are still around from an install.sh run or from
+# an older release with a different icon name (e.g. the unused "_transparent"
+# variant). Deleting them up front, wherever they ended up, gives every
+# install a clean start.
 STALE_ICON_FILES=(
     "io_github_wergosam_pachul_bw.svg"
     "io_github_wergosam_pachul_transparent.svg"
     "io.github.wergosam.pachul.svg"
 )
 info "Checking for icon files left over from a previous installation…"
-FOUND_STALE=0
+removed_any=0
 for dir in "$DATA_DIR" "$ICON_DIR"; do
-    for f in "${STALE_ICON_FILES[@]}"; do
-        # -e alone misses a dangling symlink (a target that no longer
-        # exists but the link itself still does) — -L catches that case
-        # too, same reasoning as app.py's own os.path.lexists() check.
-        if [[ -e "${dir}/${f}" || -L "${dir}/${f}" ]]; then
-            rm -f "${dir}/${f}"
-            info "Removed existing ${dir}/${f}"
-            FOUND_STALE=1
+    for name in "${STALE_ICON_FILES[@]}"; do
+        leftover="${dir}/${name}"
+        # -L as well as -e: a dangling symlink fails -e although the link is
+        # still there (same idea as os.path.lexists() in app.py)
+        if [[ -e "$leftover" || -L "$leftover" ]]; then
+            rm -f "$leftover"
+            info "Removed existing ${leftover}"
+            removed_any=1
         fi
     done
 done
-[[ $FOUND_STALE -eq 1 ]] && success "Stale icon files removed." \
-    || info "No stale icon files found."
-
-info "Installing Pachul modules to ${DATA_DIR}…"
-
-install -d "$DATA_DIR"
-for f in "${PY_MODULES[@]}"; do
-    install -m 644 "${SRC_DIR}/${f}" "${DATA_DIR}/${f}"
-done
-install -m 644 "${SRC_DIR}/${ICON_ID}.svg" "${DATA_DIR}/${ICON_ID}.svg"
-install -m 644 "${SRC_DIR}/${BW_ICON_ID}.svg" "${DATA_DIR}/${BW_ICON_ID}.svg"
-success "Modules installed."
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  3. Launcher wrapper
-# ─────────────────────────────────────────────────────────────────────────────
-info "Creating launcher at ${INSTALL_DIR}/${APP_NAME}…"
-
-cat > "${INSTALL_DIR}/${APP_NAME}" <<EOF
-#!/usr/bin/env bash
-# Pachul launcher — generated by install.sh
-export PYTHONPATH="${DATA_DIR}:\${PYTHONPATH:-}"
-exec python3 "${DATA_DIR}/app.py" "\$@"
-EOF
-chmod 755 "${INSTALL_DIR}/${APP_NAME}"
-success "Launcher created."
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  3b. Tray launcher (persistent update-status icon, see tray.py)
-# ─────────────────────────────────────────────────────────────────────────────
-info "Creating tray launcher at ${INSTALL_DIR}/${APP_NAME}-tray…"
-
-cat > "${INSTALL_DIR}/${APP_NAME}-tray" <<EOF
-#!/usr/bin/env bash
-# Pachul tray launcher — generated by install.sh
-export PYTHONPATH="${DATA_DIR}:\${PYTHONPATH:-}"
-exec python3 "${DATA_DIR}/tray.py" "\$@"
-EOF
-chmod 755 "${INSTALL_DIR}/${APP_NAME}-tray"
-success "Tray launcher created."
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  3c. pachuli AUR helper (optional — installs it to the same directory as
-#      the pachul launcher, so it's automatically on PATH and Pachul picks
-#      it up over yay/paru without any extra configuration. Entirely
-#      optional, same pattern as the Polkit policy below: a source checkout
-#      without pachuli.py next to install.sh (e.g. Pachul used with yay/
-#      paru instead) just skips this step.
-# ─────────────────────────────────────────────────────────────────────────────
-PACHULI_SRC="${SRC_DIR}/pachuli.py"
-if [[ -f "$PACHULI_SRC" ]]; then
-    info "Installing pachuli AUR helper to ${INSTALL_DIR}/pachuli…"
-    install -m 755 "$PACHULI_SRC" "${INSTALL_DIR}/pachuli"
-    success "pachuli installed — already on PATH via ${INSTALL_DIR}."
+if (( removed_any )); then
+    success "Stale icon files removed."
 else
-    info "No pachuli.py found next to install.sh — skipping (optional; Pachul falls back to yay/paru if installed)."
+    info "No stale icon files found."
 fi
 
+info "Installing Pachul modules to ${DATA_DIR}…"
+install -d "$DATA_DIR"
+for rel in "${PY_MODULES[@]}" "${ICON_FILES[@]}"; do
+    install -m 644 "${SRC_DIR}/${rel}" "${DATA_DIR}/${rel}"
+done
+success "Modules installed."
+
+# ══ 3. Launchers ══════════════════════════════════════════════════════════════
+
+# write_launcher <file> <description> <python file in DATA_DIR>
+write_launcher() {
+    local file="$1" description="$2" entry="$3"
+    cat > "$file" <<EOF
+#!/usr/bin/env bash
+# ${description} — generated by install.sh
+export PYTHONPATH="${DATA_DIR}:\${PYTHONPATH:-}"
+exec python3 "${DATA_DIR}/${entry}" "\$@"
+EOF
+    chmod 755 "$file"
+}
+
+info "Creating launcher at ${INSTALL_DIR}/${APP_NAME}…"
+write_launcher "${INSTALL_DIR}/${APP_NAME}" "Pachul launcher" "app.py"
+success "Launcher created."
+
+# Tray launcher: persistent update-status icon, see tray.py
+info "Creating tray launcher at ${INSTALL_DIR}/${APP_NAME}-tray…"
+write_launcher "${INSTALL_DIR}/${APP_NAME}-tray" "Pachul tray launcher" "tray.py"
+success "Tray launcher created."
+
+# optional_install <source> <target> <mode> <start msg> <success msg> <skip msg>
+# Copies a file that may be absent from a source checkout; absence is no error.
+optional_install() {
+    local source_file="$1" target="$2" mode="$3"
+    if [[ -f "$source_file" ]]; then
+        info "$4"
+        install -D -m "$mode" "$source_file" "$target"
+        success "$5"
+    else
+        info "$6"
+    fi
+}
+
+# pachuli, the companion AUR helper: placed next to the launcher, so it is on
+# PATH at once and Pachul prefers it over yay/paru. Optional, a checkout
+# without pachuli.py (Pachul used with yay or paru) just skips it.
+optional_install "${SRC_DIR}/pachuli.py" "${INSTALL_DIR}/pachuli" 755 \
+    "Installing pachuli AUR helper to ${INSTALL_DIR}/pachuli…" \
+    "pachuli installed — already on PATH via ${INSTALL_DIR}." \
+    "No pachuli.py found next to install.sh — skipping (optional; Pachul falls back to yay/paru if installed)."
+
+# The tray icon needs an AppIndicator library; only warn if it is missing
+tray_lib_present=1
+tray_hints=()
 case "$DISTRO_FAMILY" in
     arch)
-        if ! pacman -Qi libayatana-appindicator &>/dev/null && ! pacman -Qi libappindicator-gtk3 &>/dev/null; then
-            warn "libayatana-appindicator not found — the tray icon needs it to show up."
-            warn "Install with: sudo pacman -S libayatana-appindicator"
-        fi
+        pacman -Qi libayatana-appindicator &>/dev/null \
+            || pacman -Qi libappindicator-gtk3 &>/dev/null \
+            || tray_lib_present=0
+        tray_hints=("libayatana-appindicator not found — the tray icon needs it to show up."
+                    "Install with: sudo pacman -S libayatana-appindicator")
         ;;
     fedora)
-        if ! rpm -q libappindicator-gtk3 &>/dev/null; then
-            warn "libappindicator-gtk3 not found — the tray icon needs it to show up."
-            warn "Install with: sudo dnf install libappindicator-gtk3"
-        fi
+        rpm -q libappindicator-gtk3 &>/dev/null || tray_lib_present=0
+        tray_hints=("libappindicator-gtk3 not found — the tray icon needs it to show up."
+                    "Install with: sudo dnf install libappindicator-gtk3")
         ;;
     debian)
-        if ! dpkg -s gir1.2-ayatanaappindicator3-0.1 &>/dev/null; then
-            warn "libayatana-appindicator (GObject introspection bindings) not found — the tray icon needs it."
-            warn "Install with: sudo apt-get install gir1.2-ayatanaappindicator3-0.1"
-        fi
+        dpkg -s gir1.2-ayatanaappindicator3-0.1 &>/dev/null || tray_lib_present=0
+        tray_hints=("libayatana-appindicator (GObject introspection bindings) not found — the tray icon needs it."
+                    "Install with: sudo apt-get install gir1.2-ayatanaappindicator3-0.1")
         ;;
     suse)
-        if ! rpm -q typelib-1_0-AyatanaAppIndicator3-0_1 &>/dev/null; then
-            warn "AyatanaAppIndicator3 typelib not found — the tray icon needs it to show up."
-            warn "Install with: sudo zypper install typelib-1_0-AyatanaAppIndicator3-0_1"
-        fi
+        rpm -q typelib-1_0-AyatanaAppIndicator3-0_1 &>/dev/null || tray_lib_present=0
+        tray_hints=("AyatanaAppIndicator3 typelib not found — the tray icon needs it to show up."
+                    "Install with: sudo zypper install typelib-1_0-AyatanaAppIndicator3-0_1")
         ;;
 esac
+if (( ! tray_lib_present )); then
+    for hint in "${tray_hints[@]}"; do
+        warn "$hint"
+    done
+fi
 
-# Autostart for the tray icon is no longer set up here — Pachul manages its
-# own per-user autostart entry (~/.config/autostart), toggleable from
-# Preferences → Tray Icon, so it works without another sudo prompt and
-# never conflicts with a system-wide entry.
+# Tray autostart is not configured here: Pachul keeps its own per-user
+# autostart entry (~/.config/autostart), switchable under Preferences →
+# Tray Icon. That avoids another sudo prompt and any clash with a system-wide
+# entry.
 info "Tray icon autostart: enable it from Pachul's Preferences → Tray Icon."
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  4. Desktop entry
-# ─────────────────────────────────────────────────────────────────────────────
+# ══ 4. Menu entry ═════════════════════════════════════════════════════════════
 info "Creating desktop entry…"
-
 install -d "$DESKTOP_DIR"
-cat > "$DESKTOP_FILE" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Pachul
-GenericName=Package Manager
-Comment=A powerful Pacman/AUR front end
-Exec=${INSTALL_DIR}/${APP_NAME}
-Icon=${ICON_ID}
-Categories=System;PackageManager;
-Keywords=pacman;aur;packages;arch;
-Terminal=false
-StartupWMClass=pachul
-EOF
+printf '%s\n' \
+    "[Desktop Entry]" \
+    "Type=Application" \
+    "Name=Pachul" \
+    "GenericName=Package Manager" \
+    "Comment=A powerful Pacman/AUR front end" \
+    "Exec=${INSTALL_DIR}/${APP_NAME}" \
+    "Icon=${ICON_ID}" \
+    "Categories=System;PackageManager;" \
+    "Keywords=pacman;aur;packages;arch;" \
+    "Terminal=false" \
+    "StartupWMClass=pachul" \
+    > "$DESKTOP_FILE"
 success "Desktop entry created."
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  5. Icon
-# ─────────────────────────────────────────────────────────────────────────────
+# ══ 5. Icons ══════════════════════════════════════════════════════════════════
 info "Installing icon…"
-
 install -d "$ICON_DIR"
-install -m 644 "${SRC_DIR}/${ICON_ID}.svg" "${ICON_DIR}/${ICON_ID}.svg"
-install -m 644 "${SRC_DIR}/${BW_ICON_ID}.svg" "${ICON_DIR}/${BW_ICON_ID}.svg"
+for rel in "${ICON_FILES[@]}"; do
+    install -m 644 "${SRC_DIR}/${rel}" "${ICON_DIR}/${rel}"
+done
 gtk-update-icon-cache -f -t /usr/share/icons/hicolor &>/dev/null || true
 success "Icon installed."
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  5b. Polkit policy (optional — nicer "Authentication required to manage
-#      packages with Pachul" text in the native pkexec dialog, instead of
-#      Polkit's generic fallback message that dumps the raw command line;
-#      see PKEXEC_MIGRATION.md for the full explanation and trade-offs).
-#      Entirely optional — Pachul's pkexec calls work fine without it, so a
-#      missing file here (e.g. an older source checkout) is not an error.
-# ─────────────────────────────────────────────────────────────────────────────
-POLICY_SRC="${SRC_DIR}/${ICON_ID}.policy"
-if [[ -f "$POLICY_SRC" ]]; then
-    info "Installing Polkit policy (nicer authentication dialog text)…"
-    install -d "$POLICY_DIR"
-    install -m 644 "$POLICY_SRC" "${POLICY_DIR}/${ICON_ID}.policy"
-    success "Polkit policy installed — no polkitd restart needed."
-else
-    info "No ${ICON_ID}.policy found next to install.sh — skipping (optional, app works fine without it)."
-fi
+# Polkit policy: gives the native pkexec dialog a readable "Authentication
+# required to manage packages with Pachul" text instead of Polkit's generic
+# fallback that prints the raw command line (details and trade-offs in
+# PKEXEC_MIGRATION.md). Optional — pkexec works without it, so a checkout
+# lacking the file is fine.
+optional_install "${SRC_DIR}/${ICON_ID}.policy" "${POLICY_DIR}/${ICON_ID}.policy" 644 \
+    "Installing Polkit policy (nicer authentication dialog text)…" \
+    "Polkit policy installed — no polkitd restart needed." \
+    "No ${ICON_ID}.policy found next to install.sh — skipping (optional, app works fine without it)."
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  6. Update desktop database
-# ─────────────────────────────────────────────────────────────────────────────
+# ══ 6. Refresh the desktop database ═══════════════════════════════════════════
 update-desktop-database "$DESKTOP_DIR" &>/dev/null || true
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Done
-# ─────────────────────────────────────────────────────────────────────────────
-echo
-echo -e "${GREEN}${BOLD}  Pachul installed successfully!${RESET}"
-echo
-echo -e "  Installed modules  : ${BOLD}${DATA_DIR}/${RESET}"
-printf  "                       %s\n" "${PY_MODULES[@]}"
-echo
-echo -e "  Run from terminal  : ${BOLD}pachul${RESET}"
-echo -e "  Or launch from     : ${BOLD}Applications → System → Pachul${RESET}"
-echo
-echo -e "  Tray update icon   : enable at login via Preferences → Tray Icon"
-echo -e "  Run it right away  : ${BOLD}${APP_NAME}-tray &${RESET}"
-echo
+# ══ Summary ═══════════════════════════════════════════════════════════════════
+printf '\n%b\n\n' "${GREEN}${BOLD}  Pachul installed successfully!${RESET}"
+printf '%b\n' "  Installed modules  : ${BOLD}${DATA_DIR}/${RESET}"
+printf '                       %s\n' "${PY_MODULES[@]}"
+printf '\n%b\n' "  Run from terminal  : ${BOLD}pachul${RESET}"
+printf '%b\n\n' "  Or launch from     : ${BOLD}Applications → System → Pachul${RESET}"
+printf '%b\n' "  Tray update icon   : enable at login via Preferences → Tray Icon"
+printf '%b\n\n' "  Run it right away  : ${BOLD}${APP_NAME}-tray &${RESET}"
 if [[ -f "${INSTALL_DIR}/pachuli" ]]; then
-    echo -e "  AUR helper         : ${BOLD}pachuli${RESET} (installed to ${INSTALL_DIR}, used automatically by Pachul)"
-    echo
+    printf '%b\n\n' "  AUR helper         : ${BOLD}pachuli${RESET} (installed to ${INSTALL_DIR}, used automatically by Pachul)"
 fi

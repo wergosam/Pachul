@@ -99,6 +99,60 @@ from dialogs import (
 )
 
 
+# ── kleine Widget-Bausteine (modulweit, von mehreren Panels genutzt) ─────────
+
+_POLICY_AUTO = Gtk.PolicyType.AUTOMATIC
+_POLICY_NEVER = Gtk.PolicyType.NEVER
+
+
+def _make_box(vertical=True, gap=0, *classes):
+    """Gtk.Box mit Ausrichtung, Abstand und optionalen CSS-Klassen."""
+    box = Gtk.Box()
+    box.set_orientation(Gtk.Orientation.VERTICAL if vertical
+                        else Gtk.Orientation.HORIZONTAL)
+    box.set_spacing(gap)
+    for name in classes:
+        box.add_css_class(name)
+    return box
+
+
+def _set_margins(widget, start=None, end=None, top=None, bottom=None):
+    """Setzt nur die übergebenen Aussenabstände."""
+    if start is not None:
+        widget.set_margin_start(start)
+    if end is not None:
+        widget.set_margin_end(end)
+    if top is not None:
+        widget.set_margin_top(top)
+    if bottom is not None:
+        widget.set_margin_bottom(bottom)
+
+
+def _scroller(h_policy, v_policy, min_h=None, max_h=None):
+    """Gtk.ScrolledWindow mit Scroll-Richtlinien und optionalen Höhengrenzen."""
+    sw = Gtk.ScrolledWindow()
+    sw.set_policy(h_policy, v_policy)
+    if min_h is not None:
+        sw.set_min_content_height(min_h)
+    if max_h is not None:
+        sw.set_max_content_height(max_h)
+    return sw
+
+
+def _chip_flow():
+    """FlowBox für Abhängigkeits-Chips, eingebettet in eine ListBoxRow.
+    Gibt (flow, row) zurück; die Row wird vom Aufrufer in eine ExpanderRow gehängt."""
+    flow = Gtk.FlowBox()
+    flow.set_selection_mode(Gtk.SelectionMode.NONE)
+    flow.set_column_spacing(6)
+    flow.set_row_spacing(6)
+    _set_margins(flow, start=12, end=12, top=8, bottom=10)
+    row = Gtk.ListBoxRow()
+    row.set_activatable(False)
+    row.set_child(flow)
+    return flow, row
+
+
 class DetailPanel:
     """Right-hand package detail view: hero header + Info tab + Files tab.
 
@@ -178,12 +232,10 @@ class DetailPanel:
         self.stack.add_named(batch_page, "batch")
         self.stack.set_visible_child_name("empty")
 
-        # ---- Detail view (unchanged) ----
-        detail_scroll = Gtk.ScrolledWindow()
-        detail_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        detail_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        detail_box.set_margin_top(16);   detail_box.set_margin_bottom(24)
-        detail_box.set_margin_start(20); detail_box.set_margin_end(20)
+        # ---- Detailansicht ----
+        detail_scroll = _scroller(_POLICY_AUTO, _POLICY_AUTO)
+        detail_box = _make_box(True, 12)
+        _set_margins(detail_box, start=20, end=20, top=16, bottom=24)
 
         # Banner shown when this (repo-tracked) package also exists on the
         # true AUR at a newer version than what's installed — the
@@ -195,10 +247,9 @@ class DetailPanel:
         self.aur_ahead_banner.set_revealed(False)
         detail_box.append(self.aur_ahead_banner)
 
-        # Hero
-        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        hero.add_css_class("pkg-hero")
-        top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        # Kopfbereich mit Icon, Titel und Status
+        hero = _make_box(True, 12, "pkg-hero")
+        top_row = _make_box(False, 14)
         self.icon = Gtk.Image()
         self.icon.set_pixel_size(58); self.icon.set_valign(Gtk.Align.CENTER)
         _tex = get_icon_texture("package-x-generic-symbolic", 58)
@@ -289,11 +340,9 @@ class DetailPanel:
         detail_box.append(switcher)
 
         # Info tab
-        info_scroll = Gtk.ScrolledWindow()
-        info_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        info_scroll.set_min_content_height(200)
-        info_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        info_inner.set_margin_start(4); info_inner.set_margin_end(4)
+        info_scroll = _scroller(_POLICY_AUTO, _POLICY_AUTO, min_h=200)
+        info_inner = _make_box(True, 8)
+        _set_margins(info_inner, start=4, end=4)
         info_group = Adw.PreferencesGroup()
         info_group.set_title(tr("Package Information"))
         info_inner.append(info_group)
@@ -301,43 +350,31 @@ class DetailPanel:
             if key in self.DEP_KEYS:
                 exp_row = Adw.ExpanderRow()
                 exp_row.set_title(tr(key)); exp_row.set_subtitle("—")
-                flow = Gtk.FlowBox()
-                flow.set_selection_mode(Gtk.SelectionMode.NONE)
-                flow.set_column_spacing(6); flow.set_row_spacing(6)
-                flow.set_margin_start(12); flow.set_margin_end(12)
-                flow.set_margin_top(8); flow.set_margin_bottom(10)
-                flow_row = Gtk.ListBoxRow()
-                flow_row.set_activatable(False)
-                flow_row.set_child(flow)
+                flow, flow_row = _chip_flow()
                 exp_row.add_row(flow_row)
                 info_group.add(exp_row)
                 self.dep_rows[key] = (exp_row, flow)
                 self.info_rows[key] = exp_row
             else:
-                row = Adw.ActionRow()
-                row.set_title(tr(key)); row.set_subtitle("—")
-                row.set_subtitle_selectable(True)
-                info_group.add(row)
-                self.info_rows[key] = row
+                plain_row = Adw.ActionRow(title=tr(key), subtitle="—")
+                plain_row.set_subtitle_selectable(True)
+                self.info_rows[key] = plain_row
+                info_group.add(plain_row)
 
-        raw_group = Adw.PreferencesGroup()
-        raw_group.set_title(tr("Raw Output"))
-        info_inner.append(raw_group)
-        raw_exp = Adw.ExpanderRow()
-        raw_exp.set_title(tr("pacman -Qi output") if distro.is_arch() else tr("Raw package info"))
-        raw_exp.set_subtitle(tr("Full package information"))
+        raw_title = (tr("pacman -Qi output") if distro.is_arch()
+                     else tr("Raw package info"))
+        raw_exp = Adw.ExpanderRow(title=raw_title,
+                                  subtitle=tr("Full package information"))
+        raw_group = Adw.PreferencesGroup(title=tr("Raw Output"))
         raw_group.add(raw_exp)
-        raw_scroll = Gtk.ScrolledWindow()
-        raw_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        raw_scroll.set_min_content_height(120); raw_scroll.set_max_content_height(240)
-        self.raw_text = Gtk.Label(label="")
-        self.raw_text.set_selectable(True); self.raw_text.set_wrap(True)
-        self.raw_text.set_wrap_mode(Pango.WrapMode.CHAR)
-        self.raw_text.add_css_class("monospace"); self.raw_text.add_css_class("caption")
-        self.raw_text.set_xalign(0)
-        self.raw_text.set_margin_start(12); self.raw_text.set_margin_end(12)
-        self.raw_text.set_margin_top(8); self.raw_text.set_margin_bottom(8)
-        raw_scroll.set_child(self.raw_text)
+        info_inner.append(raw_group)
+        raw_scroll = _scroller(_POLICY_AUTO, _POLICY_AUTO, min_h=120, max_h=240)
+        raw_label = Gtk.Label(label="", selectable=True, wrap=True, xalign=0,
+                              wrap_mode=Pango.WrapMode.CHAR,
+                              css_classes=["monospace", "caption"])
+        _set_margins(raw_label, start=12, end=12, top=8, bottom=8)
+        self.raw_text = raw_label
+        raw_scroll.set_child(raw_label)
         raw_exp.add_row(raw_scroll)
         info_scroll.set_child(info_inner)
         self.view_stack.add_titled_with_icon(
@@ -345,18 +382,16 @@ class DetailPanel:
 
         # Files tab — virtualized ListView with a FilterListModel doing the
         # filtering, so typing in the search box never rebuilds the rows.
-        files_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        files_hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        files_hdr.set_margin_start(6); files_hdr.set_margin_end(6)
-        files_hdr.set_margin_top(6); files_hdr.set_margin_bottom(4)
+        files_box = _make_box(True, 0)
+        files_hdr = _make_box(False, 6)
+        _set_margins(files_hdr, start=6, end=6, top=6, bottom=4)
         self.files_search = Gtk.SearchEntry()
         self.files_search.set_placeholder_text(tr("Filter…"))
         self.files_search.set_hexpand(True)
         self.files_search.connect("search-changed", self._on_files_filter_changed)
         files_hdr.append(self.files_search)
-        self.files_count_lbl = Gtk.Label(label="")
-        self.files_count_lbl.add_css_class("caption"); self.files_count_lbl.add_css_class("dim-label")
-        self.files_count_lbl.set_halign(Gtk.Align.END)
+        self.files_count_lbl = Gtk.Label(label="", halign=Gtk.Align.END,
+                                         css_classes=["caption", "dim-label"])
         files_hdr.append(self.files_count_lbl)
         files_box.append(files_hdr)
 
@@ -684,90 +719,72 @@ class pachulWindow(Adw.ApplicationWindow):
 
     # ── Build UI ──────────────────────────────────────────────────────────────
 
+    def _header_text_btn(self, label, on_click=None, action=None):
+        """Flacher Text-Button für die Kopfleiste (Klick-Handler oder App-Aktion)."""
+        btn = Gtk.Button(label=label)
+        for name in ("flat", "header-menu-btn"):
+            btn.add_css_class(name)
+        if on_click is not None:
+            btn.connect("clicked", on_click)
+        if action is not None:
+            btn.set_action_name(action)
+        return btn
+
     def _build_ui(self):
-        self.nav_split = Adw.NavigationSplitView()
-        self.nav_split.set_max_sidebar_width(230)
-        self.nav_split.set_min_sidebar_width(190)
-        self.nav_split.set_sidebar_width_fraction(0.20)
+        split = Adw.NavigationSplitView()
+        split.set_sidebar_width_fraction(0.20)
+        split.set_min_sidebar_width(190)
+        split.set_max_sidebar_width(230)
+        self.nav_split = split
 
-        # Sidebar
-        sidebar_page = Adw.NavigationPage()
-        sidebar_page.set_title("Pachul")
-        sidebar_tv  = Adw.ToolbarView()
-        sidebar_hdr = Adw.HeaderBar()
-        sidebar_hdr.set_show_end_title_buttons(False)
-        title_lbl = Gtk.Label(label="Pachul")
-        title_lbl.add_css_class("heading")
-        sidebar_hdr.set_title_widget(title_lbl)
-        sidebar_tv.add_top_bar(sidebar_hdr)
-        sidebar_tv.set_content(self._build_sidebar())
-        sidebar_page.set_child(sidebar_tv)
-        self.nav_split.set_sidebar(sidebar_page)
+        # Linke Seite: Titelleiste mit Namen, darunter die Navigation
+        left_title = Gtk.Label(label="Pachul")
+        left_title.add_css_class("heading")
+        left_bar = Adw.HeaderBar()
+        left_bar.set_title_widget(left_title)
+        left_bar.set_show_end_title_buttons(False)
+        left_view = Adw.ToolbarView()
+        left_view.add_top_bar(left_bar)
+        left_view.set_content(self._build_sidebar())
+        left_page = Adw.NavigationPage()
+        left_page.set_title("Pachul")
+        left_page.set_child(left_view)
+        split.set_sidebar(left_page)
 
-        # Content
-        content_page = Adw.NavigationPage()
-        content_page.set_title("Pachul")
-        self.content_tv  = Adw.ToolbarView()
+        # Rechte Seite: Kopfleiste mit fünf Text-Einträgen — Pakete, Werkzeuge
+        # (Werkzeug-Übersicht, Strg+T), Einstellungen, Hilfe und Info. Jedes
+        # Werkzeug ist über toolshub.py erreichbar.
         self.content_hdr = Adw.HeaderBar()
-        self.content_hdr.set_show_back_button(False)
         self.content_hdr.set_show_title(False)
+        self.content_hdr.set_show_back_button(False)
 
-        # Header bar: five text entries instead of the former tools icon
-        # and hamburger menu — Packages (package actions), Tools (opens the
-        # searchable tools hub, Ctrl+T), Settings (opens preferences),
-        # Help and About. Every tool is reachable via toolshub.py.
-        right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        menu_box = _make_box(False, 2)
+        for entry in (
+            self._header_text_btn(tr("Packages"),    on_click=self._on_show_packages),
+            self._header_text_btn(tr("Tools"),       on_click=self._on_show_tools),
+            self._header_text_btn(tr("Preferences"), action="app.preferences"),
+            self._header_text_btn(tr("Help"),        action="app.shortcuts"),
+            self._header_text_btn(tr("About Pachul"), action="app.about"),
+        ):
+            menu_box.append(entry)
+        self.content_hdr.pack_end(menu_box)
 
-        # ── Packages ─────────────────────────────────────────────────────
-        # Opens the packages overview (same style as the tools hub).
-        pkg_btn = Gtk.Button(label=tr("Packages"))
-        pkg_btn.add_css_class("flat")
-        pkg_btn.add_css_class("header-menu-btn")
-        pkg_btn.connect("clicked", self._on_show_packages)
-        right_box.append(pkg_btn)
-
-        # ── Tools ────────────────────────────────────────────────────────
-        tools_btn = Gtk.Button(label=tr("Tools"))
-        tools_btn.add_css_class("flat")
-        tools_btn.add_css_class("header-menu-btn")
-        tools_btn.connect("clicked", self._on_show_tools)
-        right_box.append(tools_btn)
-
-        # ── Settings ─────────────────────────────────────────────────────
-        # Opens the full preferences dialog directly (no dropdown).
-        settings_btn = Gtk.Button(label=tr("Preferences"))
-        settings_btn.add_css_class("flat")
-        settings_btn.add_css_class("header-menu-btn")
-        settings_btn.set_action_name("app.preferences")
-        right_box.append(settings_btn)
-
-        # ── Help ─────────────────────────────────────────────────────────
-        help_btn = Gtk.Button(label=tr("Help"))
-        help_btn.add_css_class("flat")
-        help_btn.add_css_class("header-menu-btn")
-        help_btn.set_action_name("app.shortcuts")
-        right_box.append(help_btn)
-
-        # ── About ────────────────────────────────────────────────────────
-        about_btn = Gtk.Button(label=tr("About Pachul"))
-        about_btn.add_css_class("flat")
-        about_btn.add_css_class("header-menu-btn")
-        about_btn.set_action_name("app.about")
-        right_box.append(about_btn)
-        self.content_hdr.pack_end(right_box)
+        self.content_tv = Adw.ToolbarView()
         self.content_tv.add_top_bar(self.content_hdr)
 
-        # Shared selection-mode state: one flag + one selected-name set,
-        # kept as its own object since the package list panel is rebuilt
-        # (e.g. on language change) while this state should persist.
+        # Gemeinsamer Auswahlzustand (Modus-Flag + Menge gewählter Namen) als
+        # eigenes Objekt, weil das Listen-Panel neu aufgebaut wird (z. B. beim
+        # Sprachwechsel), der Zustand aber erhalten bleiben soll.
         self.pkg_sel_state = ListSelectionState()
-
         self.content_tv.set_content(self._build_list_detail_paned())
-        content_page.set_child(self.content_tv)
-        self.nav_split.set_content(content_page)
+
+        right_page = Adw.NavigationPage()
+        right_page.set_title("Pachul")
+        right_page.set_child(self.content_tv)
+        split.set_content(right_page)
 
         self._toast_overlay = Adw.ToastOverlay()
-        self._toast_overlay.set_child(self.nav_split)
+        self._toast_overlay.set_child(split)
         self.set_content(self._toast_overlay)
 
     # ── List + Detail ────────────────────────────────────────────────────────
@@ -783,44 +800,47 @@ class pachulWindow(Adw.ApplicationWindow):
         paned.set_position(460)
         return paned
 
-    # ── Sidebar ───────────────────────────────────────────────────────────────
+    # ── Seitenleiste ──────────────────────────────────────────────────────────
+
+    def _nav_list(self, on_activated):
+        """ListBox im Stil der Navigationsleiste, mit Klick-Handler."""
+        lb = Gtk.ListBox()
+        lb.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        lb.add_css_class("navigation-sidebar")
+        _set_margins(lb, start=5, end=5)
+        lb.connect("row-activated", on_activated)
+        return lb
 
     def _build_sidebar(self):
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll = _scroller(_POLICY_NEVER, _POLICY_AUTO)
         scroll.set_vexpand(True)
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        outer.set_margin_top(8); outer.set_margin_bottom(16)
+        outer = _make_box(True, 0)
+        _set_margins(outer, top=8, bottom=16)
 
-        # Stat strip
-        stats_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        stats_box.set_margin_start(10); stats_box.set_margin_end(10)
-        stats_box.set_margin_top(4); stats_box.set_margin_bottom(12)
+        # Statistik-Leiste (Gesamt / AUR / Updates)
+        stats_box = _make_box(False, 6)
+        _set_margins(stats_box, start=10, end=10, top=4, bottom=12)
         self.stat_total   = self._stat_card("—", tr("TOTAL"),   "stat-card")
         self.stat_aur     = self._stat_card("—", tr("AUR"),     "stat-card-aur")
         self.stat_updates = self._stat_card("—", tr("UPDATES"), "stat-card-updates")
-        for card in (self.stat_total, self.stat_aur, self.stat_updates):
-            stats_box.append(card)
+        stats_box.append(self.stat_total)
+        stats_box.append(self.stat_aur)
+        stats_box.append(self.stat_updates)
         outer.append(stats_box)
 
         # Top level: "All Packages" and "Updates" first, per explicit
         # request — everything else lives in the sections below.
-        self.nav_listbox = Gtk.ListBox()
-        self.nav_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self.nav_listbox.add_css_class("navigation-sidebar")
-        self.nav_listbox.set_margin_start(5); self.nav_listbox.set_margin_end(5)
-        self.nav_listbox.connect("row-activated", self._on_nav_selected)
-
+        self.nav_listbox = self._nav_list(self._on_nav_selected)
         self._nav_rows = {}
         top_items = [
             ("all",     "view-list-symbolic",   tr("All Packages"), None, None),
             ("updates", ICON_UPDATE_AVAILABLE,  tr("Updates"),       0,    "count-update"),
         ]
         for key, icon, label, cnt, badge_cls in top_items:
-            row = NavRow(icon, label, cnt, badge_cls)
-            self.nav_listbox.append(row)
-            self._nav_rows[key] = row
+            top_row_widget = NavRow(icon, label, cnt, badge_cls)
+            self._nav_rows[key] = top_row_widget
+            self.nav_listbox.append(top_row_widget)
         outer.append(self.nav_listbox)
 
         # "New" section: everything not yet installed, browsable by source
@@ -833,24 +853,19 @@ class pachulWindow(Adw.ApplicationWindow):
         # _update_sidebar_counts().
         outer.append(self._separator())
         outer.append(self._sidebar_header(tr("NEW")))
-        self.new_listbox = Gtk.ListBox()
-        self.new_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self.new_listbox.add_css_class("navigation-sidebar")
-        self.new_listbox.set_margin_start(5); self.new_listbox.set_margin_end(5)
-        self.new_listbox.connect("row-activated", self._on_new_nav_selected)
-
+        self.new_listbox = self._nav_list(self._on_new_nav_selected)
         self._new_nav_rows = {}
-        self._repo_icon_map = {
-            "core":      "drive-harddisk-symbolic",
-            "extra":     "folder-symbolic",
-            "multilib":  "folder-symbolic",
-            "aur":       "application-x-executable-symbolic",
-            "community": "folder-open-symbolic",
-            "testing":   "folder-visiting-symbolic",
-            "flatpak":   "package-x-generic-symbolic",
-            "snap":      "package-x-generic-symbolic",
-            "chaotic-aur": "folder-remote-symbolic",
-        }
+        _generic_pkg_icon = "package-x-generic-symbolic"
+        _plain_folder_icon = "folder-symbolic"
+        self._repo_icon_map = dict(
+            [("chaotic-aur", "folder-remote-symbolic"),
+             ("testing",     "folder-visiting-symbolic"),
+             ("community",   "folder-open-symbolic"),
+             ("aur",         "application-x-executable-symbolic"),
+             ("core",        "drive-harddisk-symbolic")]
+            + [(name, _plain_folder_icon) for name in ("extra", "multilib")]
+            + [(name, _generic_pkg_icon) for name in ("flatpak", "snap")]
+        )
         # Repos pre-seeded in both sections regardless of whether any
         # package from them has loaded yet — core/extra/multilib/aur are
         # Arch's own repo layout specifically; Flatpak is opt-in
@@ -880,12 +895,7 @@ class pachulWindow(Adw.ApplicationWindow):
         # on the system, browsable by where it came from).
         outer.append(self._separator())
         outer.append(self._sidebar_header(tr("INSTALLED PACKAGES")))
-        self.repo_listbox = Gtk.ListBox()
-        self.repo_listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self.repo_listbox.add_css_class("navigation-sidebar")
-        self.repo_listbox.set_margin_start(5); self.repo_listbox.set_margin_end(5)
-        self.repo_listbox.connect("row-activated", self._on_repo_nav_selected)
-
+        self.repo_listbox = self._nav_list(self._on_repo_nav_selected)
         self._repo_nav_rows = {}
         # "All Installed Packages" always comes first in this section,
         # regardless of distro — it's the "installed" browse filter
@@ -895,41 +905,37 @@ class pachulWindow(Adw.ApplicationWindow):
         self.repo_listbox.append(installed_row)
         self._repo_nav_rows["installed"] = installed_row
         for key in preseed_repos:
-            row = NavRow(self._repo_icon_map[key], key, 0, "count-badge")
-            self.repo_listbox.append(row)
-            self._repo_nav_rows[key] = row
+            installed_nav = NavRow(self._repo_icon_map[key], key, 0, "count-badge")
+            self._repo_nav_rows[key] = installed_nav
+            self.repo_listbox.append(installed_nav)
         outer.append(self.repo_listbox)
 
-        # Tools
         scroll.set_child(outer)
         return scroll
 
     def _sidebar_header(self, text):
-        lbl = Gtk.Label(label=text)
-        lbl.add_css_class("sidebar-section")
-        lbl.set_halign(Gtk.Align.CENTER); lbl.set_hexpand(True)
-        return lbl
+        return Gtk.Label(label=text, halign=Gtk.Align.CENTER, hexpand=True,
+                         css_classes=["sidebar-section"])
 
     def _separator(self):
-        sep = Gtk.Separator()
-        sep.set_margin_top(8); sep.set_margin_start(14); sep.set_margin_end(14)
-        return sep
+        return Gtk.Separator(margin_top=8, margin_start=14, margin_end=14)
 
     def _stat_card(self, number, label, css_class="stat-card"):
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        card.add_css_class(css_class); card.set_hexpand(True)
-        num = Gtk.Label(label=number)
-        num.add_css_class("stat-number"); num.add_css_class("numeric"); num.set_halign(Gtk.Align.CENTER)
-        lbl = Gtk.Label(label=label)
-        lbl.add_css_class("stat-label"); lbl.set_halign(Gtk.Align.CENTER)
-        card.append(num); card.append(lbl)
-        card._num = num
+        value_lbl = Gtk.Label(label=number, halign=Gtk.Align.CENTER,
+                              css_classes=["stat-number", "numeric"])
+        caption = Gtk.Label(label=label, halign=Gtk.Align.CENTER,
+                            css_classes=["stat-label"])
+        card = _make_box(True, 2, css_class)
+        card.set_hexpand(True)
+        card.append(value_lbl)
+        card.append(caption)
+        card._num = value_lbl
         return card
 
-    # ── Package list panel ────────────────────────────────────────────────────
+    # ── Paketlisten-Bereich ───────────────────────────────────────────────────
 
     def _build_package_list_panel(self):
-        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        panel = _make_box(True)
 
         search_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         search_box.set_margin_top(8); search_box.set_margin_bottom(8)
@@ -991,10 +997,10 @@ class pachulWindow(Adw.ApplicationWindow):
                                    sel_state=self.pkg_sel_state)
         pkg_scroll.set_child(self.pkg_listview)
 
-        spinner_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        spinner_box.set_halign(Gtk.Align.CENTER); spinner_box.set_valign(Gtk.Align.CENTER)
-        self.spinner = Gtk.Spinner()
-        self.spinner.set_size_request(32, 32)
+        spinner_box = _make_box(True, 10)
+        spinner_box.set_halign(Gtk.Align.CENTER)
+        spinner_box.set_valign(Gtk.Align.CENTER)
+        self.spinner = Gtk.Spinner(width_request=32, height_request=32)
         sp_lbl = Gtk.Label(label=tr("Loading packages…"))
         sp_lbl.add_css_class("dim-label")
         spinner_box.append(self.spinner); spinner_box.append(sp_lbl)
@@ -1029,13 +1035,15 @@ class pachulWindow(Adw.ApplicationWindow):
         self.empty_generic_page.set_title(tr("No Packages Found"))
         self.empty_generic_page.set_description(tr("Try a different filter or search term."))
 
-        self.list_stack = Gtk.Stack()
-        self.list_stack.set_vexpand(True)
-        self.list_stack.set_transition_type(Gtk.StackTransitionType.NONE)
-        self.list_stack.add_named(spinner_box,             "loading")
-        self.list_stack.add_named(pkg_scroll,              "list")
-        self.list_stack.add_named(self.empty_updates_page, "empty_updates")
-        self.list_stack.add_named(self.empty_generic_page, "empty_generic")
+        self.list_stack = Gtk.Stack(vexpand=True,
+                                    transition_type=Gtk.StackTransitionType.NONE)
+        for page_widget, page_name in (
+            (spinner_box,              "loading"),
+            (pkg_scroll,               "list"),
+            (self.empty_updates_page,  "empty_updates"),
+            (self.empty_generic_page,  "empty_generic"),
+        ):
+            self.list_stack.add_named(page_widget, page_name)
         self.list_stack.set_visible_child_name("loading")
         panel.append(self.list_stack)
 
@@ -1131,21 +1139,19 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _action_btn(self, icon, label, *css_classes, callback=None):
         btn = Gtk.Button()
-        btn.add_css_class("pill-btn")
-        for cls in css_classes:
+        for cls in ("pill-btn", *css_classes):
             btn.add_css_class(cls)
-        inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        inner.set_margin_start(4); inner.set_margin_end(4)
+        content = _make_box(False, 6)
+        _set_margins(content, start=4, end=4)
         if icon:
-            ic = themed_image(icon, 18)
-            inner.append(ic)
-        inner.append(Gtk.Label(label=label))
-        btn.set_child(inner)
-        if callback:
+            content.append(themed_image(icon, 18))
+        content.append(Gtk.Label(label=label))
+        btn.set_child(content)
+        if callback is not None:
             btn.connect("clicked", callback)
         return btn
 
-    # ── Detail panel ──────────────────────────────────────────────────────────
+    # ── Detailbereich ─────────────────────────────────────────────────────────
 
     def _build_detail_panel(self):
         self.detail_panel = DetailPanel(
@@ -1176,21 +1182,26 @@ class pachulWindow(Adw.ApplicationWindow):
         self._sync_details_state(False)
         return self.detail_panel.stack
 
-    # ── Data loading ──────────────────────────────────────────────────────────
+    # ── Daten laden ───────────────────────────────────────────────────────────
+
+    def _post_to_ui(self, fn, *args):
+        """Ergebnis eines Hintergrund-Threads an den GTK-Mainloop übergeben,
+        aber nur solange das Fenster noch existiert."""
+        if self._alive:
+            GLib.idle_add(fn, *args)
 
     def _load_packages(self):
-        self.list_stack.set_visible_child_name("loading")
         self.spinner.start()
-        threading.Thread(target=self._load_worker, daemon=True).start()
+        self.list_stack.set_visible_child_name("loading")
+        loader = threading.Thread(target=self._load_worker, daemon=True)
+        loader.start()
 
     def _load_worker(self):
-        pkgs = get_packages()
-        if self._alive:
-            GLib.idle_add(self._on_packages_loaded, pkgs)
+        self._post_to_ui(self._on_packages_loaded, get_packages())
 
     def _on_packages_loaded(self, packages):
-        self._all_packages = packages
         self.spinner.stop()
+        self._all_packages = packages
         # Carry over the known update markers so a reload doesn't wipe them.
         self._reapply_update_markers()
         self._update_sidebar_counts()
@@ -1317,9 +1328,7 @@ class pachulWindow(Adw.ApplicationWindow):
         return False
 
     def _bg_check_updates(self):
-        updates = check_updates()
-        if self._alive:
-            GLib.idle_add(self._on_updates_loaded, updates)
+        self._post_to_ui(self._on_updates_loaded, check_updates())
 
     def _notify_updates(self, n):
         app = self.get_application()
@@ -1343,10 +1352,10 @@ class pachulWindow(Adw.ApplicationWindow):
 
     def _on_updates_loaded(self, updates):
         prev_n = len(self._updates) if self._updates else 0
-        self._updates = updates
         n = len(updates)
-        self.stat_updates._num.set_label(str(n))
+        self._updates = updates
         self._nav_rows["updates"].set_count(n)
+        self.stat_updates._num.set_label(str(n))
         # Desktop notification when the update count first rises.
         if n > 0 and n != prev_n and get_setting("notify_updates"):
             self._notify_updates(n)
@@ -1393,16 +1402,19 @@ class pachulWindow(Adw.ApplicationWindow):
         # seen repo now gets a row in *both* sections at once (Installed
         # Packages: installed/updated only; New: not-yet-installed only),
         # so the two stay in lockstep with no separate wiring per repo.
-        seen_repos = set(
-            p.get("repo", "").lower() for p in self._all_packages
-            if p.get("repo", "") not in ("local", "")
-        )
+        seen_repos = {
+            entry.get("repo", "").lower()
+            for entry in self._all_packages
+            if entry.get("repo", "") not in ("local", "")
+        }
         for repo_key in sorted(seen_repos):
-            if repo_key not in self._repo_nav_rows:
-                icon = self._repo_icon_map.get(repo_key, "folder-symbolic")
-                row = NavRow(icon, repo_key, 0, "count-badge")
-                self.repo_listbox.append(row)
-                self._repo_nav_rows[repo_key] = row
+            if repo_key in self._repo_nav_rows:
+                pass
+            else:
+                repo_icon = self._repo_icon_map.get(repo_key, "folder-symbolic")
+                installed_nav = NavRow(repo_icon, repo_key, 0, "count-badge")
+                self._repo_nav_rows[repo_key] = installed_nav
+                self.repo_listbox.append(installed_nav)
             new_key = f"new:{repo_key}"
             if new_key not in self._new_nav_rows:
                 icon = self._repo_icon_map.get(repo_key, "folder-symbolic")
@@ -1588,14 +1600,15 @@ class pachulWindow(Adw.ApplicationWindow):
         # Ignore stale results if the query changed while we were waiting.
         if self._search_query != query:
             return False
-        existing = {p["name"] for p in self._all_packages}
-        found_new = False
-        for r in remote_results:
-            if r["name"] not in existing:
-                self._all_packages.append(r)
-                existing.add(r["name"])
-                found_new = True
-        if found_new:
+        known_names = {p["name"] for p in self._all_packages}
+        additions = []
+        for hit in remote_results:
+            if hit["name"] in known_names:
+                continue
+            known_names.add(hit["name"])
+            additions.append(hit)
+        if additions:
+            self._all_packages.extend(additions)
             self._update_sidebar_counts()
             self._apply_filter()
         return False
@@ -1619,37 +1632,41 @@ class pachulWindow(Adw.ApplicationWindow):
         # before — hide the detail panel again so it doesn't keep showing
         # stale info until something new gets clicked in the list.
         self._hide_detail_panel()
-        keys = list(self._nav_rows.keys())
-        idx  = row.get_index()
-        if idx >= len(keys):
+        key = self._key_at(self._nav_rows, row)
+        if key is None:
             return
-        key = keys[idx]
         if key == "orphans":
-            self._on_show_orphans()
-            return
+            return self._on_show_orphans()
         self._current_filter = key
         self._update_action_bar_mode()
         self._apply_filter()
 
+    @staticmethod
+    def _key_at(rows, row):
+        """Schlüssel des Dict-Eintrags, der an der Listenposition von `row` steht
+        (die Dicts behalten die Einfüge-Reihenfolge der ListBox). None, falls
+        der Index ausserhalb liegt."""
+        position = row.get_index()
+        names = list(rows)
+        return names[position] if 0 <= position < len(names) else None
+
     def _on_new_nav_selected(self, listbox, row):
-        self.nav_listbox.unselect_all()
-        self.repo_listbox.unselect_all()
+        for other in (self.nav_listbox, self.repo_listbox):
+            other.unselect_all()
         self._hide_detail_panel()
-        keys = list(self._new_nav_rows.keys())
-        idx  = row.get_index()
-        if idx < len(keys):
-            self._current_filter = keys[idx]
+        key = self._key_at(self._new_nav_rows, row)
+        if key is not None:
+            self._current_filter = key
         self._update_action_bar_mode()
         self._apply_filter()
 
     def _on_repo_nav_selected(self, listbox, row):
-        self.nav_listbox.unselect_all()
-        self.new_listbox.unselect_all()
+        for other in (self.nav_listbox, self.new_listbox):
+            other.unselect_all()
         self._hide_detail_panel()
-        keys = list(self._repo_nav_rows.keys())
-        idx  = row.get_index()
-        if idx < len(keys):
-            self._current_filter = keys[idx]
+        key = self._key_at(self._repo_nav_rows, row)
+        if key is not None:
+            self._current_filter = key
         self._update_action_bar_mode()
         self._apply_filter()
 
@@ -1932,62 +1949,65 @@ class pachulWindow(Adw.ApplicationWindow):
             row.set_subtitle(esc)
 
     def _parse_pkginfo(self, raw):
-        """Parse pacman -Qi / -Si output handling multi-line values correctly."""
-        parsed = {}
-        current_key = None
+        """Text aus pacman -Qi / -Si in ein Dict überführen. Eingerückte
+        Folgezeilen werden an den zuletzt gelesenen Schlüssel angehängt."""
+        fields = {}
+        last_key = None
         for line in raw.splitlines():
-            if line and not line[0].isspace() and ":" in line:
-                k, _, v = line.partition(":")
-                current_key = k.strip()
-                val = v.strip()
-                parsed[current_key] = val
-            elif current_key and line.startswith(" ") and line.strip():
-                # continuation — append to current key
-                parsed[current_key] = parsed[current_key] + " " + line.strip()
-        return parsed
+            if not line.strip():
+                continue
+            if not line[0].isspace() and ":" in line:
+                name, _, value = line.partition(":")
+                last_key = name.strip()
+                fields[last_key] = value.strip()
+            elif last_key and line.startswith(" "):
+                fields[last_key] += " " + line.strip()
+        return fields
 
     def _populate_dep_flow(self, panel, flow, exp_row, val):
-        while flow.get_first_child():
-            flow.remove(flow.get_first_child())
+        # vorhandene Chips entfernen
+        stale = flow.get_first_child()
+        while stale is not None:
+            flow.remove(stale)
+            stale = flow.get_first_child()
+
         if val == "—":
-            exp_row.set_subtitle("—")
             exp_row.set_expanded(False)
+            exp_row.set_subtitle("—")
             return
-        import re
-        # Each dep token may look like: "libfoo>=1.0" or "libfoo: for something"
-        # Split on whitespace first, then strip version constraints and inline descriptions
-        raw_tokens = val.split()
-        dep_names = []
-        for token in raw_tokens:
-            # Skip pure description words (tokens after a "name:" token)
-            # A dep token starts with a letter/number and contains the package name
-            if not token or token[0] in (":", "(", ")"):
+
+        # Ein Eintrag sieht aus wie "libfoo>=1.0" oder "libfoo: wofür".
+        # Zuerst an Leerzeichen trennen, dann Beschreibung und Versions-
+        # bedingung abschneiden und nur gültige Paketnamen behalten.
+        found = []
+        for token in val.split():
+            if token[0] in ":()":
                 continue
-            # Strip inline description separator "name:" — take only up to the colon
-            name_part = token.split(":")[0]
-            # Strip version constraints
-            clean = re.split(r"[><=!]", name_part)[0].strip()
-            if clean and re.match(r"^[a-zA-Z0-9_@.+-]+$", clean):
-                dep_names.append(clean)
-        # Deduplicate while preserving order
-        seen = set()
-        dep_names = [d for d in dep_names if not (d in seen or seen.add(d))]
+            base = token.split(":", 1)[0]
+            base = re.split(r"[><=!]", base)[0].strip()
+            if base and re.fullmatch(r"[a-zA-Z0-9_@.+-]+", base):
+                found.append(base)
+        names = list(dict.fromkeys(found))   # Duplikate raus, Reihenfolge bleibt
+
+        total = len(names)
         exp_row.set_subtitle(
-            tr("{n} package").format(n=len(dep_names)) if len(dep_names) == 1
-            else tr("{n} packages").format(n=len(dep_names)))
-        # Cap the chip count — fields like "Required By" can list thousands of
-        # packages, and one Gtk.Button each would be slow to build.
-        CHIP_CAP = 80
-        for dep in dep_names[:CHIP_CAP]:
-            btn = Gtk.Button(label=dep)
-            btn.add_css_class("dep-chip")
-            btn.set_tooltip_text(tr("Look up {dep}").format(dep=dep))
-            btn.connect("clicked", lambda b, name=dep: panel.dep_callback(name))
-            flow.append(btn)
-        if len(dep_names) > CHIP_CAP:
-            more = Gtk.Label(label=tr("+{n} more").format(n=len(dep_names) - CHIP_CAP))
-            more.add_css_class("dim-label"); more.add_css_class("caption")
-            flow.append(more)
+            tr("{n} package").format(n=total) if total == 1
+            else tr("{n} packages").format(n=total))
+
+        # Chips begrenzen: Felder wie "Required By" können tausende Pakete
+        # enthalten, und ein Gtk.Button pro Eintrag wäre zu langsam.
+        MAX_CHIPS = 80
+        for dep_name in names[:MAX_CHIPS]:
+            chip = Gtk.Button(label=dep_name)
+            chip.add_css_class("dep-chip")
+            chip.set_tooltip_text(tr("Look up {dep}").format(dep=dep_name))
+            chip.connect("clicked", lambda _b, target=dep_name: panel.dep_callback(target))
+            flow.append(chip)
+        if total > MAX_CHIPS:
+            overflow = Gtk.Label(label=tr("+{n} more").format(n=total - MAX_CHIPS))
+            overflow.add_css_class("dim-label")
+            overflow.add_css_class("caption")
+            flow.append(overflow)
 
     def _highlight_in_store(self, store, selection, listview, pkg_name):
         """Select (but do not activate) the row for pkg_name; scroll it into view."""
@@ -2079,15 +2099,14 @@ class pachulWindow(Adw.ApplicationWindow):
         return False
 
     def _prepend_dep_result(self, pkg_name, results):
-        for r in results:
-            if r["name"] == pkg_name:
-                if r["name"] not in {p["name"] for p in self._all_packages}:
-                    self._all_packages.append(r)
-                self.pkg_store.insert(0, self._make_item(r))
-                self.pkg_selection.set_selected(0)
-                self.pkg_listview.scroll_to(0, Gtk.ListScrollFlags.FOCUS, None)
-                return
-        return False
+        hit = next((r for r in results if r["name"] == pkg_name), None)
+        if hit is None:
+            return False
+        if all(p["name"] != hit["name"] for p in self._all_packages):
+            self._all_packages.append(hit)
+        self.pkg_store.insert(0, self._make_item(hit))
+        self.pkg_selection.set_selected(0)
+        self.pkg_listview.scroll_to(0, Gtk.ListScrollFlags.FOCUS, None)
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
@@ -2171,8 +2190,8 @@ class pachulWindow(Adw.ApplicationWindow):
                 # whatever helper was resolved before this run.
                 save_settings({})
             self._updates = []
-            self.stat_updates._num.set_label("0")
             self._nav_rows["updates"].set_count(0)
+            self.stat_updates._num.set_label("0")
             # Nur das interne Update-Tracking zu leeren reicht nicht — die
             # mittlere Paketliste (list_stack) rendert dadurch nicht neu und
             # bleibt auf dem alten Stand stehen. _load_packages() lädt die
@@ -2442,11 +2461,14 @@ class pachulWindow(Adw.ApplicationWindow):
     def _on_show_config_backup(self, *_):
         show_config_backup_dialog(self, self._run_terminal)
 
+    def _open_tool(self, dialog_fn):
+        dialog_fn(self, self._run_terminal)
+
     def _on_rate_mirrors(self, *_):
-        show_mirror_rater(self, self._run_terminal)
+        self._open_tool(show_mirror_rater)
 
     def _on_show_orphans(self, *_):
-        show_orphan_finder(self, self._run_terminal)
+        self._open_tool(show_orphan_finder)
 
     def _on_show_file_search(self, *_):
         show_file_search_dialog(self, self._run_terminal)
@@ -3207,12 +3229,13 @@ class pachulWindow(Adw.ApplicationWindow):
         d.present(self)
 
     def _on_reinstall(self, *_):
-        if not self._selected_pkg:
-            return
         pkg = self._selected_pkg
-        cmd = self._install_cmd_for(pkg)
-        self._run_terminal(cmd, tr("Reinstall {name}").format(name=pkg.pkg_name),
-                           on_success=self._refresh_selected_pkg)
+        if not pkg:
+            return
+        self._run_terminal(
+            self._install_cmd_for(pkg),
+            tr("Reinstall {name}").format(name=pkg.pkg_name),
+            on_success=self._refresh_selected_pkg)
 
     def _prune_updates(self, match_keys):
         """Optimistically drop package(s) that were just installed/updated
@@ -3246,9 +3269,9 @@ class pachulWindow(Adw.ApplicationWindow):
             notify_tray_recheck()
 
     def _refresh_selected_pkg(self):
-        if not self._selected_pkg:
-            return
         pkg = self._selected_pkg
+        if not pkg:
+            return
         if pkg.pkg_repo == "flatpak":
             app_id = pkg.pkg_source_id or pkg.pkg_name
             _, code = run_command(f"flatpak info {shlex.quote(app_id)} 2>/dev/null")
@@ -3264,8 +3287,8 @@ class pachulWindow(Adw.ApplicationWindow):
             else:
                 pkg.pkg_status = "installed" if pkgmanager.is_installed(pkg.pkg_name) else "available"
         installed = pkg.pkg_status == "installed"
-        self.btn_install.set_sensitive(not installed)
         self.btn_remove.set_sensitive(installed)
+        self.btn_install.set_sensitive(not installed)
         panel = self.detail_panel
         panel.btn_install.set_sensitive(not installed)
         self._set_btn_label(panel.btn_install, tr("Install"))

@@ -9,16 +9,17 @@ All modal tool dialogs:
                       generic "send text to the running command" field for
                       the rare interactive [y/n]-style prompt, not for
                       passwords.
-  - RepoManagerDialog : View/edit /etc/pacman.conf repositories
-  - MirrorRaterDialog : rate-mirrors front end
-  - OrphanFinderDialog: list and remove orphaned packages
-  - SysInfoDialog     : system information overview
+  - RepoManagerDialog : edit the repositories listed in /etc/pacman.conf
+  - MirrorRaterDialog : front end for the rate-mirrors tool
+  - OrphanFinderDialog: find and remove orphaned packages
+  - SysInfoDialog     : overview of system information
 """
 
 import os
 import pty
 import re as _re
 import shlex
+import signal
 import select
 import fcntl
 import termios
@@ -49,6 +50,151 @@ from backend import (run_command, get_orphans, get_system_info,
                      local_pachuli_version, installed_pachuli_version)
 from i18n import tr, get_language, set_language
 from icons import themed_image, themed_paintable
+
+
+# ─── Kleine Widget-Bausteine ──────────────────────────────────────────────────
+
+_AUTO = Gtk.PolicyType.AUTOMATIC
+_NEVER = Gtk.PolicyType.NEVER
+
+
+def _linear_box(orientation, gap, classes):
+    box = Gtk.Box()
+    box.set_orientation(orientation)
+    box.set_spacing(gap)
+    for name in classes:
+        box.add_css_class(name)
+    return box
+
+
+def _vbox(gap=0, *classes):
+    """Vertikale Gtk.Box mit Abstand und optionalen CSS-Klassen."""
+    return _linear_box(Gtk.Orientation.VERTICAL, gap, classes)
+
+
+def _hbox(gap=0, *classes):
+    """Horizontale Gtk.Box mit Abstand und optionalen CSS-Klassen."""
+    return _linear_box(Gtk.Orientation.HORIZONTAL, gap, classes)
+
+
+def _pad(widget, start=None, end=None, top=None, bottom=None):
+    """Setzt nur die angegebenen Aussenabstände."""
+    for value, setter in ((start, widget.set_margin_start),
+                          (end, widget.set_margin_end),
+                          (top, widget.set_margin_top),
+                          (bottom, widget.set_margin_bottom)):
+        if value is not None:
+            setter(value)
+    return widget
+
+
+def _btn(label, *classes):
+    """Gtk.Button mit Beschriftung und CSS-Klassen."""
+    button = Gtk.Button(label=label)
+    for name in classes:
+        button.add_css_class(name)
+    return button
+
+
+def _scrolled(h_policy, v_policy, *classes):
+    """Gtk.ScrolledWindow mit Richtlinien und optionalen CSS-Klassen."""
+    sw = Gtk.ScrolledWindow()
+    sw.set_policy(h_policy, v_policy)
+    for name in classes:
+        sw.add_css_class(name)
+    return sw
+
+
+def _modal_window(parent, title, width, height):
+    """Verschieb- und skalierbares modales Adw.Window über `parent`."""
+    win = Adw.Window()
+    win.set_title(title)
+    win.set_default_size(width, height)
+    win.set_resizable(True)
+    win.set_transient_for(parent)
+    win.set_modal(True)
+    return win
+
+
+def _status_page(icon_name, title, description):
+    """Adw.StatusPage mit grossem Symbol, Titel und Beschreibung."""
+    page = Adw.StatusPage()
+    page.set_paintable(themed_paintable(icon_name, 72))
+    page.set_title(title)
+    page.set_description(description)
+    return page
+
+
+def _unlink_quietly(path):
+    """Datei löschen; Fehler (z. B. schon weg) werden ignoriert."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _centered(widget):
+    """Widget vertikal zentrieren (für Suffix-Widgets in Zeilen)."""
+    widget.set_valign(Gtk.Align.CENTER)
+    return widget
+
+
+def _option_row(title, subtitle=None):
+    """Adw.ActionRow mit Titel und optionalem Untertitel."""
+    row = Adw.ActionRow(title=title)
+    if subtitle:
+        row.set_subtitle(subtitle)
+    return row
+
+
+def _switch_row(title, subtitle, active=True):
+    """Zeile mit Schalter; gibt (row, switch) zurück."""
+    switch = _centered(Gtk.Switch())
+    switch.set_active(active)
+    row = _option_row(title, subtitle)
+    row.add_suffix(switch)
+    row.set_activatable_widget(switch)
+    return row, switch
+
+
+def _toolbar_with_header():
+    """Adw.ToolbarView samt HeaderBar (ohne Fenster-Buttons am rechten Rand)."""
+    view = Adw.ToolbarView()
+    bar = Adw.HeaderBar()
+    bar.set_show_end_title_buttons(False)
+    return view, bar
+
+
+def _scroll_page(content):
+    """Vertikal scrollbarer Rahmen um den Dialoginhalt (ohne Horizontal-Scroll)."""
+    sw = _scrolled(_NEVER, _AUTO)
+    sw.set_vexpand(True)
+    sw.set_child(content)
+    return sw
+
+
+def _close_quietly(fd):
+    """Dateideskriptor schliessen und einen bereits geschlossenen ignorieren."""
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _decode_pty_bytes(buf):
+    """PTY-Bytes zu Text machen. Gibt (text, rest) zurück: ein abgeschnittenes
+    UTF-8-Zeichen am Ende bleibt als `rest` für den nächsten Durchlauf stehen;
+    ist gar nichts decodierbar, wird latin-1 verwendet."""
+    try:
+        return buf.decode("utf-8"), b""
+    except UnicodeDecodeError:
+        pass
+    for end in range(len(buf), 0, -1):
+        try:
+            return buf[:end].decode("utf-8"), buf[end:]
+        except UnicodeDecodeError:
+            continue
+    return buf.decode("latin-1"), b""
 
 
 # ─── Terminal dialog ──────────────────────────────────────────────────────────
@@ -230,8 +376,8 @@ def _parse_qkk_details(raw_text):
 def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
                          target_window=None, on_success_with_window=None):
     """
-    Open a PTY-backed terminal dialog that runs *cmd*.
-    Calls on_success() (on the main thread) if the command exits with code 0.
+    Show a modal, PTY-backed terminal window that executes *cmd*.
+    on_success() is invoked on the main thread when the command ends with 0.
     If on_success_with_window is given, it's called instead as
     on_success_with_window(dialog) — same trigger, but also handed this
     dialog's own window so the caller can keep reusing it (e.g. via
@@ -263,28 +409,23 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
         dialog.set_transient_for(parent)
         dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
+    tv = Adw.ToolbarView()
     hdr = Adw.HeaderBar()
     hdr.set_show_end_title_buttons(False)
 
-    title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-    spinner   = Gtk.Spinner()
+    spinner = Gtk.Spinner(width_request=16, height_request=16)
     spinner.start()
-    spinner.set_size_request(16, 16)
-    title_box.append(spinner)
-    lbl = Gtk.Label(label=title)
-    lbl.add_css_class("heading")
-    title_box.append(lbl)
+    heading = Gtk.Label(label=title, css_classes=["heading"])
+    title_box = _hbox(8)
+    for part in (spinner, heading):
+        title_box.append(part)
     hdr.set_title_widget(title_box)
 
-    close_btn = Gtk.Button(label=tr("Close"))
-    close_btn.add_css_class("suggested-action")
+    close_btn = _btn(tr("Close"), "suggested-action")
     close_btn.set_sensitive(False)
     hdr.pack_end(close_btn)
 
-    cancel_btn = Gtk.Button(label=tr("Cancel"))
-    cancel_btn.add_css_class("destructive-action")
-    cancel_btn.add_css_class("flat")
+    cancel_btn = _btn(tr("Cancel"), "destructive-action", "flat")
     hdr.pack_start(cancel_btn)
     tv.add_top_bar(hdr)
 
@@ -292,9 +433,7 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
     gpg_banner.set_revealed(False)
     tv.add_top_bar(gpg_banner)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-    outer.set_margin_top(8);    outer.set_margin_bottom(12)
-    outer.set_margin_start(12); outer.set_margin_end(12)
+    outer = _pad(_vbox(8), start=12, end=12, top=8, bottom=12)
 
     # Real progress bars, parsed live from pacman's own "[####----] NN%"
     # lines. Two stacked bars:
@@ -348,18 +487,15 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
     _dl_total = [0]
     _dl_seen = set()
 
-    scroll = Gtk.ScrolledWindow()
-    scroll.set_vexpand(True); scroll.set_hexpand(True)
-    scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-    scroll.add_css_class("card")
+    scroll = _scrolled(_AUTO, _AUTO, "card")
+    scroll.set_hexpand(True)
+    scroll.set_vexpand(True)
 
-    term_buf  = Gtk.TextBuffer()
-    term_view = Gtk.TextView(buffer=term_buf)
-    term_view.set_editable(False)
-    term_view.set_cursor_visible(False)
-    term_view.set_wrap_mode(Gtk.WrapMode.CHAR)
+    term_buf = Gtk.TextBuffer()
+    term_view = Gtk.TextView(buffer=term_buf, editable=False,
+                             cursor_visible=False, monospace=True,
+                             wrap_mode=Gtk.WrapMode.CHAR)
     term_view.add_css_class("terminal-view")
-    term_view.set_monospace(True)
 
     # Dunkles Systemtheme: .terminal-view-dark schaltet in styles.py auf
     # dunklen Hintergrund/hellen Text um, das helle Theme bleibt
@@ -373,17 +509,12 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
             term_view.remove_css_class("terminal-view-dark")
     _sync_terminal_theme()
     _style_mgr.connect("notify::dark", _sync_terminal_theme)
-    scroll.set_child(term_view)
     outer.append(scroll)
+    scroll.set_child(term_view)
 
-    # Password / stdin input row
-    input_frame = Gtk.Frame()
-    input_frame.add_css_class("card")
-    input_frame.set_margin_top(2)
-
-    input_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-    input_box.set_margin_top(8);    input_box.set_margin_bottom(8)
-    input_box.set_margin_start(10); input_box.set_margin_end(10)
+    # Eingabezeile (Passwort bzw. stdin des laufenden Befehls)
+    input_frame = Gtk.Frame(margin_top=2, css_classes=["card"])
+    input_box = _pad(_hbox(8), start=10, end=10, top=8, bottom=8)
 
     # This row is mainly for the rare leftover interactive prompt pkexec
     # itself doesn't cover (e.g. a [Y/n] confirmation some tool still
@@ -395,13 +526,11 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
     # reveal toggle to check what was typed — same idea as the eye icon
     # on the native Polkit dialog itself.
     pw_icon = themed_image("utilities-terminal-symbolic", 18)
-    pw_icon.add_css_class("dim-label")
     input_box.append(pw_icon)
+    pw_icon.add_css_class("dim-label")
 
-    pw_entry = Gtk.Entry()
-    pw_entry.set_hexpand(True)
-    pw_entry.set_visibility(False)
-    pw_entry.set_input_purpose(Gtk.InputPurpose.PASSWORD)
+    pw_entry = Gtk.Entry(hexpand=True, visibility=False,
+                         input_purpose=Gtk.InputPurpose.PASSWORD)
     pw_entry.set_placeholder_text(tr("Input for the running command (rarely needed) — press Enter to send"))
     pw_entry.set_icon_from_icon_name(Gtk.EntryIconPosition.SECONDARY, "view-reveal-symbolic")
     pw_entry.set_icon_activatable(Gtk.EntryIconPosition.SECONDARY, True)
@@ -426,9 +555,8 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
     send_btn.add_css_class("suggested-action")
     input_box.append(send_btn)
 
-    input_frame.set_child(input_box)
     outer.append(input_frame)
-
+    input_frame.set_child(input_box)
     tv.set_content(outer)
     dialog.set_content(tv)
 
@@ -464,25 +592,21 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
     GLib.idle_add(_focus_pw_once)
 
     # ── Internal state ────────────────────────────────────────────────────────
+    _running = [True]
+    _proc = [None]
     _master_fd = [None]
-    _proc      = [None]
-    _running   = [True]
 
-    _ANSI = _re.compile(
-        r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)'   # OSC sequences: window title, hyperlinks,
-                                                # and newer systemd/pam_systemd session-
-                                                # boundary markers (e.g. "OSC 3008") that
-                                                # sudo/pkexec and other pam_systemd-aware
-                                                # tools can emit — must come before the
-                                                # generic ESC-fallback below, otherwise only
-                                                # the ESC ']' gets eaten and the payload
-                                                # (e.g. "3008;start=...;type=session") is
-                                                # printed as literal text.
-        r'|\x1b\[[0-9;?]*[ -/]*[@-~]'
-        r'|\x1b[()][AB012]'
-        r'|\x1b[^[]'
-        r'|\x08'
-    )
+    _ANSI = _re.compile("|".join((
+        # OSC-Sequenzen (Fenstertitel, Hyperlinks und neuere systemd/pam_systemd-
+        # Sitzungsmarker wie "OSC 3008", die sudo/pkexec ausgeben können). Muss
+        # vor dem allgemeinen ESC-Fallback stehen, sonst wird nur "ESC ]" entfernt
+        # und die Nutzlast bliebe als Klartext sichtbar.
+        r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)',
+        r'\x1b\[[0-9;?]*[ -/]*[@-~]',    # CSI-Sequenzen (Farben, Cursor)
+        r'\x1b[()][AB012]',              # Zeichensatz-Umschaltung
+        r'\x1b[^[]',                     # sonstige zweibyte-ESC-Folgen
+        r'\x08',                         # Backspace
+    )))
 
     # Matches pacman's own progress-bar lines, e.g.:
     #   firefox-125.0-1-x86_64.pkg.tar.zst  65.2 MiB  15.3 MiB/s 00:03 [###----] 68%
@@ -617,51 +741,53 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
                 _update_progress(last_line)
         if not changed:
             return False
-        mark = term_buf.get_insert()
-        term_view.scroll_mark_onscreen(mark)
-        adj = scroll.get_vadjustment()
-        GLib.idle_add(lambda: adj.set_value(adj.get_upper()))
+        term_view.scroll_mark_onscreen(term_buf.get_insert())
+        vadj = scroll.get_vadjustment()
+        GLib.idle_add(lambda: vadj.set_value(vadj.get_upper()))
         return False
 
     def send_input(*_):
-        text = pw_entry.get_text()
+        typed = pw_entry.get_text()
         pw_entry.set_text("")
-        if _master_fd[0] is not None:
-            try:
-                os.write(_master_fd[0], (text + "\n").encode())
-                append_output(tr("(input sent)\n"))
-            except OSError:
-                pass
+        fd = _master_fd[0]
+        if fd is None:
+            return
+        try:
+            os.write(fd, f"{typed}\n".encode())
+        except OSError:
+            return
+        append_output(tr("(input sent)\n"))
 
-    pw_entry.connect("activate", send_input)
-    send_btn.connect("clicked", send_input)
+    for emitter, signal_name in ((pw_entry, "activate"), (send_btn, "clicked")):
+        emitter.connect(signal_name, send_input)
 
-    def on_close_clicked(*_):
+    def close_window(*_):
         close_btn.grab_focus()
         dialog.close()
-    close_btn.connect("clicked", on_close_clicked)
+    close_btn.connect("clicked", close_window)
 
     def do_cancel(*_):
-        if _proc[0] is not None:
+        child = _proc[0]
+        if child is not None:
             try:
-                os.killpg(os.getpgid(_proc[0].pid), __import__('signal').SIGTERM)
+                os.killpg(os.getpgid(child.pid), signal.SIGTERM)
             except Exception:
                 try:
-                    _proc[0].terminate()
+                    child.terminate()
                 except Exception:
                     pass
         cancel_btn.set_sensitive(False)
-        cancel_btn.grab_focus()
         append_output(tr("\n— Cancelled —\n"))
+        cancel_btn.grab_focus()
     cancel_btn.connect("clicked", do_cancel)
 
     def on_done(code):
         _running[0] = False
-        spinner.stop()
-        cancel_btn.set_visible(False)
-        close_btn.set_sensitive(True)
-        close_btn.grab_focus()
         progress_box.set_visible(False)
+        spinner.stop()
+        close_btn.set_sensitive(True)
+        cancel_btn.set_visible(False)
+        close_btn.grab_focus()
         overall_progress_bar.set_visible(False)
         overall_progress_label.set_visible(False)
         # fwupdmgr's own exit-code convention (documented in its man page):
@@ -786,85 +912,67 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
             on_done_extra(code)
         return False
 
-    # ── PTY worker ────────────────────────────────────────────────────────────
+    # ── PTY-Arbeitsthread ─────────────────────────────────────────────────────
     def worker():
-        master_fd, slave_fd = pty.openpty()
-        _master_fd[0] = master_fd
+        _master_fd[0], slave_fd = pty.openpty()
+        master_fd = _master_fd[0]
 
         try:
-            ws = struct.pack('HHHH', 40, 120, 0, 0)
-            fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, ws)
+            fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                        struct.pack('HHHH', 40, 120, 0, 0))
         except Exception:
             pass
 
-        safe_title = title.replace("'", "")
-        wrapped = (
-            f"printf '\\033[1m>>> {safe_title}\\033[0m\\n'; "
-            f"echo; "
-            f"{cmd}; "
-            f"_ec=$?; "
-            f"exit $_ec"
-        )
+        plain_title = title.replace("'", "")
+        shell_script = "; ".join((
+            f"printf '\\033[1m>>> {plain_title}\\033[0m\\n'",
+            "echo",
+            f"{cmd}",
+            "_ec=$?",
+            "exit $_ec",
+        ))
 
-        env = dict(os.environ)
-        env['TERM'] = 'xterm-256color'
-        # SUDO_ASKPASS is irrelevant now that privileged commands go
-        # through pkexec (which talks to the Polkit agent over D-Bus, not
-        # via an askpass helper) — left here defensively in case anything
-        # downstream still shells out through plain sudo.
-        env.pop('SUDO_ASKPASS', None)
+        child_env = dict(os.environ, TERM="xterm-256color")
+        # SUDO_ASKPASS spielt seit pkexec (Polkit über D-Bus statt Askpass-
+        # Helfer) keine Rolle mehr; wird vorsichtshalber entfernt, falls
+        # irgendwo doch noch über einfaches sudo gestartet wird.
+        child_env.pop('SUDO_ASKPASS', None)
 
         try:
             import subprocess
             proc = subprocess.Popen(
-                ["sh", "-c", wrapped],
+                ["sh", "-c", shell_script],
                 stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-                close_fds=True, preexec_fn=os.setsid, env=env,
+                close_fds=True, preexec_fn=os.setsid, env=child_env,
             )
             _proc[0] = proc
             os.close(slave_fd)
 
-            partial = b""
+            leftover = b""
             while True:
                 try:
-                    rlist, _, _ = select.select([master_fd], [], [], 0.05)
+                    ready = select.select([master_fd], [], [], 0.05)[0]
                 except (ValueError, OSError):
                     break
 
-                if rlist:
+                if ready:
                     try:
-                        chunk = os.read(master_fd, 8192)
+                        data = os.read(master_fd, 8192)
                     except OSError:
                         break
-                    if not chunk:
+                    if not data:
                         break
-                    partial += chunk
-                    try:
-                        text = partial.decode('utf-8')
-                        partial = b""
-                    except UnicodeDecodeError:
-                        for cut in range(len(partial), 0, -1):
-                            try:
-                                text = partial[:cut].decode('utf-8')
-                                partial = partial[cut:]
-                                break
-                            except UnicodeDecodeError:
-                                continue
-                        else:
-                            text = partial.decode('latin-1')
-                            partial = b""
-                    GLib.idle_add(append_output, text)
-
+                    shown, leftover = _decode_pty_bytes(leftover + data)
+                    GLib.idle_add(append_output, shown)
                 elif proc.poll() is not None:
+                    # Prozess ist fertig: noch im Puffer liegende Ausgabe holen.
                     try:
-                        while True:
-                            r2, _, _ = select.select([master_fd], [], [], 0.05)
-                            if not r2:
+                        while select.select([master_fd], [], [], 0.05)[0]:
+                            data = os.read(master_fd, 8192)
+                            if not data:
                                 break
-                            chunk = os.read(master_fd, 8192)
-                            if not chunk:
-                                break
-                            GLib.idle_add(append_output, chunk.decode('utf-8', errors='replace'))
+                            GLib.idle_add(append_output,
+                                          data.decode('utf-8', errors='replace'))
                     except OSError:
                         pass
                     break
@@ -873,19 +981,17 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
             code = proc.returncode
 
         except Exception as exc:
-            GLib.idle_add(append_output, tr("\nInternal error: {err}\n").format(err=exc))
+            GLib.idle_add(append_output,
+                          tr("\nInternal error: {err}\n").format(err=exc))
             code = 1
 
         finally:
-            try:
-                os.close(master_fd)
-            except OSError:
-                pass
+            _close_quietly(master_fd)
             _master_fd[0] = None
 
         GLib.idle_add(on_done, code)
 
-    threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=worker, daemon=True, name="pachul-terminal").start()
 
 
 # ─── Sync databases dialog ─────────────────────────────────────────────────────
@@ -896,18 +1002,14 @@ def show_sync_db_dialog(parent, on_confirm):
     dialog.set_content_width(460)
     dialog.set_content_height(280)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     cancel_btn = Gtk.Button(label=tr("Cancel"))
     cancel_btn.add_css_class("flat")
     cancel_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_start(cancel_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     info_group = Adw.PreferencesGroup()
     info_group.set_title(tr("Refresh Package Lists"))
@@ -930,11 +1032,10 @@ def show_sync_db_dialog(parent, on_confirm):
     sync_btn.connect("clicked", _do_sync)
     outer.append(sync_btn)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-    scroll.set_child(outer)
     tv.set_content(scroll)
+    scroll.set_child(outer)
     dialog.set_child(tv)
     dialog.present(parent)
 
@@ -1005,9 +1106,7 @@ def show_repo_manager(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
 
     # NOTE: this used to shell out to "sudo -S ${VISUAL:-${EDITOR:-nano}}
     # /etc/pacman.conf" inside the terminal-dialog's plain-text output panel.
@@ -1026,19 +1125,14 @@ def show_repo_manager(parent, run_terminal_fn):
     # non-interactive `pkexec install ...` call, authenticated through the
     # desktop's native Polkit dialog rather than anything typed into the
     # log-style terminal panel.
-    save_btn = Gtk.Button(label=tr("Save"))
-    save_btn.add_css_class("suggested-action")
-    hdr.pack_end(save_btn)
-
-    close_btn = Gtk.Button(label=tr("Close"))
-    close_btn.add_css_class("flat")
+    save_btn = _btn(tr("Save"), "suggested-action")
+    close_btn = _btn(tr("Close"), "flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
-    hdr.pack_end(close_btn)
+    for header_btn in (save_btn, close_btn):
+        hdr.pack_end(header_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-    outer.set_margin_top(12);   outer.set_margin_bottom(16)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(12), start=16, end=16, top=12, bottom=16)
 
     # Info box: explains what a repository is and what happens when repos
     # are missing or additional ones are added.
@@ -1050,25 +1144,28 @@ def show_repo_manager(parent, run_terminal_fn):
          "If additional repositories are added: their packages appear in the search and can be installed. However, this can cause dependency and version conflicts, for example when a repository offers different versions of system libraries, which can block updates or break the system. Only add third-party repositories from sources you trust."])
     outer.append(info_box)
 
-    repos_group = Adw.PreferencesGroup()
-    repos_group.set_title(tr("Active Repositories"))
-    repos_group.set_description(tr("Repositories currently enabled in /etc/pacman.conf"))
+    repos_group = Adw.PreferencesGroup(
+        title=tr("Active Repositories"),
+        description=tr("Repositories currently enabled in /etc/pacman.conf"))
 
-    out, code = run_command("pacman -Sl 2>/dev/null | awk '{print $1}' | sort -u")
-    repos = [r for r in out.splitlines() if r.strip()] if (out and code == 0) else ["core", "extra", "multilib"]
+    listing, listing_code = run_command(
+        "pacman -Sl 2>/dev/null | awk '{print $1}' | sort -u")
+    if listing and listing_code == 0:
+        repos = [name for name in listing.splitlines() if name.strip()]
+    else:
+        repos = ["core", "extra", "multilib"]
 
     for repo in repos:
-        row = Adw.ActionRow()
-        row.set_title(repo)
-        icon = themed_image("folder-symbolic", 18)
-        icon.add_css_class("dim-label")
-        row.add_prefix(icon)
-        pkg_out, _ = run_command(f"pacman -Sl {repo} 2>/dev/null | wc -l")
-        if pkg_out and pkg_out.strip().isdigit():
-            count_lbl = Gtk.Label(label=tr("{n} pkgs").format(n=pkg_out.strip()))
-            count_lbl.add_css_class("caption"); count_lbl.add_css_class("dim-label")
-            row.add_suffix(count_lbl)
-        repos_group.add(row)
+        repo_row = Adw.ActionRow(title=repo)
+        folder_icon = themed_image("folder-symbolic", 18)
+        folder_icon.add_css_class("dim-label")
+        repo_row.add_prefix(folder_icon)
+        pkg_count, _ = run_command(f"pacman -Sl {repo} 2>/dev/null | wc -l")
+        if pkg_count and pkg_count.strip().isdigit():
+            repo_row.add_suffix(Gtk.Label(
+                label=tr("{n} pkgs").format(n=pkg_count.strip()),
+                css_classes=["caption", "dim-label"]))
+        repos_group.add(repo_row)
     outer.append(repos_group)
 
     conf_group = Adw.PreferencesGroup()
@@ -1079,24 +1176,20 @@ def show_repo_manager(parent, run_terminal_fn):
     # small fixed height regardless of how big the dialog is.
     conf_group.set_vexpand(True)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_AUTO, _AUTO, "card")
     scroll.set_min_content_height(420)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-    scroll.add_css_class("card")
 
     conf_out, conf_read_code = run_command("cat /etc/pacman.conf 2>/dev/null")
     readable = bool(conf_out) and conf_read_code == 0
     buf = Gtk.TextBuffer()
     buf.set_text(conf_out if readable else tr("# /etc/pacman.conf not found or not readable"))
-    conf_view = Gtk.TextView(buffer=buf)
-    conf_view.set_editable(readable)
-    conf_view.set_monospace(True)
-    conf_view.set_wrap_mode(Gtk.WrapMode.NONE)
+    conf_view = Gtk.TextView(buffer=buf, editable=readable, monospace=True,
+                             wrap_mode=Gtk.WrapMode.NONE)
     conf_view.add_css_class("terminal-view")
     scroll.set_child(conf_view)
-    conf_group.add(scroll)
     outer.append(conf_group)
+    conf_group.add(scroll)
 
     save_btn.set_sensitive(readable)
 
@@ -1120,11 +1213,7 @@ def show_repo_manager(parent, run_terminal_fn):
 
     save_btn.connect("clicked", _do_save)
 
-    scroller = Gtk.ScrolledWindow()
-    scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-    scroller.set_vexpand(True)
-    scroller.set_child(outer)
-    tv.set_content(scroller)
+    tv.set_content(_scroll_page(outer))
     dialog.set_content(tv)
     dialog.present()
 
@@ -1144,18 +1233,13 @@ def show_repo_manager_native(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
-    close_btn = Gtk.Button(label=tr("Close"))
-    close_btn.add_css_class("flat")
+    tv, hdr = _toolbar_with_header()
+    close_btn = _btn(tr("Close"), "flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     kind_label = pkgmanager.third_party_kind_label()
 
@@ -1290,18 +1374,14 @@ def show_apt_repair_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     warn_banner = Adw.Banner()
     warn_banner.set_title(tr(
@@ -1445,18 +1525,14 @@ def show_dnf_repair_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     warn_banner = Adw.Banner()
     warn_banner.set_title(tr(
@@ -1591,18 +1667,14 @@ def show_zypper_repair_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     warn_banner = Adw.Banner()
     warn_banner.set_title(tr(
@@ -1738,18 +1810,14 @@ def show_pacman_repair_dialog(parent, run_terminal_fn, aur_helper=None):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     def _row(title, subtitle, button_label, cmd, suggested=True, on_success=None,
              on_success_with_window=None):
@@ -2165,18 +2233,14 @@ def show_cert_checker_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     # ── CA certificate bundle ──
     ca_group = Adw.PreferencesGroup()
@@ -2342,18 +2406,14 @@ def show_broken_symlinks_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     info_group = Adw.PreferencesGroup()
     info_group.set_title(tr("What this does"))
@@ -2479,18 +2539,14 @@ def show_services_security_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     def _row(title, subtitle, button_label, cmd, suggested=False):
         row = Adw.ActionRow()
@@ -2683,18 +2739,14 @@ def show_config_backup_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     info_group = Adw.PreferencesGroup()
     info_group.set_title(tr("What this does"))
@@ -2846,22 +2898,16 @@ def show_mirror_rater(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
-    close_btn = Gtk.Button(label=tr("Close"))
-    close_btn.add_css_class("flat")
+    tv, hdr = _toolbar_with_header()
+    close_btn = _btn(tr("Close"), "flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     _, code = run_command("which rate-mirrors 2>/dev/null")
     has_rate_mirrors = (code == 0)
@@ -2879,41 +2925,34 @@ def show_mirror_rater(parent, run_terminal_fn):
         mirror_paragraphs.append("On Manjaro this list is normally managed by pacman-mirrors; running pacman-mirrors later can replace your result.")
     # Instead of a big info card: a small info icon + heading. Click it
     # to read the whole explanation.
-    _hint_text = "\n\n".join(tr(p) for p in mirror_paragraphs)
-    mirror_hint = Gtk.MenuButton()
-    mirror_hint.add_css_class("flat")
-    mirror_hint.set_halign(Gtk.Align.START)
-    mirror_hint.set_direction(Gtk.ArrowType.DOWN)
-    _hint_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-    _hint_icon = themed_image("dialog-information-symbolic", 16)
-    _hint_icon.set_valign(Gtk.Align.CENTER)
-    _hint_content.append(_hint_icon)
-    _hint_content.append(Gtk.Label(label=tr("What are mirrors?")))
-    mirror_hint.set_child(_hint_content)
-    _pop = Gtk.Popover()
-    _pop_lbl = Gtk.Label(label=_hint_text)
-    _pop_lbl.set_wrap(True)
-    _pop_lbl.set_max_width_chars(60)
-    _pop_lbl.set_xalign(0)
-    _pop_lbl.set_margin_top(12); _pop_lbl.set_margin_bottom(12)
-    _pop_lbl.set_margin_start(14); _pop_lbl.set_margin_end(14)
-    _pop.set_child(_pop_lbl)
-    mirror_hint.set_popover(_pop)
+    hint_text = "\n\n".join(tr(p) for p in mirror_paragraphs)
+    hint_icon = _centered(themed_image("dialog-information-symbolic", 16))
+    hint_content = _hbox(8)
+    hint_content.append(hint_icon)
+    hint_content.append(Gtk.Label(label=tr("What are mirrors?")))
+    mirror_hint = Gtk.MenuButton(halign=Gtk.Align.START,
+                                 direction=Gtk.ArrowType.DOWN,
+                                 css_classes=["flat"])
+    mirror_hint.set_child(hint_content)
+    hint_label = Gtk.Label(label=hint_text, wrap=True, max_width_chars=60,
+                           xalign=0)
+    _pad(hint_label, start=14, end=14, top=12, bottom=12)
+    popover = Gtk.Popover()
+    popover.set_child(hint_label)
+    mirror_hint.set_popover(popover)
     outer.append(mirror_hint)
 
     if has_rate_mirrors:
-        options_group = Adw.PreferencesGroup()
-        options_group.set_title(tr("Mirror Options"))
-        options_group.set_description(tr("Choose how mirrors are selected and tested"))
+        options_group = Adw.PreferencesGroup(
+            title=tr("Mirror Options"),
+            description=tr("Choose how mirrors are selected and tested"))
 
-        country_row = Adw.ActionRow()
-        country_row.set_title(tr("Countries"))
-        country_row.set_subtitle(tr("Only use mirrors from these countries — 2-letter codes separated by commas, e.g. CH, DE, AT. Leave blank for all."))
-        country_entry = Gtk.Entry()
-        country_entry.set_placeholder_text(tr("e.g. CH, DE, AT"))
-        country_entry.set_hexpand(True)
-        country_entry.set_valign(Gtk.Align.CENTER)
-        country_entry.set_width_chars(24)
+        country_row = _option_row(
+            tr("Countries"),
+            tr("Only use mirrors from these countries — 2-letter codes separated by commas, e.g. CH, DE, AT. Leave blank for all."))
+        country_entry = _centered(Gtk.Entry(
+            hexpand=True, width_chars=24,
+            placeholder_text=tr("e.g. CH, DE, AT")))
         _detected_cc = _detect_country_code()
         if _detected_cc:
             country_entry.set_text(_detected_cc)
@@ -2923,10 +2962,9 @@ def show_mirror_rater(parent, run_terminal_fn):
         country_row.add_suffix(country_entry)
         options_group.add(country_row)
 
-        sort_row = Adw.ActionRow()
-        sort_row.set_title(tr("Sort by"))
-        sort_row.set_subtitle(tr("Order in which mirrors are picked for testing; the final order always comes from the speed test"))
-        sort_store = Gtk.StringList()
+        sort_row = _option_row(
+            tr("Sort by"),
+            tr("Order in which mirrors are picked for testing; the final order always comes from the speed test"))
         sort_options = [
             ("score_asc",  tr("Score ↑  (best reliability first)")),
             ("score_desc", tr("Score ↓  (worst reliability first)")),
@@ -2934,65 +2972,54 @@ def show_mirror_rater(parent, run_terminal_fn):
             ("delay_desc", tr("Delay ↓  (oldest mirrors first)")),
             ("random",     tr("Random   (shuffle before testing)")),
         ]
-        for _, label in sort_options:
-            sort_store.append(label)
-        sort_drop = Gtk.DropDown(model=sort_store)
+        sort_drop = _centered(Gtk.DropDown(
+            model=Gtk.StringList.new([label for _, label in sort_options])))
         sort_drop.set_selected(0)
-        sort_drop.set_valign(Gtk.Align.CENTER)
         sort_row.add_suffix(sort_drop)
         sort_row.set_visible(not is_manjaro)   # arch subcommand only
 
-        protocol_row = Adw.ActionRow()
-        protocol_row.set_title(tr("HTTPS only"))
-        protocol_row.set_subtitle(tr("Ignore unencrypted HTTP mirrors (recommended)"))
-        https_switch = Gtk.Switch()
-        https_switch.set_active(True)
-        https_switch.set_valign(Gtk.Align.CENTER)
-        protocol_row.add_suffix(https_switch)
-        protocol_row.set_activatable_widget(https_switch)
+        protocol_row, https_switch = _switch_row(
+            tr("HTTPS only"),
+            tr("Ignore unencrypted HTTP mirrors (recommended)"))
         options_group.add(protocol_row)
 
-        backup_row = Adw.ActionRow()
-        backup_row.set_title(tr("Backup current mirrorlist"))
-        backup_row.set_subtitle(tr("Copies the current list to /etc/pacman.d/mirrorlist-backup before replacing it (an older backup is overwritten)"))
-        backup_switch = Gtk.Switch()
-        backup_switch.set_active(True)
-        backup_switch.set_valign(Gtk.Align.CENTER)
-        backup_row.add_suffix(backup_switch)
-        backup_row.set_activatable_widget(backup_switch)
+        backup_row, backup_switch = _switch_row(
+            tr("Backup current mirrorlist"),
+            tr("Copies the current list to /etc/pacman.d/mirrorlist-backup before replacing it (an older backup is overwritten)"))
         options_group.add(backup_row)
 
-        delay_row = Adw.ActionRow()
-        delay_row.set_title(tr("Max mirror delay (hours)"))
-        delay_row.set_subtitle(tr("Skip mirrors whose last sync is older than this"))
-        delay_spin = Gtk.SpinButton()
-        delay_spin.set_range(1, 72); delay_spin.set_increments(1, 6); delay_spin.set_value(6)
-        delay_spin.set_valign(Gtk.Align.CENTER)
+        delay_row = _option_row(
+            tr("Max mirror delay (hours)"),
+            tr("Skip mirrors whose last sync is older than this"))
+        delay_spin = _centered(Gtk.SpinButton())
+        delay_spin.set_range(1, 72)
+        delay_spin.set_increments(1, 6)
+        delay_spin.set_value(6)
         delay_row.add_suffix(delay_spin)
 
-        advanced_row = Adw.ExpanderRow()
-        advanced_row.set_title(tr("Advanced options"))
-        advanced_row.add_row(sort_row)
-        advanced_row.add_row(delay_row)
+        advanced_row = Adw.ExpanderRow(title=tr("Advanced options"))
+        for nested in (sort_row, delay_row):
+            advanced_row.add_row(nested)
 
-        top_row = Adw.ActionRow()
-        top_row.set_title(tr("Number of mirrors to keep"))
-        top_row.set_subtitle(tr("How many of the fastest mirrors end up in the list (0 = all). 3 is usually enough."))
-        top_spin = Gtk.SpinButton()
-        top_spin.set_range(0, 50); top_spin.set_increments(1, 5); top_spin.set_value(3)
-        top_spin.set_valign(Gtk.Align.CENTER)
+        top_row = _option_row(
+            tr("Number of mirrors to keep"),
+            tr("How many of the fastest mirrors end up in the list (0 = all). 3 is usually enough."))
+        top_spin = _centered(Gtk.SpinButton())
+        top_spin.set_range(0, 50)
+        top_spin.set_increments(1, 5)
+        top_spin.set_value(3)
         top_row.add_suffix(top_spin)
         options_group.add(top_row)
         options_group.add(advanced_row)
 
-        # Keep the rows compact: the explanatory text moves from the
-        # visible subtitle into a tooltip (hover over the row to read it).
-        for _r in (country_row, sort_row, protocol_row, backup_row,
-                   delay_row, top_row):
-            _sub = _r.get_subtitle()
-            if _sub:
-                _r.set_tooltip_text(_sub)
-                _r.set_subtitle("")
+        # Zeilen schlank halten: der Erklärungstext wandert vom sichtbaren
+        # Untertitel in den Tooltip (Maus über die Zeile halten).
+        for compact_row in (country_row, sort_row, protocol_row, backup_row,
+                            delay_row, top_row):
+            explanation = compact_row.get_subtitle()
+            if explanation:
+                compact_row.set_tooltip_text(explanation)
+                compact_row.set_subtitle("")
 
         outer.append(options_group)
 
@@ -3003,27 +3030,29 @@ def show_mirror_rater(parent, run_terminal_fn):
         def _parse_countries():
             """-> (codes, ok). Only 2-letter ISO codes are valid for
             rate-mirrors' --include-countries (names like "Germany" are not)."""
-            raw = country_entry.get_text().strip()
-            codes = [c.strip().upper() for c in raw.replace(";", ",").split(",") if c.strip()]
-            ok = all(len(c) == 2 and c.isascii() and c.isalpha() for c in codes)
+            entered = country_entry.get_text().strip().replace(";", ",")
+            codes = [part.strip().upper() for part in entered.split(",")
+                     if part.strip()]
+            ok = not any(len(c) != 2 or not (c.isascii() and c.isalpha())
+                         for c in codes)
             return codes, ok
 
         def _build_flags():
             codes, _ok = _parse_countries()
-            g = []
-            if https_switch.get_active():
-                g.append("--protocol=https")
-            if codes:
-                g.append("--include-countries=" + ",".join(codes))
             top_n = int(top_spin.get_value())
+            max_delay = int(delay_spin.get_value()) * 3600
+            global_flags = ["--protocol=https"] if https_switch.get_active() else []
+            if codes:
+                global_flags.append("--include-countries=" + ",".join(codes))
             if top_n > 0:
-                g.append(f"--max-mirrors-to-output={top_n}")
-            s = [f"--max-delay={int(delay_spin.get_value()) * 3600}"]
+                global_flags.append(f"--max-mirrors-to-output={top_n}")
+            sub_flags = [f"--max-delay={max_delay}"]
             if is_manjaro:
-                s.append(f"--branch={manjaro_branch}")
+                sub_flags.append(f"--branch={manjaro_branch}")
             else:
-                s.append(f"--sort-mirrors-by={sort_options[sort_drop.get_selected()][0]}")
-            return g, s
+                chosen_sort = sort_options[sort_drop.get_selected()][0]
+                sub_flags.append(f"--sort-mirrors-by={chosen_sort}")
+            return global_flags, sub_flags
 
         def on_run(*_):
             if not _parse_countries()[1]:
@@ -3038,12 +3067,13 @@ def show_mirror_rater(parent, run_terminal_fn):
             # touched yet, and — since ranking doesn't need root at all —
             # this step doesn't even prompt for a password. The user only
             # sees a password prompt if/when they actually choose to save.
-            fd, tmp_path = tempfile.mkstemp(prefix="pachul-mirrorlist-", suffix=".tmp")
-            os.close(fd)
-            cmd = (
-                f'rate-mirrors {gf} --save={shlex.quote(tmp_path)} {mirror_cmd} {sf} '
-                f'&& echo "{tr("Done — review the result below")}"'
-            )
+            tmp_fd, tmp_path = tempfile.mkstemp(prefix="pachul-mirrorlist-", suffix=".tmp")
+            os.close(tmp_fd)
+            review_msg = tr("Done — review the result below")
+            cmd = " ".join((
+                "rate-mirrors", gf, f"--save={shlex.quote(tmp_path)}",
+                mirror_cmd, sf, f'&& echo "{review_msg}"',
+            ))
 
             def _after_test():
                 _show_mirror_result(tmp_path, backup)
@@ -3059,26 +3089,14 @@ def show_mirror_rater(parent, run_terminal_fn):
                 content = ""
             server_count = sum(1 for ln in content.splitlines() if ln.strip().startswith("Server"))
 
-            result_dialog = Adw.Window()
-            result_dialog.set_title(tr("Mirror Ranking Result"))
-            result_dialog.set_default_size(680, 600)
-            result_dialog.set_resizable(True)
-            result_dialog.set_transient_for(parent)
-            result_dialog.set_modal(True)
-
-            rtv = Adw.ToolbarView()
-            rhdr = Adw.HeaderBar()
-            rhdr.set_show_end_title_buttons(False)
+            result_dialog = _modal_window(parent, tr("Mirror Ranking Result"), 680, 600)
+            rtv, rhdr = _toolbar_with_header()
 
             def _discard(*_):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+                _unlink_quietly(tmp_path)
                 result_dialog.close()
 
-            discard_btn = Gtk.Button(label=tr("Discard"))
-            discard_btn.add_css_class("flat")
+            discard_btn = _btn(tr("Discard"), "flat")
             discard_btn.connect("clicked", _discard)
             rhdr.pack_start(discard_btn)
 
@@ -3090,105 +3108,93 @@ def show_mirror_rater(parent, run_terminal_fn):
                 # two separate `sudo mv` / `sudo install` calls) — pkexec has
                 # no local credential cache to warm, so one call sharing one
                 # Polkit authentication is the equivalent here.
+                quoted_tmp = shlex.quote(tmp_path)
                 if backup:
-                    inner = (
+                    script = (
                         "mv /etc/pacman.d/mirrorlist /etc/pacman.d/mirrorlist-backup && "
-                        f"install -m644 {shlex.quote(tmp_path)} /etc/pacman.d/mirrorlist"
+                        f"install -m644 {quoted_tmp} /etc/pacman.d/mirrorlist"
                     )
-                    cmd2 = (
-                        "pkexec /usr/bin/bash -c " + shlex.quote(inner) + " && "
-                        f'echo "{tr("Done — backup saved to /etc/pacman.d/mirrorlist-backup")}"'
-                    )
+                    ok_msg = tr("Done — backup saved to /etc/pacman.d/mirrorlist-backup")
+                    cmd2 = f'pkexec /usr/bin/bash -c {shlex.quote(script)} && echo "{ok_msg}"'
                 else:
-                    cmd2 = (
-                        f"pkexec /usr/bin/install -m644 {shlex.quote(tmp_path)} /etc/pacman.d/mirrorlist && "
-                        f'echo "{tr("Done — /etc/pacman.d/mirrorlist updated")}"'
-                    )
+                    ok_msg = tr("Done — /etc/pacman.d/mirrorlist updated")
+                    cmd2 = (f"pkexec /usr/bin/install -m644 {quoted_tmp} "
+                            f'/etc/pacman.d/mirrorlist && echo "{ok_msg}"')
 
-                def _cleanup():
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
+                run_terminal_fn(cmd2, tr("Save Mirrorlist"),
+                                on_success=lambda: _unlink_quietly(tmp_path))
 
-                run_terminal_fn(cmd2, tr("Save Mirrorlist"), on_success=_cleanup)
-
-            save_btn = Gtk.Button(label=tr("Save as New Mirrorlist"))
-            save_btn.add_css_class("suggested-action")
+            save_btn = _btn(tr("Save as New Mirrorlist"), "suggested-action")
             save_btn.connect("clicked", _save)
             rhdr.pack_end(save_btn)
             rtv.add_top_bar(rhdr)
 
-            router_outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-            router_outer.set_margin_top(12);   router_outer.set_margin_bottom(16)
-            router_outer.set_margin_start(16); router_outer.set_margin_end(16)
+            router_outer = _pad(_vbox(8), start=16, end=16, top=12, bottom=16)
 
-            info_lbl = Gtk.Label(
-                label=tr("{n} mirrors found, fastest first. Review the list, then save it as your new mirrorlist or discard it.").format(n=server_count))
-            info_lbl.set_halign(Gtk.Align.START)
-            info_lbl.add_css_class("dim-label")
-            router_outer.append(info_lbl)
+            router_outer.append(Gtk.Label(
+                label=tr("{n} mirrors found, fastest first. Review the list, then save it as your new mirrorlist or discard it.").format(n=server_count),
+                halign=Gtk.Align.START, css_classes=["dim-label"]))
 
-            rscroll = Gtk.ScrolledWindow()
+            rscroll = _scrolled(_AUTO, _AUTO, "card")
             rscroll.set_vexpand(True)
-            rscroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-            rscroll.add_css_class("card")
             rbuf = Gtk.TextBuffer()
             rbuf.set_text(content or tr("# No output captured"))
-            rview = Gtk.TextView(buffer=rbuf)
-            rview.set_editable(False); rview.set_monospace(True)
-            rview.set_wrap_mode(Gtk.WrapMode.NONE)
+            rview = Gtk.TextView(buffer=rbuf, editable=False, monospace=True,
+                                 wrap_mode=Gtk.WrapMode.NONE)
             rview.add_css_class("terminal-view")
-            rscroll.set_child(rview)
             router_outer.append(rscroll)
+            rscroll.set_child(rview)
 
-            rtv.set_content(router_outer)
             result_dialog.set_content(rtv)
+            rtv.set_content(router_outer)
             result_dialog.present()
 
         run_btn.connect("clicked", on_run)
         outer.append(run_btn)
 
-        preview_lbl = Gtk.Label()
-        preview_lbl.add_css_class("caption"); preview_lbl.add_css_class("dim-label")
-        preview_lbl.set_wrap(True); preview_lbl.set_wrap_mode(Pango.WrapMode.CHAR)
-        preview_lbl.set_selectable(True); preview_lbl.set_halign(Gtk.Align.CENTER)
+        preview_lbl = Gtk.Label(wrap=True, wrap_mode=Pango.WrapMode.CHAR,
+                                selectable=True, halign=Gtk.Align.CENTER,
+                                css_classes=["caption", "dim-label"])
 
         def update_preview(*_):
-            _codes, ok = _parse_countries()
-            if ok:
-                country_entry.remove_css_class("error")
-            else:
-                country_entry.add_css_class("error")
-            run_btn.set_sensitive(ok)
-            g, s = _build_flags()
-            preview_lbl.set_label(f"rate-mirrors {' '.join(g)} {mirror_cmd} {' '.join(s)}")
+            _codes, valid = _parse_countries()
+            toggle_error = (country_entry.remove_css_class if valid
+                            else country_entry.add_css_class)
+            toggle_error("error")
+            run_btn.set_sensitive(valid)
+            glob, sub = _build_flags()
+            preview_lbl.set_label("rate-mirrors {} {} {}".format(
+                " ".join(glob), mirror_cmd, " ".join(sub)))
 
-        country_entry.connect("changed", update_preview)
-        sort_drop.connect("notify::selected", update_preview)
-        https_switch.connect("notify::active", update_preview)
-        delay_spin.connect("value-changed", update_preview)
-        top_spin.connect("value-changed", update_preview)
+        for source, signal_name in (
+            (country_entry, "changed"),
+            (sort_drop,     "notify::selected"),
+            (https_switch,  "notify::active"),
+            (delay_spin,    "value-changed"),
+            (top_spin,      "value-changed"),
+        ):
+            source.connect(signal_name, update_preview)
         update_preview()
         outer.append(preview_lbl)
 
     else:
-        status = Adw.StatusPage()
-        status.set_paintable(themed_paintable("network-transmit-receive-symbolic", 72))
-        status.set_title(tr("rate-mirrors not installed"))
-        status.set_description(tr("rate-mirrors measures how fast mirrors respond from your location and sorts your mirrorlist accordingly. Testing needs no administrator rights."))
-        install_btn = Gtk.Button(label=tr("Install rate-mirrors"))
-        install_btn.add_css_class("suggested-action")
+        status = _status_page(
+            "network-transmit-receive-symbolic",
+            tr("rate-mirrors not installed"),
+            tr("rate-mirrors measures how fast mirrors respond from your location and sorts your mirrorlist accordingly. Testing needs no administrator rights."))
+        install_btn = _btn(tr("Install rate-mirrors"), "suggested-action")
         install_btn.set_halign(Gtk.Align.CENTER)
-        install_btn.connect("clicked", lambda *_: (
-            dialog.close(),
-            run_terminal_fn("pkexec /usr/bin/pacman -S --noconfirm rate-mirrors", tr("Install rate-mirrors"))
-        ))
+
+        def _install_rate_mirrors(*_):
+            dialog.close()
+            run_terminal_fn("pkexec /usr/bin/pacman -S --noconfirm rate-mirrors",
+                            tr("Install rate-mirrors"))
+        install_btn.connect("clicked", _install_rate_mirrors)
         status.set_child(install_btn)
         outer.append(status)
 
-    scroll.set_child(outer)
     tv.set_content(scroll)
+    scroll.set_child(outer)
     dialog.set_content(tv)
     dialog.present()
 
@@ -3196,107 +3202,87 @@ def show_mirror_rater(parent, run_terminal_fn):
 # ─── Orphan finder dialog ─────────────────────────────────────────────────────
 
 def show_orphan_finder(parent, run_terminal_fn):
-    dialog = Adw.Window()
-    dialog.set_title(tr("Orphaned Packages"))
-    dialog.set_default_size(560, 460)
-    dialog.set_resizable(True)
-    dialog.set_transient_for(parent)
-    dialog.set_modal(True)
+    dialog = _modal_window(parent, tr("Orphaned Packages"), 560, 460)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
-    close_btn = Gtk.Button(label=tr("Close"))
-    close_btn.add_css_class("flat")
+    tv, hdr = _toolbar_with_header()
+    close_btn = _btn(tr("Close"), "flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-    outer.set_margin_top(0); outer.set_margin_bottom(0)
+    outer = _vbox(0)
 
     orphans = get_orphans()
 
     if not orphans:
-        status = Adw.StatusPage()
-        status.set_paintable(themed_paintable("emblem-ok-symbolic", 72))
-        status.set_title(tr("No Orphans Found"))
-        status.set_description(tr("Your system has no orphaned packages."))
+        status = _status_page("emblem-ok-symbolic", tr("No Orphans Found"),
+                              tr("Your system has no orphaned packages."))
         status.set_vexpand(True)
         outer.append(status)
     else:
-        info_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        info_bar.set_margin_start(16); info_bar.set_margin_end(16)
-        info_bar.set_margin_top(12);   info_bar.set_margin_bottom(8)
-        info_icon = themed_image("dialog-warning-symbolic", 18)
-        info_bar.append(info_icon)
-        info_lbl = Gtk.Label(
-            label=tr("{n} orphaned package(s) — pulled in automatically as a dependency at some point, but nothing on your system requires them anymore. Safe to remove, or leave them if you might need them again.").format(n=len(orphans))
-        )
-        info_lbl.add_css_class("caption")
-        info_lbl.set_hexpand(True); info_lbl.set_halign(Gtk.Align.START); info_lbl.set_wrap(True)
-        info_bar.append(info_lbl)
+        info_bar = _pad(_hbox(8), start=16, end=16, top=12, bottom=8)
+        info_bar.append(themed_image("dialog-warning-symbolic", 18))
+        info_bar.append(Gtk.Label(
+            label=tr("{n} orphaned package(s) — pulled in automatically as a dependency at some point, but nothing on your system requires them anymore. Safe to remove, or leave them if you might need them again.").format(n=len(orphans)),
+            hexpand=True, halign=Gtk.Align.START, wrap=True,
+            css_classes=["caption"]))
         outer.append(info_bar)
 
-        scroll = Gtk.ScrolledWindow()
+        scroll = _pad(_scrolled(_NEVER, _AUTO), start=12, end=12)
         scroll.set_vexpand(True)
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_margin_start(12); scroll.set_margin_end(12)
 
-        listbox = Gtk.ListBox()
-        listbox.set_selection_mode(Gtk.SelectionMode.NONE)
-        listbox.add_css_class("boxed-list")
+        listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE,
+                              css_classes=["boxed-list"])
 
         for o in orphans:
-            row = Adw.ActionRow()
-            row.set_title(o["name"]); row.set_subtitle(o["version"])
-            icon = themed_image("package-x-generic-symbolic", 18)
-            icon.add_css_class("dim-label")
-            row.add_prefix(icon)
-            rm_btn = Gtk.Button(label=tr("Remove"))
-            rm_btn.add_css_class("destructive-action"); rm_btn.add_css_class("flat")
-            rm_btn.set_valign(Gtk.Align.CENTER)
+            row = Adw.ActionRow(title=o["name"], subtitle=o["version"])
+            pkg_icon = themed_image("package-x-generic-symbolic", 18)
+            pkg_icon.add_css_class("dim-label")
+            row.add_prefix(pkg_icon)
+            rm_btn = _centered(_btn(tr("Remove"), "destructive-action", "flat"))
             name = o["name"]
 
             def _do_remove_one(*_, n=name, r=row):
-                # Keep the dialog open so several orphans can be removed
-                # one after another without reopening it — just drop this
-                # one row from the list once its removal actually
-                # succeeds, instead of leaving a stale "removed" entry
-                # sitting there.
-                def _on_ok():
-                    listbox.remove(r)
+                # Der Dialog bleibt offen, damit mehrere Waisen nacheinander
+                # entfernt werden können. Nur die betroffene Zeile verschwindet,
+                # und erst, wenn das Entfernen tatsächlich geklappt hat.
+                if distro.is_arch():
+                    remove_cmd = f"pkexec /usr/bin/pacman -R --noconfirm {shlex.quote(n)}"
+                else:
+                    remove_cmd = pkgmanager.remove_cmd([n])
                 run_terminal_fn(
-                    f"pkexec /usr/bin/pacman -R --noconfirm {shlex.quote(n)}" if distro.is_arch()
-                    else pkgmanager.remove_cmd([n]),
+                    remove_cmd,
                     tr("Remove {name} ").format(name=n),
-                    on_success=_on_ok, parent=dialog)
+                    on_success=lambda: listbox.remove(r),
+                    parent=dialog)
             rm_btn.connect("clicked", _do_remove_one)
             row.add_suffix(rm_btn)
             listbox.append(row)
 
-        scroll.set_child(listbox)
         outer.append(scroll)
+        scroll.set_child(listbox)
 
-        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_box = _pad(_hbox(8), top=12, bottom=16)
         btn_box.set_halign(Gtk.Align.CENTER)
-        btn_box.set_margin_top(12); btn_box.set_margin_bottom(16)
         names = " ".join(shlex.quote(o["name"]) for o in orphans)
         name_list = [o["name"] for o in orphans]
-        remove_all_btn = Gtk.Button(label=tr("Remove All {n} Orphans").format(n=len(orphans)))
-        remove_all_btn.add_css_class("destructive-action")
-        remove_all_btn.connect("clicked", lambda *_: (
-            dialog.close(),
-            run_terminal_fn(
-                f"pkexec /usr/bin/pacman -Rns --noconfirm {names}" if distro.is_arch()
-                else pkgmanager.remove_cmd(name_list, purge=distro.is_debian()),
-                tr("Remove All Orphans"))
-        ))
+        remove_all_btn = _btn(
+            tr("Remove All {n} Orphans").format(n=len(orphans)),
+            "destructive-action")
+
+        def _remove_everything(*_):
+            dialog.close()
+            if distro.is_arch():
+                cmd_all = f"pkexec /usr/bin/pacman -Rns --noconfirm {names}"
+            else:
+                cmd_all = pkgmanager.remove_cmd(name_list, purge=distro.is_debian())
+            run_terminal_fn(cmd_all, tr("Remove All Orphans"))
+        remove_all_btn.connect("clicked", _remove_everything)
         btn_box.append(remove_all_btn)
         outer.append(btn_box)
 
-    tv.set_content(outer)
     dialog.set_content(tv)
+    tv.set_content(outer)
     dialog.present()
 
 
@@ -3313,22 +3299,17 @@ def show_clean_cache_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Cancel"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     _, code = run_command("which paccache 2>/dev/null")
     has_paccache = distro.is_arch() and (code == 0)
@@ -3503,18 +3484,13 @@ def show_import_pkgs_intro(parent, helper, on_choose_file):
     dialog.set_content_width(480)
     dialog.set_content_height(360)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
-    cancel_btn = Gtk.Button(label=tr("Cancel"))
-    cancel_btn.add_css_class("flat")
+    tv, hdr = _toolbar_with_header()
+    cancel_btn = _btn(tr("Cancel"), "flat")
     cancel_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_start(cancel_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     info_group = Adw.PreferencesGroup()
     info_group.set_title(tr("Install Programs From a Saved List"))
@@ -3547,11 +3523,10 @@ def show_import_pkgs_intro(parent, helper, on_choose_file):
     choose_btn.connect("clicked", _proceed)
     outer.append(choose_btn)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-    scroll.set_child(outer)
     tv.set_content(scroll)
+    scroll.set_child(outer)
     dialog.set_child(tv)
     dialog.present(parent)
 
@@ -3568,18 +3543,14 @@ def show_import_pkgs_dialog(parent, names, helper, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     cancel_btn = Gtk.Button(label=tr("Cancel"))
     cancel_btn.add_css_class("flat")
     cancel_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_start(cancel_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     list_group = Adw.PreferencesGroup()
     list_group.set_title(tr("{n} packages found in file").format(n=len(names)))
@@ -3622,9 +3593,8 @@ def show_import_pkgs_dialog(parent, names, helper, run_terminal_fn):
     install_btn.connect("clicked", _do_install)
     outer.append(install_btn)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
     scroll.set_child(outer)
     tv.set_content(scroll)
     dialog.set_content(tv)
@@ -3646,18 +3616,14 @@ def show_install_local_dialog(parent, info, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     cancel_btn = Gtk.Button(label=tr("Cancel"))
     cancel_btn.add_css_class("flat")
     cancel_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_start(cancel_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     kind = info["kind"]
     kind_label = {
@@ -3773,9 +3739,8 @@ def show_install_local_dialog(parent, info, run_terminal_fn):
         btn.connect("clicked", _go)
         outer.append(btn)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
     scroll.set_child(outer)
     tv.set_content(scroll)
     dialog.set_content(tv)
@@ -3792,18 +3757,14 @@ def show_export_pkgs_intro(parent, on_choose_location):
     dialog.set_content_width(480)
     dialog.set_content_height(320)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     cancel_btn = Gtk.Button(label=tr("Cancel"))
     cancel_btn.add_css_class("flat")
     cancel_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_start(cancel_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     info_group = Adw.PreferencesGroup()
     info_group.set_title(tr("Save Installed Programs to a List"))
@@ -3827,11 +3788,10 @@ def show_export_pkgs_intro(parent, on_choose_location):
     choose_btn.connect("clicked", _proceed)
     outer.append(choose_btn)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-    scroll.set_child(outer)
     tv.set_content(scroll)
+    scroll.set_child(outer)
     dialog.set_child(tv)
     dialog.present(parent)
 
@@ -3846,9 +3806,7 @@ def show_file_search_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
@@ -3881,9 +3839,8 @@ def show_file_search_dialog(parent, run_terminal_fn):
     hint.set_halign(Gtk.Align.START)
     outer.append(hint)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
     scroll.set_margin_start(12); scroll.set_margin_end(12); scroll.set_margin_bottom(12)
     listbox = Gtk.ListBox()
     listbox.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -3984,109 +3941,85 @@ def show_file_search_dialog(parent, run_terminal_fn):
     entry.connect("activate", do_search)
 
 def show_sysinfo_dialog(parent):
-    dialog = Adw.Window()
-    dialog.set_title(tr("System Information"))
-    dialog.set_default_size(560, 680)
-    dialog.set_resizable(True)
-    dialog.set_transient_for(parent)
-    dialog.set_modal(True)
+    dialog = _modal_window(parent, tr("System Information"), 560, 680)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
-    close_btn = Gtk.Button(label=tr("Close"))
-    close_btn.add_css_class("flat")
+    tv, hdr = _toolbar_with_header()
+    close_btn = _btn(tr("Close"), "flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_end(close_btn)
     tv.add_top_bar(hdr)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
-    loading_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-    loading_box.set_halign(Gtk.Align.CENTER); loading_box.set_valign(Gtk.Align.CENTER)
+    loading_spinner = Gtk.Spinner(width_request=32, height_request=32,
+                                  halign=Gtk.Align.CENTER)
+    loading_spinner.start()
+    loading_lbl = Gtk.Label(label=tr("Gathering system info…"),
+                            css_classes=["dim-label"])
+    loading_box = _vbox(12)
+    loading_box.set_halign(Gtk.Align.CENTER)
+    loading_box.set_valign(Gtk.Align.CENTER)
     loading_box.set_vexpand(True)
-    loading_spinner = Gtk.Spinner()
-    loading_spinner.start(); loading_spinner.set_size_request(32, 32)
-    loading_spinner.set_halign(Gtk.Align.CENTER)
-    loading_box.append(loading_spinner)
-    loading_lbl = Gtk.Label(label=tr("Gathering system info…"))
-    loading_lbl.add_css_class("dim-label")
-    loading_box.append(loading_lbl)
+    for part in (loading_spinner, loading_lbl):
+        loading_box.append(part)
     outer.append(loading_box)
 
-    scroll.set_child(outer)
     tv.set_content(scroll)
+    scroll.set_child(outer)
     dialog.set_content(tv)
     dialog.present()
+
+    def value_group(title, keys, info):
+        """PreferencesGroup mit einer Zeile pro vorhandenem Schlüssel aus `info`."""
+        group = Adw.PreferencesGroup(title=title)
+        for key in keys:
+            if key not in info:
+                continue
+            entry_row = Adw.ActionRow(title=tr(key))
+            entry_row.add_suffix(Gtk.Label(
+                label=info[key], selectable=True,
+                css_classes=["caption", "dim-label"]))
+            group.add(entry_row)
+        return group
 
     def populate(info):
         outer.remove(loading_box)
 
-        sys_group = Adw.PreferencesGroup()
-        sys_group.set_title(tr("System"))
-        for key in ("OS", "Desktop", "Kernel", "Architecture"):
-            if key in info:
-                row = Adw.ActionRow(); row.set_title(tr(key))
-                val_lbl = Gtk.Label(label=info[key])
-                val_lbl.add_css_class("caption"); val_lbl.add_css_class("dim-label")
-                val_lbl.set_selectable(True)
-                row.add_suffix(val_lbl)
-                sys_group.add(row)
-        outer.append(sys_group)
-
-        hw_group = Adw.PreferencesGroup()
-        hw_group.set_title(tr("Hardware"))
-        for key in ("Processor", "RAM", "Disk (/)", "Disk Type"):
-            if key in info:
-                row = Adw.ActionRow(); row.set_title(tr(key))
-                val_lbl = Gtk.Label(label=info[key])
-                val_lbl.add_css_class("caption"); val_lbl.add_css_class("dim-label")
-                val_lbl.set_selectable(True)
-                row.add_suffix(val_lbl)
-                hw_group.add(row)
-        outer.append(hw_group)
-
-        pkg_group = Adw.PreferencesGroup()
-        pkg_group.set_title(tr("Packages"))
-        for key in ("Pacman", "Package Manager", "AUR Helper", "Installed Packages", "Foreign (AUR) Packages", "Package Cache Size"):
-            if key in info:
-                row = Adw.ActionRow(); row.set_title(tr(key))
-                val_lbl = Gtk.Label(label=info[key])
-                val_lbl.add_css_class("caption"); val_lbl.add_css_class("dim-label")
-                val_lbl.set_selectable(True)
-                row.add_suffix(val_lbl)
-                pkg_group.add(row)
-        outer.append(pkg_group)
+        outer.append(value_group(
+            tr("System"), ("OS", "Desktop", "Kernel", "Architecture"), info))
+        outer.append(value_group(
+            tr("Hardware"), ("Processor", "RAM", "Disk (/)", "Disk Type"), info))
+        outer.append(value_group(
+            tr("Packages"),
+            ("Pacman", "Package Manager", "AUR Helper", "Installed Packages",
+             "Foreign (AUR) Packages", "Package Cache Size"),
+            info))
 
         repo_counts = info.get("Repo Counts") or {}
         if repo_counts:
-            repo_group = Adw.PreferencesGroup()
-            repo_group.set_title(tr("Installed by Repository"))
-            repo_group.set_description(tr("How many installed packages come from each source"))
-            # Official/enabled sync repos first (alphabetically), AUR/foreign
-            # last, since it isn't really a "repository" pacman knows about.
+            repo_group = Adw.PreferencesGroup(
+                title=tr("Installed by Repository"),
+                description=tr("How many installed packages come from each source"))
+            # Offizielle bzw. aktivierte Sync-Repos zuerst (alphabetisch), AUR
+            # bzw. Fremdpakete zuletzt, denn das ist für pacman kein echtes Repo.
             ordered = sorted(k for k in repo_counts if k != "aur / foreign")
             if "aur / foreign" in repo_counts:
                 ordered.append("aur / foreign")
             for repo in ordered:
-                row = Adw.ActionRow()
-                row.set_title(tr("AUR / Foreign") if repo == "aur / foreign" else repo)
-                count_lbl = Gtk.Label(label=tr("{n} pkgs").format(n=repo_counts[repo]))
-                count_lbl.add_css_class("caption"); count_lbl.add_css_class("dim-label")
-                row.add_suffix(count_lbl)
-                repo_group.add(row)
+                shown_name = tr("AUR / Foreign") if repo == "aur / foreign" else repo
+                repo_row = Adw.ActionRow(title=shown_name)
+                repo_row.add_suffix(Gtk.Label(
+                    label=tr("{n} pkgs").format(n=repo_counts[repo]),
+                    css_classes=["caption", "dim-label"]))
+                repo_group.add(repo_row)
             outer.append(repo_group)
         return False
 
     def worker():
-        info = get_system_info()
-        GLib.idle_add(populate, info)
+        GLib.idle_add(populate, get_system_info())
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -4147,9 +4080,8 @@ def show_about_dialog(parent, app_icon_name="io.github.wergosam.pachul"):
     # dialog's natural (unscrolled) height used to get clipped top and
     # bottom with no way to reach the rest. Inside a scroller it simply
     # scrolls instead.
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
     outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
     outer.set_margin_top(8);    outer.set_margin_bottom(24)
@@ -4276,9 +4208,7 @@ def show_history_dialog(parent):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
@@ -4303,9 +4233,8 @@ def show_history_dialog(parent):
     search.set_margin_top(8);    search.set_margin_bottom(6)
     outer.append(search)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
     scroll.set_margin_start(12); scroll.set_margin_end(12); scroll.set_margin_bottom(12)
     listbox = Gtk.ListBox()
     listbox.set_selection_mode(Gtk.SelectionMode.NONE)
@@ -4369,9 +4298,7 @@ def show_downgrade_dialog(parent, pkg_name, run_terminal_fn, limit=None, title=N
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
@@ -4452,53 +4379,46 @@ def show_downgrade_dialog(parent, pkg_name, run_terminal_fn, limit=None, title=N
                                ).format(pkg=pkg_name)
             else:
                 info_text = tr("No other version of {pkg} is available.").format(pkg=pkg_name)
-        info_bar = Gtk.Label(label=info_text)
-        info_bar.add_css_class("caption"); info_bar.set_wrap(True)
-        info_bar.set_halign(Gtk.Align.START)
-        info_bar.set_margin_start(16); info_bar.set_margin_end(16)
-        info_bar.set_margin_top(12);   info_bar.set_margin_bottom(8)
-        outer.append(info_bar)
+        outer.append(_pad(
+            Gtk.Label(label=info_text, wrap=True, halign=Gtk.Align.START,
+                      css_classes=["caption"]),
+            start=16, end=16, top=12, bottom=8))
 
-        scroll = Gtk.ScrolledWindow()
+        scroll = _pad(_scrolled(_NEVER, _AUTO), start=12, end=12, bottom=12)
         scroll.set_vexpand(True)
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_margin_start(12); scroll.set_margin_end(12); scroll.set_margin_bottom(12)
-        listbox = Gtk.ListBox()
-        listbox.set_selection_mode(Gtk.SelectionMode.NONE)
-        listbox.add_css_class("boxed-list")
+        listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE,
+                              css_classes=["boxed-list"])
 
         for cand in candidates:
-            row = Adw.ActionRow()
-            row.set_title(cand["version"])
-            if cand["kind"] == "installed":
-                row.set_subtitle(tr("Currently installed"))
-            elif cand["kind"] == "file":
-                row.set_subtitle(cand["source"])
-            elif cand["kind"] == "url":
-                row.set_subtitle(tr("Download from Arch Linux Archive"))
+            kind = cand["kind"]
+            if kind == "installed":
+                detail = tr("Currently installed")
+            elif kind == "file":
+                detail = cand["source"]
+            elif kind == "url":
+                detail = tr("Download from Arch Linux Archive")
             else:
-                row.set_subtitle(tr("Available from repository"))
-            row.set_subtitle_selectable(True)
+                detail = tr("Available from repository")
+            cand_row = Adw.ActionRow(title=cand["version"], subtitle=detail)
+            cand_row.set_subtitle_selectable(True)
             if cand.get("installed"):
-                badge = Gtk.Label(label=tr("INSTALLED"))
-                badge.add_css_class("row-status-pill")
-                badge.add_css_class("status-installed")
-                badge.set_valign(Gtk.Align.CENTER)
-                row.add_suffix(badge)
-            btn = Gtk.Button(label=tr("Install"))
-            btn.add_css_class("suggested-action"); btn.add_css_class("flat")
-            btn.set_valign(Gtk.Align.CENTER)
-            btn.set_sensitive(not cand.get("installed"))
-            btn.connect("clicked", lambda *_, c=cand: (
-                dialog.close(),
-                run_terminal_fn(build_downgrade_cmd(pkg_name, c),
-                                tr("Downgrade {pkg} to {ver}").format(pkg=pkg_name, ver=c["version"]))
-            ))
-            row.add_suffix(btn)
-            listbox.append(row)
+                cand_row.add_suffix(Gtk.Label(
+                    label=tr("INSTALLED"), valign=Gtk.Align.CENTER,
+                    css_classes=["row-status-pill", "status-installed"]))
+            pick_btn = _centered(_btn(tr("Install"), "suggested-action", "flat"))
+            pick_btn.set_sensitive(not cand.get("installed"))
 
-        scroll.set_child(listbox)
+            def _downgrade_to(*_, c=cand):
+                dialog.close()
+                run_terminal_fn(
+                    build_downgrade_cmd(pkg_name, c),
+                    tr("Downgrade {pkg} to {ver}").format(pkg=pkg_name, ver=c["version"]))
+            pick_btn.connect("clicked", _downgrade_to)
+            cand_row.add_suffix(pick_btn)
+            listbox.append(cand_row)
+
         outer.append(scroll)
+        scroll.set_child(listbox)
 
     def worker():
         try:
@@ -4527,18 +4447,14 @@ def show_hold_dialog(parent, pkg_name, currently_held, on_confirm, on_show_ignor
     dialog.set_content_width(460)
     dialog.set_content_height(280)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     cancel_btn = Gtk.Button(label=tr("Cancel"))
     cancel_btn.add_css_class("flat")
     cancel_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_start(cancel_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     info_group = Adw.PreferencesGroup()
     mechanism = tr("IgnorePkg in /etc/pacman.conf") if distro.is_arch() \
@@ -4592,11 +4508,10 @@ def show_hold_dialog(parent, pkg_name, currently_held, on_confirm, on_show_ignor
             link_btn.connect("clicked", _show_ignored)
             outer.append(link_btn)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-    scroll.set_child(outer)
     tv.set_content(scroll)
+    scroll.set_child(outer)
     dialog.set_child(tv)
     dialog.present(parent)
 
@@ -4609,18 +4524,14 @@ def show_mark_asdeps_dialog(parent, pkg_name, on_confirm):
     dialog.set_content_width(460)
     dialog.set_content_height(300)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     cancel_btn = Gtk.Button(label=tr("Cancel"))
     cancel_btn.add_css_class("flat")
     cancel_btn.connect("clicked", lambda *_: dialog.close())
     hdr.pack_start(cancel_btn)
     tv.add_top_bar(hdr)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(16);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=16, bottom=24)
 
     info_group = Adw.PreferencesGroup()
     info_group.set_title(tr("What this does"))
@@ -4644,11 +4555,10 @@ def show_mark_asdeps_dialog(parent, pkg_name, on_confirm):
     mark_btn.connect("clicked", _do_mark)
     outer.append(mark_btn)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-    scroll.set_child(outer)
     tv.set_content(scroll)
+    scroll.set_child(outer)
     dialog.set_child(tv)
     dialog.present(parent)
 
@@ -4665,9 +4575,7 @@ def show_pkgbuild_dialog(parent, pkg_name, on_install):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
@@ -4781,9 +4689,7 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
@@ -4833,9 +4739,8 @@ def show_pacdiff_dialog(parent, run_terminal_fn):
         info.set_margin_top(12);   info.set_margin_bottom(8)
         outer.append(info)
 
-        scroll = Gtk.ScrolledWindow()
+        scroll = _scrolled(_NEVER, _AUTO)
         scroll.set_vexpand(True)
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.set_margin_start(12); scroll.set_margin_end(12); scroll.set_margin_bottom(12)
         group = Adw.PreferencesGroup()
 
@@ -4975,9 +4880,7 @@ def show_ignored_packages_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
@@ -5024,11 +4927,8 @@ def show_ignored_packages_dialog(parent, run_terminal_fn):
             outer.append(status)
             return
 
-        scroll = Gtk.ScrolledWindow()
+        scroll = _pad(_scrolled(_NEVER, _AUTO), start=12, end=12, top=12, bottom=12)
         scroll.set_vexpand(True)
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_margin_start(12); scroll.set_margin_end(12)
-        scroll.set_margin_top(12);   scroll.set_margin_bottom(12)
         group = Adw.PreferencesGroup()
         group.set_description(tr(
             "These packages are skipped by system upgrades until you unignore them."))
@@ -5073,9 +4973,7 @@ def show_tool_updates_dialog(parent, run_terminal_fn):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
@@ -5151,12 +5049,9 @@ def show_tool_updates_dialog(parent, run_terminal_fn):
     def render(tools):
         outer.remove(loading)
 
-        scroll = Gtk.ScrolledWindow()
+        scroll = _pad(_scrolled(_NEVER, _AUTO), start=12, end=12, top=12, bottom=12)
         scroll.set_vexpand(True)
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.set_margin_start(12); scroll.set_margin_end(12)
-        scroll.set_margin_top(12);   scroll.set_margin_bottom(12)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box = _vbox(12)
 
         # Config files (.pacnew/.pacsave on Arch; .rpmnew/.dpkg-dist etc.
         # elsewhere) always gets its own entry point — it has its own
@@ -6322,9 +6217,7 @@ def show_startup_healthcheck_dialog(parent, findings, activate_fn, rescan_fn=Non
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
@@ -6440,9 +6333,7 @@ def show_help_dialog(parent):
     dialog.set_transient_for(parent)
     dialog.set_modal(True)
 
-    tv  = Adw.ToolbarView()
-    hdr = Adw.HeaderBar()
-    hdr.set_show_end_title_buttons(False)
+    tv, hdr = _toolbar_with_header()
     close_btn = Gtk.Button(label=tr("Close"))
     close_btn.add_css_class("flat")
     close_btn.connect("clicked", lambda *_: dialog.close())
@@ -6459,13 +6350,10 @@ def show_help_dialog(parent):
     search_box.append(search)
     tv.add_top_bar(search_box)
 
-    scroll = Gtk.ScrolledWindow()
+    scroll = _scrolled(_NEVER, _AUTO)
     scroll.set_vexpand(True)
-    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
 
-    outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-    outer.set_margin_top(12);   outer.set_margin_bottom(24)
-    outer.set_margin_start(16); outer.set_margin_end(16)
+    outer = _pad(_vbox(16), start=16, end=16, top=12, bottom=24)
 
     # (group_widget, [(row, haystack), …]) — kept for live filtering
     help_groups = []
