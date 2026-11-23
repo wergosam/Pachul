@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.1.1"
+VERSION = "2.1.3"
 AUR_ADDR = "https://aur.archlinux.org"
 DEFAULT_BUILD_DIR = Path(
     os.environ.get("PACHULI_BUILDDIR", Path.home() / ".cache" / "pachuli" / "builds")
@@ -1260,21 +1260,32 @@ class Pachuli:
         m = self._NAME_VER_RE.match(name_ver)
         return m.group(1) if m else name_ver
 
-    def _find_repo_conflicts(self) -> list[tuple[str, str]]:
-        """Ermittelt per Trockenlauf (`pacman -Su --print`, ohne Root, mit
-        LC_ALL=C damit die Meldungen sprachunabhängig sind) die Paare
-        (neues Paket, installiertes Paket, das entfernt werden müsste),
-        die ein Upgrade blockieren. Leere Liste = kein Paketkonflikt."""
+    _UNRESOLVABLE_RE = re.compile(
+        r"cannot be upgraded due to unresolvable dependencies:\n((?:[ \t]+\S[^\n]*\n?)+)")
+
+    def _dry_run_text(self, ignore: list[str] | None = None) -> str:
+        """Trockenlauf `pacman -Su --print` (ohne Root, LC_ALL=C damit die
+        Meldungen sprachunabhängig sind). Liefert stdout+stderr; leer, wenn
+        pacman nicht gestartet werden konnte."""
         env = dict(os.environ, LC_ALL="C", LANG="C")
+        cmd = ["pacman", "-Su", "--print", "--noconfirm"]
+        if ignore:
+            cmd += ["--ignore", ",".join(ignore)]
         try:
             res = subprocess.run(
-                ["pacman", "-Su", "--print", "--noconfirm"],
-                capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
                 env=env, timeout=120,
             )
         except (OSError, subprocess.SubprocessError):
-            return []
-        text = (res.stdout or "") + "\n" + (res.stderr or "")
+            return ""
+        return (res.stdout or "") + "\n" + (res.stderr or "")
+
+    def _find_repo_conflicts(self, text: str | None = None) -> list[tuple[str, str]]:
+        """Ermittelt per Trockenlauf die Paare (neues Paket, installiertes
+        Paket, das entfernt werden müsste), die ein Upgrade blockieren.
+        Leere Liste = kein Paketkonflikt."""
+        if text is None:
+            text = self._dry_run_text()
         conflicts: list[tuple[str, str]] = []
         for m in self._CONFLICT_RE.finditer(text):
             new_pkg = self._strip_version(m.group(1))
@@ -1284,6 +1295,37 @@ class Pachuli:
             if (new_pkg, old_pkg) not in conflicts:
                 conflicts.append((new_pkg, old_pkg))
         return conflicts
+
+    # Weitere Meldungen (C-Locale), die auf ein nicht aktualisierbares Paket
+    # hindeuten, falls pacman im Trockenlauf (--print) die Skip-Frage samt
+    # Paketliste nicht ausgibt:
+    #   warning: cannot resolve "libssl.so=4-64", a dependency of "paru"
+    #   :: unable to satisfy dependency 'libssl.so=4-64' required by paru
+    _CANNOT_RESOLVE_RE = re.compile(r'cannot resolve "[^"]+", a dependency of "([^"]+)"')
+    _UNABLE_SATISFY_RE = re.compile(r"unable to satisfy dependency '[^']+' required by (\S+)")
+
+    def _find_unresolvable(self, text: str) -> list[str]:
+        """Pakete, die pacman wegen nicht auflösbarer Abhängigkeiten nicht
+        aktualisieren kann (typisch: ein Paket aus chaotic-aur wurde gegen
+        eine neuere Bibliothek gebaut als in extra/core verfügbar, z. B.
+        paru gegen libssl.so=4-64). pacman fragt dann "Paket überspringen?"
+        - unter --noconfirm gilt Standard N, das ganze Upgrade bricht ab.
+        Nur bereits installierte Pakete kommen in Frage (Überspringen =
+        auf der installierten Version bleiben)."""
+        names: list[str] = []
+        for m in self._UNRESOLVABLE_RE.finditer(text):
+            names.extend(m.group(1).split())
+        for rx in (self._CANNOT_RESOLVE_RE, self._UNABLE_SATISFY_RE):
+            names.extend(m.group(1) for m in rx.finditer(text))
+        result: list[str] = []
+        for name in names:
+            if name in result:
+                continue
+            if subprocess.run(["pacman", "-Qq", name], capture_output=True,
+                              stdin=subprocess.DEVNULL).returncode != 0:
+                continue
+            result.append(name)
+        return result
 
     def _removal_is_safe(self, pkg: str) -> bool:
         """True, wenn pacman `pkg` ohne Abhängigkeitsbruch entfernen könnte
@@ -1315,28 +1357,54 @@ class Pachuli:
         retry_flags = "-Su"
         retry = ["pacman", retry_flags] + (["--noconfirm"] if self.opts.noconfirm else [])
 
+        ignore: list[str] = []
         for _ in range(5):  # Schutz vor Endlosschleifen
-            conflicts = self._find_repo_conflicts()
-            if not conflicts:
+            text = self._dry_run_text(ignore)
+            conflicts = self._find_repo_conflicts(text)
+            blocked = [p for p in self._find_unresolvable(text) if p not in ignore]
+            if not conflicts and not blocked:
+                if not ignore and not conflicts:
+                    tail = [l for l in text.splitlines() if l.strip()][-12:]
+                    print(f"{Colors.YELLOW}pachuli {VERSION}: Ursache des Fehlschlags im "
+                          f"Trockenlauf nicht erkannt. Ausgabe von "
+                          f"`pacman -Su --print`:{Colors.RESET}", file=sys.stderr)
+                    for l in tail:
+                        print(f"   {l}", file=sys.stderr)
                 break
-            msg("Paketkonflikt blockiert das System-Upgrade:", Colors.YELLOW, self.opts.quiet)
-            to_remove: list[str] = []
-            for new_pkg, old_pkg in conflicts:
-                print(f"   {Colors.BOLD}{new_pkg}{Colors.RESET} (neu) steht in Konflikt mit "
-                      f"{Colors.BOLD}{old_pkg}{Colors.RESET} (installiert)")
-                if not self._removal_is_safe(old_pkg):
-                    die(f"'{old_pkg}' kann nicht automatisch entfernt werden "
-                        f"(wird von anderen Paketen benötigt). Bitte manuell auflösen: "
-                        f"pacman -Rns {old_pkg}")
-                if yesno(f"'{old_pkg}' entfernen, damit '{new_pkg}' installiert werden kann",
-                         self.opts.noconfirm):
-                    to_remove.append(old_pkg)
-                else:
-                    die("Upgrade abgebrochen (Konflikt nicht aufgelöst)")
-            rm_cmd = ["pacman", "-Rns"] + (["--noconfirm"] if self.opts.noconfirm else []) + to_remove
-            if escalate(rm_cmd, self.opts).returncode != 0:
-                die(f"Entfernen von {', '.join(to_remove)} fehlgeschlagen")
-            if escalate(retry, self.opts).returncode == 0:
+
+            # Nicht auflösbare Abhängigkeiten: Paket bei diesem Upgrade
+            # überspringen (bleibt auf der installierten Version, wird beim
+            # nächsten Upgrade erneut versucht, sobald das Repo aufschließt).
+            if blocked:
+                msg("Pakete mit nicht auflösbaren Abhängigkeiten:", Colors.YELLOW, self.opts.quiet)
+                for pkg in blocked:
+                    print(f"   {Colors.BOLD}{pkg}{Colors.RESET} kann derzeit nicht aktualisiert werden")
+                if not yesno(f"{', '.join(blocked)} bei diesem Upgrade überspringen "
+                             f"(bleibt auf der installierten Version)", self.opts.noconfirm):
+                    die("Upgrade abgebrochen (nicht auflösbare Abhängigkeiten)")
+                ignore.extend(blocked)
+
+            if conflicts:
+                msg("Paketkonflikt blockiert das System-Upgrade:", Colors.YELLOW, self.opts.quiet)
+                to_remove: list[str] = []
+                for new_pkg, old_pkg in conflicts:
+                    print(f"   {Colors.BOLD}{new_pkg}{Colors.RESET} (neu) steht in Konflikt mit "
+                          f"{Colors.BOLD}{old_pkg}{Colors.RESET} (installiert)")
+                    if not self._removal_is_safe(old_pkg):
+                        die(f"'{old_pkg}' kann nicht automatisch entfernt werden "
+                            f"(wird von anderen Paketen benötigt). Bitte manuell auflösen: "
+                            f"pacman -Rns {old_pkg}")
+                    if yesno(f"'{old_pkg}' entfernen, damit '{new_pkg}' installiert werden kann",
+                             self.opts.noconfirm):
+                        to_remove.append(old_pkg)
+                    else:
+                        die("Upgrade abgebrochen (Konflikt nicht aufgelöst)")
+                rm_cmd = ["pacman", "-Rns"] + (["--noconfirm"] if self.opts.noconfirm else []) + to_remove
+                if escalate(rm_cmd, self.opts).returncode != 0:
+                    die(f"Entfernen von {', '.join(to_remove)} fehlgeschlagen")
+
+            retry_cmd = retry + (["--ignore", ",".join(ignore)] if ignore else [])
+            if escalate(retry_cmd, self.opts).returncode == 0:
                 return
         die("Repo-Upgrade (pacman) fehlgeschlagen - siehe Ausgabe oben", result.returncode or 1)
 

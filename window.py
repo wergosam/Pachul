@@ -27,6 +27,7 @@ from backend import (
     get_enabled_auto_update_commands, check_aur_ahead_of_repo,
     build_desktop_icon_map, fetch_flatpak_icon,
     aur_helper_upgrade_cmd, aur_helper_install_cmd, _find_aur_helper,
+    pacman_upgrade_cmd,
     pachuli_installed, local_pachuli_path, get_pachuli_install_cmd,
     makepkg_auth_needs_setup, get_makepkg_pkexec_cmd,
     pachuli_update_available, notify_tray_recheck,
@@ -2239,12 +2240,12 @@ class pachulWindow(Adw.ApplicationWindow):
         if helper:
             main_cmd = aur_helper_upgrade_cmd(helper)
         elif distro.is_arch():
-            # --ask 4 = ALPM_QUESTION_CONFLICT_PKG: beantwortet die Frage
-            # "X und Y stehen in Konflikt. Y entfernen?" mit Ja. Unter
-            # --noconfirm gilt sonst der Standard "N", das Upgrade bricht
-            # dann an Konflikten ab (z. B. plasma-x11-session bei Plasma
-            # 6.8). Abhängigkeiten werden von pacman weiterhin geprüft.
-            main_cmd = "pkexec /usr/bin/pacman -Syu --noconfirm --ask 4"
+            # Konflikte (--ask 4) und nicht auflösbare Abhängigkeiten
+            # (Retry mit --ignore) siehe backend.pacman_upgrade_cmd().
+            # Beginnt bewusst nicht mit "pkexec " (zusammengesetzte
+            # Shell-Zeile) und nimmt daher den allgemeinen Zweig unten.
+            main_cmd = pacman_upgrade_cmd(
+                tr("Skipping packages with unresolvable dependencies:"))
         else:
             main_cmd = pkgmanager.upgrade_all_cmd()
 

@@ -40,7 +40,7 @@ FLATPAK_REMOTE_CACHE = CACHE_DIR / "flatpak_remote.json"
 AUR_NAMES_CACHE = CACHE_DIR / "aur_names.json"
 AUR_META_CACHE = CACHE_DIR / "aur_meta.json"   # name -> [version, description]
 SNAP_CATALOG_CACHE = CACHE_DIR / "snap_catalog.json"
-APP_VERSION    = "2.3.1"   # shown in the About dialog — bump on every release
+APP_VERSION    = "2.3.2"   # shown in the About dialog — bump on every release
 CACHE_VERSION  = 4   # bump when the cached package schema changes, to force a rebuild
 SYNCDB_TTL     = 6 * 3600   # 6 hours
 FLATPAK_REMOTE_TTL = 6 * 3600   # same cadence as pacman's syncdb
@@ -218,6 +218,47 @@ def aur_helper_upgrade_cmd(helper):
     if helper == "pachuli":
         return "pachuli -Syu --noconfirm -g"
     return f"{helper} -Syu --noconfirm"
+
+
+def pacman_upgrade_cmd(skip_note=""):
+    """Systemupgrade ohne AUR-Helfer (nur pacman, via pkexec).
+
+    --ask 4 (ALPM_QUESTION_CONFLICT_PKG) beantwortet Paketkonflikte mit Ja.
+    Die Frage "Paket(e) wegen nicht auflösbarer Abhängigkeiten
+    überspringen?" (z. B. paru aus chaotic-aur, gebaut gegen eine neuere
+    libssl als in extra) lässt sich damit NICHT beantworten; unter
+    --noconfirm gilt dort Standard N und das ganze Upgrade bricht ab.
+    Darum: scheitert der erste Lauf, werden die blockierten Pakete per
+    Trockenlauf (ohne Root, LC_ALL=C, Datenbanken sind nach dem ersten
+    Lauf bereits synchron) ermittelt und das Upgrade mit --ignore
+    wiederholt. Erkannt werden dieselben drei Meldungen wie in
+    pachuli.py (_find_unresolvable); nur bereits installierte Pakete
+    kommen in Frage. Ohne Fund bleibt der Fehler bestehen (Exit != 0),
+    die letzten Zeilen des Trockenlaufs gehen dann nach stderr.
+    Bewusst eine zusammengesetzte Shell-Zeile statt `pkexec bash -c`: so
+    bleibt es ein direkter pkexec-Aufruf mit nativem Polkit-Dialog.
+    """
+    note = shlex.quote(skip_note) if skip_note else "''"
+    # 1) Skip-Frage mit Paketliste, 2) cannot resolve ..., a dependency of,
+    # 3) unable to satisfy dependency ... required by
+    find = (
+        "{ printf '%s\\n' \"$_out\" | awk '/cannot be upgraded due to unresolvable "
+        "dependencies:/{f=1;next} f&&NF{for(i=1;i<=NF;i++)print $i;next} f{exit}'; "
+        "printf '%s\\n' \"$_out\" | sed -n "
+        "'s/.*cannot resolve \"[^\"]*\", a dependency of \"\\([^\"]*\\)\".*/\\1/p'; "
+        "printf '%s\\n' \"$_out\" | sed -n "
+        "\"s/.*unable to satisfy dependency '[^']*' required by \\([^ ]*\\).*/\\1/p\"; "
+        "} | sort -u"
+    )
+    return (
+        "{ pkexec /usr/bin/pacman -Syu --noconfirm --ask 4 || "
+        "{ _out=$(LC_ALL=C pacman -Su --print --noconfirm 2>&1 </dev/null); "
+        "_ign=''; for _p in $(" + find + "); do "
+        "pacman -Qq \"$_p\" >/dev/null 2>&1 && _ign=\"${_ign:+$_ign,}$_p\"; done; "
+        "if [ -n \"$_ign\" ]; then echo; echo " + note + "\" $_ign\"; "
+        "pkexec /usr/bin/pacman -Su --noconfirm --ask 4 --ignore \"$_ign\"; "
+        "else printf '%s\\n' \"$_out\" | tail -n 12 >&2; false; fi; }; }"
+    )
 
 
 def aur_helper_install_cmd(helper, names, needed=False, noconfirm=True, force_aur=False):

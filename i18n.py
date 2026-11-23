@@ -144,6 +144,7 @@ STRINGS_DE = {
 
     # Header menu
     "System upgrade (pacman -Syu)": "Systemaktualisierung (pacman -Syu)",
+    "Skipping packages with unresolvable dependencies:": "Pakete mit nicht auflösbaren Abhängigkeiten werden übersprungen:",
     "Sync Databases": "Datenbanken synchronisieren",
     "Refresh Package Lists": "Paketlisten aktualisieren",
     "Downloads the latest package lists from your enabled repositories (pacman -Sy), so Pachul knows about new versions and new packages. This only refreshes metadata — nothing on your system is installed, removed, or upgraded.":
@@ -1694,6 +1695,7 @@ STRINGS_FR = {
 
     # Header menu
     "System upgrade (pacman -Syu)": "Mise à niveau du système (pacman -Syu)",
+    "Skipping packages with unresolvable dependencies:": "Paquets aux dépendances non résolubles ignorés :",
     "Sync Databases": "Synchroniser les bases de données",
     "Refresh Package Lists": "Actualiser les listes de paquets",
     "Downloads the latest package lists from your enabled repositories (pacman -Sy), so Pachul knows about new versions and new packages. This only refreshes metadata — nothing on your system is installed, removed, or upgraded.":
@@ -2630,6 +2632,7 @@ STRINGS_IT = {
 
     # Header menu
     "System upgrade (pacman -Syu)": "Aggiornamento del sistema (pacman -Syu)",
+    "Skipping packages with unresolvable dependencies:": "Pacchetti con dipendenze non risolvibili saltati:",
     "Sync Databases": "Sincronizza database",
     "Refresh Package Lists": "Aggiorna elenchi pacchetti",
     "Downloads the latest package lists from your enabled repositories (pacman -Sy), so Pachul knows about new versions and new packages. This only refreshes metadata — nothing on your system is installed, removed, or upgraded.":
