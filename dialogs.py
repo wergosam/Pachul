@@ -216,6 +216,49 @@ _GPG_GENERIC_RE = _re.compile(
     r'corrupted package \(PGP signature\)|PGP signatures? could not be verified',
     _re.IGNORECASE)
 
+# makepkg verifies the signatures of AUR *source tarballs* against the
+# user's own GnuPG keyring (~/.gnupg), NOT against pacman's keyring. A missing
+# key shows up as e.g.
+#   kgamma-6.7.5.tar.xz ... FAILED (unknown public key 11968C44928CAEFC)
+# (localized by makepkg - German: "FEHLGESCHLAGEN (Unbekannter öffentlicher
+# Schlüssel <ID>)"). The fix is therefore a plain, unprivileged `gpg
+# --recv-keys` — `pacman-key` would put the key into the wrong keyring.
+_SRC_KEY_RE = _re.compile(
+    r'\(\s*(?:unknown public key|Unbekannter öffentlicher Schlüssel'
+    r'|clé publique inconnue|chiave pubblica sconosciuta'
+    r'|clave pública desconocida)\s+([0-9A-Fa-f]{8,40})\s*\)',
+    _re.IGNORECASE)
+
+
+def _detect_source_keys(text):
+    """Key IDs makepkg could not find for verifying AUR source signatures
+    (Arch family only). Empty list if there are none."""
+    if not distro.is_arch():
+        return []
+    found = []
+    for m in _SRC_KEY_RE.finditer(text):
+        k = m.group(1).upper()
+        if k not in found:
+            found.append(k)
+    return found
+
+
+def _source_key_fix_cmd(keys):
+    """Unprivileged command importing the given keys into the user's GnuPG
+    keyring: already present -> nothing to do; otherwise try several
+    keyservers, and finally restart a hung dirmngr and try once more."""
+    parts = []
+    for k in keys:
+        q = shlex.quote(k)
+        parts.append(
+            f"(gpg --batch --list-keys {q} >/dev/null 2>&1 "
+            f"|| gpg --batch --keyserver keyserver.ubuntu.com --recv-keys {q} "
+            f"|| gpg --batch --keyserver keys.openpgp.org --recv-keys {q} "
+            f"|| (gpgconf --kill dirmngr; "
+            f"gpg --batch --keyserver keyserver.ubuntu.com --recv-keys {q}))")
+    return " && ".join(parts)
+
+
 # Stale pacman database lock ("db.lck"). Pacman refuses to run at all while
 # this file exists — usually a leftover from a crashed/killed previous run,
 # a power loss, or a second package manager instance. Matches both English
@@ -374,7 +417,8 @@ def _parse_qkk_details(raw_text):
 
 
 def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
-                         target_window=None, on_success_with_window=None):
+                         target_window=None, on_success_with_window=None,
+                         _key_retry=False):
     """
     Show a modal, PTY-backed terminal window that executes *cmd*.
     on_success() is invoked on the main thread when the command ends with 0.
@@ -810,8 +854,38 @@ def run_terminal_dialog(parent, cmd, title, on_success=None, on_done_extra=None,
             _hint = _failure_hint(full_text)
             if _hint:
                 append_output(_hint)
-            gpg_issue = _detect_gpg_issue(full_text)
-            if gpg_issue is not None:
+            src_keys = _detect_source_keys(full_text)
+            gpg_issue = None if src_keys else _detect_gpg_issue(full_text)
+            if src_keys:
+                key_list = ", ".join(src_keys)
+                key_retry_cmd = f"{_source_key_fix_cmd(src_keys)} && {cmd}"
+
+                def _do_source_key_fix(*_):
+                    gpg_banner.set_revealed(False)
+                    if dialog.get_visible():
+                        dialog.close()
+                    run_terminal_dialog(parent, key_retry_cmd, title,
+                                        on_success=on_success,
+                                        on_done_extra=on_done_extra,
+                                        _key_retry=True)
+                    return False
+
+                if not _key_retry:
+                    # Fully automatic, but only once: the retry dialog is
+                    # started with _key_retry=True so a key that simply
+                    # can't be fetched never causes an endless loop.
+                    append_output("\n" + tr(
+                        "Missing PGP key {id} found — importing it into "
+                        "your GPG keyring and retrying automatically …\n"
+                    ).format(id=key_list))
+                    GLib.timeout_add(1500, _do_source_key_fix)
+                else:
+                    gpg_banner.set_title(
+                        tr("Unknown GPG key {id} detected").format(id=key_list))
+                    gpg_banner.set_button_label(tr("Import & Retry"))
+                    gpg_banner.connect("button-clicked", _do_source_key_fix)
+                    gpg_banner.set_revealed(True)
+            elif gpg_issue is not None:
                 key_id = gpg_issue
 
                 def _do_gpg_fix(*_):
@@ -2520,6 +2594,152 @@ def show_broken_symlinks_dialog(parent, run_terminal_fn):
 
 # ─── Services & Security Check (Modul 7 from the user's manjaro-wartung.sh) ───
 
+# ─── Failed-services analysis & automatic repair ─────────────────────────────
+# One bash script per scope (system units as root via a single pkexec call,
+# user units as the normal user). For every failed unit it prints the unit,
+# the last journal lines, a diagnosis and the action taken, then re-checks
+# whether the unit is still failed. Only SAFE repairs are automatic
+# (daemon-reload, reset-failed, systemd-sysusers / systemd-tmpfiles, restart
+# of enabled long-running services); session-critical units (display
+# manager, logind, D-Bus, user@) are only reported, never restarted.
+
+_UNIT_SUFFIX_RE = _re.compile(
+    r'\.(?:service|socket|timer|mount|path|automount|swap|scope)$')
+
+_FAILED_SVC_BODY = r"""
+SC="@SC@"; JC="@JC@"; ROOT=@ROOT@
+$SC daemon-reload 2>/dev/null
+units=$($SC list-units --state=failed --plain --no-legend --no-pager 2>/dev/null | awk '{for(i=1;i<=2;i++) if($i ~ /\.(service|socket|timer|mount|path|automount|swap|scope)$/){print $i;break}}')
+echo "══ $L_HEAD"
+if [ -z "$units" ]; then echo "$L_NONE"; exit 0; fi
+fixed=0; bad=0
+for u in $units; do
+  echo
+  echo "━━ $u"
+  show() { $SC show -p "$1" --value "$u" 2>/dev/null; }
+  echo "  $(show Description)"
+  load=$(show LoadState); typ=$(show Type); ufs=$(show UnitFileState)
+  res=$(show Result); st=$(show ExecMainStatus)
+  log=$($JC -u "$u" -b -n 40 --no-pager -o cat 2>/dev/null)
+  echo "  $L_LOG"
+  printf '%s\n' "$log" | tail -n 6 | cut -c1-200 | sed 's/^/    /'
+  logl=$(printf '%s' "$log" | tr 'A-Z' 'a-z')
+  case "$u" in
+    display-manager.service|sddm.service|gdm.service|lightdm.service|systemd-logind.service|dbus*.service|user@*.service|user-runtime-dir@*.service) protected=1;;
+    *) protected=0;;
+  esac
+  fix=none
+  if [ "$load" = "not-found" ]; then diag=$D_NOTFOUND; fix=reset
+  elif [ "$protected" = 1 ]; then diag=$D_PROTECTED; fix=none
+  elif [ "$res" = "start-limit-hit" ]; then diag=$D_LIMIT; fix=restart
+  elif [ "$st" = 203 ]; then diag=$D_EXEC; fix=none
+  elif printf '%s' "$logl" | grep -q 'error while loading shared libraries'; then diag=$D_LIB; fix=none
+  elif [ "$st" = 216 ] || [ "$st" = 217 ]; then diag=$D_USER; [ "$ROOT" = 1 ] && fix=sysusers
+  elif [ "$st" = 238 ] || printf '%s' "$logl" | grep -q 'failed to set up .*directory'; then diag=$D_STATE; [ "$ROOT" = 1 ] && fix=tmpfiles
+  elif printf '%s' "$logl" | grep -q 'address already in use'; then diag=$D_ADDR; fix=none
+  elif [ "$typ" = oneshot ]; then diag=$D_ONESHOT; fix=reset
+  elif [ "$ufs" = enabled ] || [ "$ufs" = enabled-runtime ]; then diag=$D_GENERIC; fix=restart
+  else diag=$D_ONDEMAND; fix=reset
+  fi
+  echo "  $L_DIAG $diag"
+  case "$fix" in
+    reset)
+      echo "  $L_ACT $A_RESET"
+      $SC reset-failed "$u" 2>&1 | sed 's/^/    /';;
+    restart)
+      echo "  $L_ACT $A_RESTART"
+      $SC reset-failed "$u" 2>/dev/null
+      $SC restart "$u" 2>&1 | sed 's/^/    /';;
+    sysusers)
+      echo "  $L_ACT $A_SYSUSERS"
+      systemd-sysusers 2>&1 | sed 's/^/    /'
+      $SC reset-failed "$u" 2>/dev/null
+      $SC restart "$u" 2>&1 | sed 's/^/    /';;
+    tmpfiles)
+      echo "  $L_ACT $A_TMPFILES"
+      systemd-tmpfiles --create 2>&1 | sed 's/^/    /'
+      $SC reset-failed "$u" 2>/dev/null
+      $SC restart "$u" 2>&1 | sed 's/^/    /';;
+    *)
+      echo "  $L_ACT $A_NONE";;
+  esac
+  sleep 1
+  if [ "$fix" = none ] || [ "$($SC is-failed "$u" 2>/dev/null)" = failed ]; then
+    bad=$((bad+1)); echo "  $L_BAD"
+  else
+    fixed=$((fixed+1)); echo "  $L_OK"
+  fi
+done
+echo
+echo "══ $L_SUM: $fixed $L_FIXED, $bad $L_OPEN"
+exit 0
+"""
+
+
+def _failed_units(user_scope):
+    """Names of currently failed units in the system or the user manager."""
+    cmd = ("systemctl --user" if user_scope else "systemctl") + \
+        " list-units --state=failed --plain --no-legend --no-pager 2>/dev/null"
+    out, _ = run_command(cmd)
+    names = []
+    for line in (out or "").splitlines():
+        for tok in line.split()[:2]:
+            if _UNIT_SUFFIX_RE.search(tok):
+                names.append(tok)
+                break
+    return names
+
+
+def _failed_services_repair_script(user_scope):
+    labels = {
+        "L_HEAD": tr("Failed services: analysis & repair") + (
+            " (" + tr("user services") + ")" if user_scope else
+            " (" + tr("system services") + ")"),
+        "L_NONE": tr("No failed units."),
+        "L_LOG": tr("Last journal lines:"),
+        "L_DIAG": tr("Diagnosis:"),
+        "L_ACT": tr("Action:"),
+        "L_OK": tr("✓ Fixed — the unit is no longer in a failed state."),
+        "L_BAD": tr("✗ Not fixed — see the journal lines above; this needs a manual fix."),
+        "L_SUM": tr("Summary"),
+        "L_FIXED": tr("fixed"),
+        "L_OPEN": tr("still open"),
+        "D_NOTFOUND": tr("The unit file no longer exists (leftover of a removed package)."),
+        "D_PROTECTED": tr("Critical session service — it is never restarted automatically."),
+        "D_LIMIT": tr("Restarted too often in a short time (start limit reached)."),
+        "D_EXEC": tr("The program to start is missing or not executable (exit 203/EXEC). Reinstall the package that provides this service."),
+        "D_LIB": tr("The program cannot load a library (usually after a partial update). Reinstall the package or reboot."),
+        "D_USER": tr("The service's system user or group is missing (exit 216/217)."),
+        "D_STATE": tr("A state or runtime directory is missing (exit 238)."),
+        "D_ADDR": tr("The port or address is already in use by another process."),
+        "D_ONESHOT": tr("One-shot task that failed once."),
+        "D_GENERIC": tr("The service stopped with an error."),
+        "D_ONDEMAND": tr("On-demand service (started by D-Bus or a socket when needed) — the failure was most likely temporary."),
+        "A_RESET": tr("Resetting the failed state."),
+        "A_RESTART": tr("Restarting the service."),
+        "A_SYSUSERS": tr("Creating missing system users (systemd-sysusers), then restarting."),
+        "A_TMPFILES": tr("Creating missing directories (systemd-tmpfiles), then restarting."),
+        "A_NONE": tr("No safe automatic repair possible."),
+    }
+    head = "".join(f"{k}={shlex.quote(v)}\n" for k, v in labels.items())
+    body = (_FAILED_SVC_BODY
+            .replace("@SC@", "systemctl --user" if user_scope else "systemctl")
+            .replace("@JC@", "journalctl --user" if user_scope else "journalctl")
+            .replace("@ROOT@", "0" if user_scope else "1"))
+    return head + body
+
+
+def _failed_services_repair_cmd(system_units, user_units):
+    parts = []
+    if user_units:
+        parts.append("bash -c " + shlex.quote(_failed_services_repair_script(True)))
+    if system_units:
+        parts.append("pkexec /usr/bin/bash -c "
+                     + shlex.quote(_failed_services_repair_script(False)))
+    return "; ".join(parts)
+
+
+
 def show_services_security_dialog(parent, run_terminal_fn):
     """Adapted from "MODUL 7: Systemdienste und Sicherheit" in the user's
     own manjaro-wartung.sh. Almost entirely distro-agnostic: systemctl,
@@ -2575,6 +2795,24 @@ def show_services_security_dialog(parent, run_terminal_fn):
         tr("Show"),
         'systemctl --failed --no-pager 2>/dev/null',
     ))
+
+    # Analyze & repair: only offered when something is actually failed now.
+    _sys_failed = _failed_units(False)
+    _usr_failed = _failed_units(True)
+    if _sys_failed or _usr_failed:
+        services_group.add(_row(
+            tr("Analyze & Repair Failed Services"),
+            tr("Analyzes every failed service (journal, exit status, unit "
+               "type), applies safe fixes automatically (reload, reset, "
+               "create missing users/directories, restart) and reports what "
+               "could not be fixed. Display manager, login and D-Bus "
+               "services are never restarted.") + "\n"
+            + tr("Currently failed: {names}").format(
+                names=", ".join(_sys_failed + _usr_failed)),
+            tr("Analyze & Repair"),
+            _failed_services_repair_cmd(_sys_failed, _usr_failed),
+            suggested=True,
+        ))
 
     # shadow.service is a known-harmless, occasionally-failing service on
     # Manjaro specifically (password/group integrity check tripping after

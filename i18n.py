@@ -482,6 +482,73 @@ STRINGS_DE = {
     "Signature check failed — the keyring may be outdated":
         "Signaturprüfung fehlgeschlagen — Schlüsselring ist möglicherweise veraltet",
     "Update Keyring & Retry": "Schlüsselring aktualisieren & erneut versuchen",
+    "Missing PGP key {id} found — importing it into your GPG keyring and retrying automatically …\n":
+        "Fehlender PGP-Schlüssel {id} gefunden — wird in deinen GPG-Schlüsselbund importiert, danach automatischer neuer Versuch …\n",
+
+    "Analyze & Repair Failed Services":
+        "Fehlgeschlagene Dienste analysieren & reparieren",
+    "Analyze & Repair":
+        "Analysieren & reparieren",
+    "Analyzes every failed service (journal, exit status, unit type), applies safe fixes automatically (reload, reset, create missing users/directories, restart) and reports what could not be fixed. Display manager, login and D-Bus services are never restarted.":
+        "Analysiert jeden fehlgeschlagenen Dienst (Journal, Exit-Status, Unit-Typ), wendet sichere Reparaturen automatisch an (Neuladen, Zurücksetzen, fehlende Benutzer/Verzeichnisse anlegen, Neustart) und meldet, was sich nicht beheben liess. Anmeldemanager, Login- und D-Bus-Dienste werden nie neu gestartet.",
+    "Currently failed: {names}":
+        "Aktuell fehlgeschlagen: {names}",
+    "Failed services: analysis & repair":
+        "Fehlgeschlagene Dienste: Analyse & Reparatur",
+    "user services":
+        "Benutzerdienste",
+    "system services":
+        "Systemdienste",
+    "No failed units.":
+        "Keine fehlgeschlagenen Units.",
+    "Last journal lines:":
+        "Letzte Journal-Zeilen:",
+    "Diagnosis:":
+        "Diagnose:",
+    "Action:":
+        "Aktion:",
+    "✓ Fixed — the unit is no longer in a failed state.":
+        "✓ Behoben — die Unit ist nicht mehr fehlgeschlagen.",
+    "✗ Not fixed — see the journal lines above; this needs a manual fix.":
+        "✗ Nicht behoben — siehe Journal-Zeilen oben; hier ist eine manuelle Korrektur nötig.",
+    "Summary":
+        "Zusammenfassung",
+    "fixed":
+        "behoben",
+    "still open":
+        "noch offen",
+    "The unit file no longer exists (leftover of a removed package).":
+        "Die Unit-Datei existiert nicht mehr (Überrest eines entfernten Pakets).",
+    "Critical session service — it is never restarted automatically.":
+        "Kritischer Sitzungsdienst — wird nie automatisch neu gestartet.",
+    "Restarted too often in a short time (start limit reached).":
+        "Zu oft in kurzer Zeit neu gestartet (Start-Limit erreicht).",
+    "The program to start is missing or not executable (exit 203/EXEC). Reinstall the package that provides this service.":
+        "Das zu startende Programm fehlt oder ist nicht ausführbar (Exit 203/EXEC). Das Paket, das diesen Dienst liefert, neu installieren.",
+    "The program cannot load a library (usually after a partial update). Reinstall the package or reboot.":
+        "Das Programm kann eine Bibliothek nicht laden (meist nach einem unvollständigen Update). Paket neu installieren oder neu starten.",
+    "The service's system user or group is missing (exit 216/217).":
+        "Der System-Benutzer oder die Gruppe des Dienstes fehlt (Exit 216/217).",
+    "A state or runtime directory is missing (exit 238).":
+        "Ein Zustands- oder Laufzeitverzeichnis fehlt (Exit 238).",
+    "The port or address is already in use by another process.":
+        "Der Port bzw. die Adresse wird bereits von einem anderen Prozess verwendet.",
+    "One-shot task that failed once.":
+        "Einmalige Aufgabe (oneshot), die einmal fehlgeschlagen ist.",
+    "The service stopped with an error.":
+        "Der Dienst wurde mit einem Fehler beendet.",
+    "On-demand service (started by D-Bus or a socket when needed) — the failure was most likely temporary.":
+        "Bedarfsdienst (wird bei Bedarf von D-Bus oder einem Socket gestartet) — der Fehler war höchstwahrscheinlich vorübergehend.",
+    "Resetting the failed state.":
+        "Fehlerzustand wird zurückgesetzt.",
+    "Restarting the service.":
+        "Dienst wird neu gestartet.",
+    "Creating missing system users (systemd-sysusers), then restarting.":
+        "Fehlende Systembenutzer werden angelegt (systemd-sysusers), danach Neustart.",
+    "Creating missing directories (systemd-tmpfiles), then restarting.":
+        "Fehlende Verzeichnisse werden angelegt (systemd-tmpfiles), danach Neustart.",
+    "No safe automatic repair possible.":
+        "Keine sichere automatische Reparatur möglich.",
 
     # Stale pacman database lock (db.lck) handling
     "Pacman database is locked (stale db.lck)": "Pacman-Datenbank ist gesperrt (veraltete db.lck)",
@@ -1955,6 +2022,73 @@ STRINGS_FR = {
     "Signature check failed — the keyring may be outdated":
         "Échec de la vérification de signature — le trousseau de clés est peut-être obsolète",
     "Update Keyring & Retry": "Mettre à jour le trousseau et réessayer",
+    "Missing PGP key {id} found — importing it into your GPG keyring and retrying automatically …\n":
+        "Clé PGP manquante {id} détectée — importation dans votre trousseau GPG, puis nouvelle tentative automatique …\n",
+
+    "Analyze & Repair Failed Services":
+        "Analyser et réparer les services en échec",
+    "Analyze & Repair":
+        "Analyser et réparer",
+    "Analyzes every failed service (journal, exit status, unit type), applies safe fixes automatically (reload, reset, create missing users/directories, restart) and reports what could not be fixed. Display manager, login and D-Bus services are never restarted.":
+        "Analyse chaque service en échec (journal, code de sortie, type d'unité), applique automatiquement les réparations sûres (rechargement, réinitialisation, création des utilisateurs/répertoires manquants, redémarrage) et signale ce qui n'a pas pu être corrigé. Le gestionnaire de connexion, le login et les services D-Bus ne sont jamais redémarrés.",
+    "Currently failed: {names}":
+        "Actuellement en échec : {names}",
+    "Failed services: analysis & repair":
+        "Services en échec : analyse et réparation",
+    "user services":
+        "services utilisateur",
+    "system services":
+        "services système",
+    "No failed units.":
+        "Aucune unité en échec.",
+    "Last journal lines:":
+        "Dernières lignes du journal :",
+    "Diagnosis:":
+        "Diagnostic :",
+    "Action:":
+        "Action :",
+    "✓ Fixed — the unit is no longer in a failed state.":
+        "✓ Corrigé — l'unité n'est plus en échec.",
+    "✗ Not fixed — see the journal lines above; this needs a manual fix.":
+        "✗ Non corrigé — voir les lignes du journal ci-dessus ; une correction manuelle est nécessaire.",
+    "Summary":
+        "Résumé",
+    "fixed":
+        "corrigé(s)",
+    "still open":
+        "encore ouvert(s)",
+    "The unit file no longer exists (leftover of a removed package).":
+        "Le fichier d'unité n'existe plus (reste d'un paquet supprimé).",
+    "Critical session service — it is never restarted automatically.":
+        "Service de session critique — jamais redémarré automatiquement.",
+    "Restarted too often in a short time (start limit reached).":
+        "Redémarré trop souvent en peu de temps (limite de démarrage atteinte).",
+    "The program to start is missing or not executable (exit 203/EXEC). Reinstall the package that provides this service.":
+        "Le programme à lancer est absent ou non exécutable (code 203/EXEC). Réinstallez le paquet fournissant ce service.",
+    "The program cannot load a library (usually after a partial update). Reinstall the package or reboot.":
+        "Le programme ne peut pas charger une bibliothèque (souvent après une mise à jour partielle). Réinstallez le paquet ou redémarrez.",
+    "The service's system user or group is missing (exit 216/217).":
+        "L'utilisateur ou le groupe système du service est absent (code 216/217).",
+    "A state or runtime directory is missing (exit 238).":
+        "Un répertoire d'état ou d'exécution est absent (code 238).",
+    "The port or address is already in use by another process.":
+        "Le port ou l'adresse est déjà utilisé par un autre processus.",
+    "One-shot task that failed once.":
+        "Tâche ponctuelle (oneshot) qui a échoué une fois.",
+    "The service stopped with an error.":
+        "Le service s'est arrêté avec une erreur.",
+    "On-demand service (started by D-Bus or a socket when needed) — the failure was most likely temporary.":
+        "Service à la demande (lancé par D-Bus ou un socket au besoin) — l'échec était très probablement temporaire.",
+    "Resetting the failed state.":
+        "Réinitialisation de l'état d'échec.",
+    "Restarting the service.":
+        "Redémarrage du service.",
+    "Creating missing system users (systemd-sysusers), then restarting.":
+        "Création des utilisateurs système manquants (systemd-sysusers), puis redémarrage.",
+    "Creating missing directories (systemd-tmpfiles), then restarting.":
+        "Création des répertoires manquants (systemd-tmpfiles), puis redémarrage.",
+    "No safe automatic repair possible.":
+        "Aucune réparation automatique sûre possible.",
 
     # Verrou de base de données pacman obsolète (db.lck)
     "Pacman database is locked (stale db.lck)": "La base de données pacman est verrouillée (db.lck obsolète)",
@@ -2892,6 +3026,73 @@ STRINGS_IT = {
     "Signature check failed — the keyring may be outdated":
         "Verifica della firma non riuscita — il portachiavi potrebbe non essere aggiornato",
     "Update Keyring & Retry": "Aggiorna portachiavi e riprova",
+    "Missing PGP key {id} found — importing it into your GPG keyring and retrying automatically …\n":
+        "Chiave PGP mancante {id} rilevata — importazione nel tuo portachiavi GPG, poi nuovo tentativo automatico …\n",
+
+    "Analyze & Repair Failed Services":
+        "Analizza e ripara i servizi falliti",
+    "Analyze & Repair":
+        "Analizza e ripara",
+    "Analyzes every failed service (journal, exit status, unit type), applies safe fixes automatically (reload, reset, create missing users/directories, restart) and reports what could not be fixed. Display manager, login and D-Bus services are never restarted.":
+        "Analizza ogni servizio fallito (journal, codice di uscita, tipo di unità), applica automaticamente le riparazioni sicure (ricaricamento, reset, creazione di utenti/directory mancanti, riavvio) e segnala ciò che non è stato possibile correggere. Display manager, login e servizi D-Bus non vengono mai riavviati.",
+    "Currently failed: {names}":
+        "Attualmente falliti: {names}",
+    "Failed services: analysis & repair":
+        "Servizi falliti: analisi e riparazione",
+    "user services":
+        "servizi utente",
+    "system services":
+        "servizi di sistema",
+    "No failed units.":
+        "Nessuna unità fallita.",
+    "Last journal lines:":
+        "Ultime righe del journal:",
+    "Diagnosis:":
+        "Diagnosi:",
+    "Action:":
+        "Azione:",
+    "✓ Fixed — the unit is no longer in a failed state.":
+        "✓ Risolto — l'unità non è più in errore.",
+    "✗ Not fixed — see the journal lines above; this needs a manual fix.":
+        "✗ Non risolto — vedi le righe del journal sopra; serve un intervento manuale.",
+    "Summary":
+        "Riepilogo",
+    "fixed":
+        "risolti",
+    "still open":
+        "ancora aperti",
+    "The unit file no longer exists (leftover of a removed package).":
+        "Il file dell'unità non esiste più (residuo di un pacchetto rimosso).",
+    "Critical session service — it is never restarted automatically.":
+        "Servizio di sessione critico — non viene mai riavviato automaticamente.",
+    "Restarted too often in a short time (start limit reached).":
+        "Riavviato troppe volte in poco tempo (limite di avvio raggiunto).",
+    "The program to start is missing or not executable (exit 203/EXEC). Reinstall the package that provides this service.":
+        "Il programma da avviare manca o non è eseguibile (codice 203/EXEC). Reinstalla il pacchetto che fornisce questo servizio.",
+    "The program cannot load a library (usually after a partial update). Reinstall the package or reboot.":
+        "Il programma non riesce a caricare una libreria (di solito dopo un aggiornamento parziale). Reinstalla il pacchetto o riavvia.",
+    "The service's system user or group is missing (exit 216/217).":
+        "Manca l'utente o il gruppo di sistema del servizio (codice 216/217).",
+    "A state or runtime directory is missing (exit 238).":
+        "Manca una directory di stato o di runtime (codice 238).",
+    "The port or address is already in use by another process.":
+        "La porta o l'indirizzo è già usato da un altro processo.",
+    "One-shot task that failed once.":
+        "Attività singola (oneshot) fallita una volta.",
+    "The service stopped with an error.":
+        "Il servizio si è arrestato con un errore.",
+    "On-demand service (started by D-Bus or a socket when needed) — the failure was most likely temporary.":
+        "Servizio on-demand (avviato da D-Bus o da un socket quando serve) — l'errore era molto probabilmente temporaneo.",
+    "Resetting the failed state.":
+        "Ripristino dello stato di errore.",
+    "Restarting the service.":
+        "Riavvio del servizio.",
+    "Creating missing system users (systemd-sysusers), then restarting.":
+        "Creazione degli utenti di sistema mancanti (systemd-sysusers), poi riavvio.",
+    "Creating missing directories (systemd-tmpfiles), then restarting.":
+        "Creazione delle directory mancanti (systemd-tmpfiles), poi riavvio.",
+    "No safe automatic repair possible.":
+        "Nessuna riparazione automatica sicura possibile.",
 
     # Blocco obsoleto del database pacman (db.lck)
     "Pacman database is locked (stale db.lck)": "Il database di pacman è bloccato (db.lck obsoleto)",

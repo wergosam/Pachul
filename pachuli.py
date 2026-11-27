@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.1.3"
+VERSION = "2.1.4"
 AUR_ADDR = "https://aur.archlinux.org"
 DEFAULT_BUILD_DIR = Path(
     os.environ.get("PACHULI_BUILDDIR", Path.home() / ".cache" / "pachuli" / "builds")
@@ -829,24 +829,80 @@ class Pachuli:
 
     # -- PGP-Schlüssel -------------------------------------------------
 
-    def import_keys(self, keys: list[str]) -> None:
+    # Keyserver in der Reihenfolge, in der sie versucht werden
+    KEYSERVERS = ("keyserver.ubuntu.com", "keys.openpgp.org", "pgp.mit.edu")
+
+    @staticmethod
+    def _have_gpg_key(key: str) -> bool:
+        """True, wenn der Schlüssel (Fingerabdruck, Lang-ID oder Subkey-ID)
+        bereits im GPG-Schlüsselbund des aktuellen Benutzers liegt."""
+        r = subprocess.run(
+            ["gpg", "--batch", "--list-keys", "--with-colons", key],
+            capture_output=True,
+        )
+        return r.returncode == 0
+
+    def import_keys(self, keys: list[str]) -> bool:
+        """Importiert fehlende Quell-Signaturschlüssel in den GPG-Schlüsselbund
+        des BENUTZERS (~/.gnupg) - genau dort prüft makepkg die Signaturen
+        der Quelldateien. (Der frühere Import über `pacman-key` landete im
+        Schlüsselbund von pacman, den makepkg dafür gar nicht liest, sodass
+        'Unbekannter öffentlicher Schlüssel' trotz Import bestehen blieb.)
+        Gibt True zurück, wenn danach alle genannten Schlüssel vorhanden sind."""
+        if not shutil.which("gpg"):
+            msg("gpg nicht gefunden - PGP-Schlüssel können nicht importiert "
+                "werden", Colors.YELLOW, self.opts.quiet)
+            return False
+        all_ok = True
         for key in keys:
             key = key.strip()
-            if not key:
-                continue
-            check = subprocess.run(
-                ["pacman-key", "--list-keys"], capture_output=True, text=True
-            )
-            if key in check.stdout:
+            if not key or self._have_gpg_key(key):
                 continue
             msg(f"Resolving missing pgp key: {key}", Colors.YELLOW, self.opts.quiet)
-            ok = (
-                escalate(["pacman-key", "--recv-keys", key], self.opts).returncode == 0
-                and escalate(["pacman-key", "--finger", key], self.opts).returncode == 0
-                and escalate(["pacman-key", "--lsign-key", key], self.opts).returncode == 0
-            )
-            if not ok:
-                msg("Failed to import pgp key, continuing anyway", Colors.YELLOW, self.opts.quiet)
+            ok = False
+            for attempt in range(2):
+                for server in self.KEYSERVERS:
+                    subprocess.run(
+                        ["gpg", "--batch", "--keyserver", server,
+                         "--recv-keys", key],
+                        capture_output=True, text=True,
+                    )
+                    if self._have_gpg_key(key):
+                        ok = True
+                        break
+                if ok:
+                    break
+                # Ein hängender dirmngr ist die häufigste Ursache für
+                # fehlschlagende Keyserver-Abfragen - neu starten, nochmal.
+                subprocess.run(["gpgconf", "--kill", "dirmngr"],
+                               capture_output=True)
+            if ok:
+                msg(f"PGP key imported: {key}", Colors.GREEN, self.opts.quiet)
+            else:
+                all_ok = False
+                msg(f"Failed to import pgp key {key}, continuing anyway",
+                    Colors.YELLOW, self.opts.quiet)
+        return all_ok
+
+    def _missing_source_keys(self, pkg_dir: Path) -> list[str]:
+        """Ermittelt nach einem fehlgeschlagenen Build, welche Signaturschlüssel
+        makepkg vermisst, auch solche, die NICHT in validpgpkeys stehen bzw.
+        als Subkey-ID gemeldet werden. Läuft mit LC_ALL=C, damit die Meldung
+        ('unknown public key <ID>') unabhängig von der Systemsprache ist.
+        Die Quellen liegen nach dem Build-Versuch schon im Cache, es wird
+        also nichts erneut heruntergeladen."""
+        env = dict(os.environ, LC_ALL="C", LANG="C")
+        r = subprocess.run(
+            ["makepkg", "--verifysource", "--nocolor"],
+            cwd=pkg_dir, capture_output=True, text=True, env=env,
+        )
+        found: list[str] = []
+        for m in re.finditer(r"unknown public key\s+([0-9A-Fa-f]{8,40})",
+                             r.stdout + r.stderr):
+            k = m.group(1).upper()
+            if k not in found:
+                found.append(k)
+        return found
 
     # -- Abhängigkeiten --------------------------------------------------
 
@@ -922,6 +978,15 @@ class Pachuli:
             # Reste von vorherigen fehlgeschlagenen oder alten Builds).
             makepkg_cmd.append("-C")
         result = subprocess.run(makepkg_cmd, cwd=pkg_dir)
+        if result.returncode != 0:
+            # Fehlender PGP-Schlüssel? Dann gezielt importieren und den Build
+            # genau einmal wiederholen, bevor der Clean-Build-Fallback greift.
+            missing = self._missing_source_keys(pkg_dir)
+            if missing:
+                msg("Fehlende PGP-Schlüssel erkannt: " + ", ".join(missing),
+                    Colors.YELLOW, self.opts.quiet)
+                if self.import_keys(missing):
+                    result = subprocess.run(makepkg_cmd, cwd=pkg_dir)
         if result.returncode != 0:
             if self.opts.cleanbuild:
                 # Schon mit -C gebaut und trotzdem fehlgeschlagen - ein
